@@ -25,11 +25,41 @@ CueSync is a native macOS app that imports cue points from DJ software and expor
 ## Features
 
 ### Import Sources
-| Source | Format | Notes |
-|--------|--------|-------|
-| **Rekordbox** | XML library export | Memory cues, hot cues, loops |
-| **Serato DJ** | Library files | ID3 GEOB tag parsing |
-| **Engine DJ** | Database | Direct SQLite read |
+
+#### Rekordbox
+| Item | Details |
+|------|---------|
+| **Format** | XML library export |
+| **How to export** | Rekordbox → File → Export Collection in xml format |
+| **Default location** | User-selected (no fixed path) |
+| **What's imported** | Memory cues, hot cues, loops with labels and colors |
+
+#### Serato DJ
+| Item | Details |
+|------|---------|
+| **Format** | ID3 GEOB tags embedded in audio files |
+| **Library location** | `~/Music/_Serato_/` |
+| **Database files** | `~/Music/_Serato_/Serato DJ Pro/History/` (session history) |
+| **Crate files** | `~/Music/_Serato_/Subcrates/*.crate` |
+| **How it works** | Serato stores cue points directly in MP3/FLAC/etc files as ID3v2 GEOB (General Encapsulated Object) tags. CueSync reads the `Serato Markers2` tag from each audio file. |
+| **What's imported** | Hot cues (up to 8), loops, saved loops, track color |
+
+> **Note:** Serato doesn't use a central database for cue points — they travel with the audio files. Point CueSync at a folder of tracks, and it reads each file's embedded markers.
+
+#### Engine DJ (Denon)
+| Item | Details |
+|------|---------|
+| **Format** | SQLite database |
+| **Library location** | `~/Music/Engine Library/` |
+| **Database file** | `~/Music/Engine Library/Database2/m.db` |
+| **USB/SD export** | `[USB]/Engine Library/Database2/m.db` |
+| **Tables used** | `Track`, `CuePoint`, `Loop`, `Playlist`, `PlaylistTrack` |
+| **How it works** | CueSync reads the `m.db` SQLite database directly. For USB drives prepared with Engine DJ Desktop, the database is at the drive root under `Engine Library/`. |
+| **What's imported** | Hot cues (up to 8), memory cues, loops, track metadata |
+
+> **Engine DJ versions:** The `Database2/m.db` path applies to Engine DJ 2.x and later. Older Engine Prime used `Database/m.db`. CueSync checks both locations.
+
+---
 
 ### Export Targets
 | Target | Format | Notes |
@@ -77,9 +107,16 @@ CueSync supports all 23 Resolume envelope curve types:
 2. In CueSync: Click **Browse** → select your `.xml` file
 3. Your tracks and cue points appear in the list
 
-**Serato / Engine DJ:**
-- Point CueSync at your Serato or Engine DJ library folder
-- Tracks are read directly from the database
+**Serato DJ:**
+1. In CueSync: Click **Browse** → navigate to `~/Music/_Serato_/` or select a folder of tracks
+2. CueSync scans audio files for embedded Serato markers
+3. Tracks with cue points appear in the list
+
+**Engine DJ:**
+1. In CueSync: Click **Browse** → navigate to `~/Music/Engine Library/`
+   - Or select a USB/SD card with Engine DJ export at its root
+2. CueSync reads the `Database2/m.db` SQLite file
+3. All tracks with cue points appear in the list
 
 ### 2. Configure Mapping
 
@@ -121,7 +158,8 @@ CueSync supports all 23 Resolume envelope curve types:
 00:03:30:00	CUE3	Breakdown
 ```
 - Timecode at 30fps
-- `\r` line endings (macOS Classic format)
+- Tab-separated fields
+- `\r` line endings (macOS Classic format — required by ShowKontrol)
 
 ### Project (`.cueproj`)
 CueSync saves your work as `.cueproj` files (JSON format). These store:
@@ -147,6 +185,24 @@ CueSync saves your work as `.cueproj` files (JSON format). These store:
 3. Import into ShowKontrol timeline
 4. Map cues to DMX fixtures
 5. Lights follow your track structure
+
+---
+
+## Troubleshooting
+
+### Serato: "No cue points found"
+- Serato stores cues in the audio files themselves, not a database
+- Make sure you're pointing at the actual audio files, not the `_Serato_` folder
+- Re-analyze tracks in Serato DJ Pro to ensure cues are saved
+
+### Engine DJ: "Database not found"
+- Check for `Database2/m.db` inside `Engine Library/`
+- Older Engine Prime versions use `Database/m.db` — CueSync checks both
+- For USB drives: the `Engine Library/` folder must be at the drive root
+
+### Rekordbox: "Invalid XML"
+- Use File → Export Collection in xml format (not "Export playlist")
+- Ensure the XML file is complete (not truncated mid-export)
 
 ---
 
