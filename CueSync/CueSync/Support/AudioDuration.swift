@@ -21,6 +21,15 @@ enum AudioDuration {
         }
     }
 
+    /// A duration derived from attacker-controlled header fields can overflow to a
+    /// non-finite value even when every input guard passes — e.g. a maxed frame
+    /// count divided by a legal-but-vanishingly-small sample rate. A non-finite
+    /// duration must never escape the parser (it would trap an `Int(...)` downstream),
+    /// so any such result fails closed to `nil`.
+    private static func finiteOrNil(_ value: Double) -> Double? {
+        value.isFinite ? value : nil
+    }
+
     // MARK: - WAV (RIFF)
 
     private static func wavDuration(url: URL) -> Double? {
@@ -52,7 +61,7 @@ enum AudioDuration {
         }
 
         guard let rate = byteRate, rate > 0, let size = dataSize else { return nil }
-        return Double(size) / Double(rate)
+        return finiteOrNil(Double(size) / Double(rate))
     }
 
     // MARK: - AIFF (FORM)
@@ -78,7 +87,9 @@ enum AudioDuration {
                 let numSampleFrames = readBE32(bytes, chunkDataStart + 2)
                 let sampleRateBytes = Array(bytes[(chunkDataStart + 8)..<(chunkDataStart + 18)])
                 guard let sampleRate = parseExtended80(sampleRateBytes), sampleRate > 0 else { return nil }
-                return Double(numSampleFrames) / sampleRate
+                // The quotient can overflow to +Inf for a maxed frame count over a
+                // legal-but-tiny rate — fail closed rather than surface a non-finite duration.
+                return finiteOrNil(Double(numSampleFrames) / sampleRate)
             }
             // AIFF chunks are padded to an even byte boundary.
             pos = chunkDataStart + chunkSize + (chunkSize % 2)
@@ -121,7 +132,7 @@ enum AudioDuration {
         guard let audioFile = try? AVAudioFile(forReading: url) else { return nil }
         let sampleRate = audioFile.processingFormat.sampleRate
         guard sampleRate > 0 else { return nil }
-        return Double(audioFile.length) / sampleRate
+        return finiteOrNil(Double(audioFile.length) / sampleRate)
     }
     #endif
 }
