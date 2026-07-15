@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 /// A button style that provides hover state tracking for custom hover effects.
@@ -130,3 +131,4 @@ struct HoverButton: View {
         border
     }
 }
+#endif

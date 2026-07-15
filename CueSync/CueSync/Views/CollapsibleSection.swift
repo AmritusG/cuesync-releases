@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct CollapsibleSection<Content: View, Trailing: View>: View {
@@ -187,3 +188,4 @@ struct CollapsibleSection<Content: View, Trailing: View>: View {
         state.savePreferences()
     }
 }
+#endif

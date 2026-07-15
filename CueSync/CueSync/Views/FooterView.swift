@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct FooterView: View {
@@ -39,3 +40,4 @@ struct FooterView: View {
         }
     }
 }
+#endif

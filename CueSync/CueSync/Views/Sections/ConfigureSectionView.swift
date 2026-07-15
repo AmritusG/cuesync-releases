@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
@@ -409,3 +410,4 @@ private struct OffsetToolInline: View {
         }
     }
 }
+#endif
