@@ -1,9 +1,8 @@
 import Foundation
 #if canImport(SQLite3)
 import SQLite3
-#endif
-#if canImport(Compression)
-import Compression
+#else
+import CSQLite
 #endif
 
 enum EngineDJParser {
@@ -18,7 +17,6 @@ enum EngineDJParser {
 
     /// Parse an Engine DJ SQLite database and return all tracks with their cue points.
     static func parse(databaseURL: URL) throws -> [Track] {
-        #if canImport(SQLite3)
         guard FileManager.default.fileExists(atPath: databaseURL.path) else {
             throw ParseError.invalidFormat("Engine DJ database not found at \(databaseURL.path)")
         }
@@ -55,15 +53,9 @@ enum EngineDJParser {
         try loadCuePoints(into: &tracks, lookup: trackIndexByEngineId, from: db)
 
         return tracks
-        #else
-        // TODO: switch to the vendored CSQLite target so this path works on
-        // Windows/Linux too (tracked as a later port step).
-        throw ParseError.invalidFormat("Engine DJ import is not yet supported on this platform")
-        #endif
     }
 
     // MARK: - Track Loading
-    #if canImport(SQLite3)
 
     private static func loadTracks(from db: OpaquePointer) throws -> [Track] {
         let sql = "SELECT id, title, artist, album, genre, length, bpmAnalyzed, key, path, filename FROM Track"
@@ -78,15 +70,15 @@ enum EngineDJParser {
 
         while sqlite3_step(stmt) == SQLITE_ROW {
             let rowId = sqlite3_column_int64(stmt, 0)
-            let title = columnText(stmt, 1)
-            let artist = columnText(stmt, 2)
-            let album = columnText(stmt, 3)
-            let genre = columnText(stmt, 4)
+            let title = SQLiteSupport.columnText(stmt, 1)
+            let artist = SQLiteSupport.columnText(stmt, 2)
+            let album = SQLiteSupport.columnText(stmt, 3)
+            let genre = SQLiteSupport.columnText(stmt, 4)
             let length = Int(sqlite3_column_int(stmt, 5))
             let bpm = sqlite3_column_double(stmt, 6)
             let keyCode = Int(sqlite3_column_int(stmt, 7))
-            let path = columnText(stmt, 8)
-            let filename = columnText(stmt, 9)
+            let path = SQLiteSupport.columnText(stmt, 8)
+            let filename = SQLiteSupport.columnText(stmt, 9)
 
             let trackName: String
             if !title.isEmpty {
@@ -149,7 +141,6 @@ enum EngineDJParser {
             }
         }
     }
-    #endif
 
     // MARK: - BLOB Parsing
 
@@ -165,11 +156,16 @@ enum EngineDJParser {
             buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian
         }
 
+        // Decompression-bomb guard (threat model §4): this size comes from the
+        // untrusted blob itself and must never be trusted unbounded.
         guard uncompressedSize > 0, uncompressedSize < 1_000_000 else { return nil }
 
-        // Decompress zlib data
+        // Decompress raw-DEFLATE data via the cross-platform Support/Zlib helper
+        // (Apple Compression on Darwin, vendored CZlib elsewhere). The cap is the
+        // declared size plus slack, never the compressed length, so a hostile
+        // blob can't drive an allocation larger than the sanity gate above allows.
         let compressed = data.subdata(in: 4..<data.count)
-        guard let decompressed = zlibDecompress(compressed, expectedSize: Int(uncompressedSize)) else {
+        guard let decompressed = Zlib.inflate(compressed, cap: Int(uncompressedSize) + 256) else {
             return nil
         }
 
@@ -233,36 +229,6 @@ enum EngineDJParser {
         return cuePoints
     }
 
-    // MARK: - Zlib Decompression
-
-    private static func zlibDecompress(_ compressed: Data, expectedSize: Int) -> Data? {
-        #if canImport(Compression)
-        // Use Apple's Compression framework with ZLIB algorithm
-        let bufferSize = max(expectedSize + 256, compressed.count * 4)
-        let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { destinationBuffer.deallocate() }
-
-        let decompressedSize = compressed.withUnsafeBytes { srcBuf -> Int in
-            guard let srcBase = srcBuf.baseAddress?.bindMemory(to: UInt8.self, capacity: compressed.count) else {
-                return 0
-            }
-            return compression_decode_buffer(
-                destinationBuffer, bufferSize,
-                srcBase, compressed.count,
-                nil,
-                COMPRESSION_ZLIB
-            )
-        }
-
-        guard decompressedSize > 0 else { return nil }
-        return Data(bytes: destinationBuffer, count: decompressedSize)
-        #else
-        // TODO: switch to the vendored CZlib target so this path works on
-        // Windows/Linux too (tracked as a later port step).
-        return nil
-        #endif
-    }
-
     // MARK: - Binary Helpers
 
     private static func readBigEndianFloat64(_ bytes: [UInt8], offset: Int) -> Double {
@@ -273,12 +239,6 @@ enum EngineDJParser {
         return Double(bitPattern: value)
     }
 
-    #if canImport(SQLite3)
-    private static func columnText(_ stmt: OpaquePointer?, _ col: Int32) -> String {
-        guard let cStr = sqlite3_column_text(stmt, col) else { return "" }
-        return String(cString: cStr)
-    }
-
     private static func verifyTable(_ name: String, in db: OpaquePointer) throws {
         let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
         var stmt: OpaquePointer?
@@ -287,13 +247,12 @@ enum EngineDJParser {
         }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_text(stmt, 1, name, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT)
 
         guard sqlite3_step(stmt) == SQLITE_ROW else {
             throw ParseError.invalidFormat("Engine DJ database is missing the \(name) table")
         }
     }
-    #endif
 
     // MARK: - Engine DJ Cue Colors
 

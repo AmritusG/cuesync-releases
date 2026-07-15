@@ -8,8 +8,6 @@ final class EngineDJParserTests: XCTestCase {
         XCTAssertThrowsError(try EngineDJParser.parse(databaseURL: dir.appendingPathComponent("does-not-exist.db")))
     }
 
-    #if canImport(SQLite3)
-
     func testTwoTracksLoadWithTitleFallbackAndKeyMapping() throws {
         let dir = Scratch.makeDirectory("enginedj-good")
         let url = dir.appendingPathComponent("engine-good.db")
@@ -90,16 +88,4 @@ final class EngineDJParserTests: XCTestCase {
         XCTAssertFalse(tracks.isEmpty)
         for t in tracks { XCTAssertTrue(t.cuePoints.isEmpty) }
     }
-
-    #else
-
-    /// On a platform where SQLite3 is unavailable (no vendored CSQLite yet — spec item
-    /// B.7 / A.2), the parser must fail closed with a clear error instead of crashing or
-    /// silently returning an empty result that looks like "no cues found".
-    func testParseFailsClosedWhenSQLite3IsUnavailable() {
-        let dir = Scratch.makeDirectory("enginedj-nosqlite")
-        XCTAssertThrowsError(try EngineDJParser.parse(databaseURL: dir.appendingPathComponent("m.db")))
-    }
-
-    #endif
 }

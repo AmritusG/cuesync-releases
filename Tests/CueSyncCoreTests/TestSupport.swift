@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import CZlib
 @testable import CueSyncCore
 
 // Shared helpers for the CueSyncCoreTests target. Everything here must stay
@@ -81,6 +82,44 @@ extension XCTestCase {
     func assertApproxEqual(_ a: Double, _ b: Double, tolerance: Double = 0.01,
                            _ message: String = "", file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(abs(a - b) <= tolerance, "\(message) (got \(a), expected ~\(b))", file: file, line: line)
+    }
+}
+
+// MARK: - Raw-DEFLATE test fixtures (vendored CZlib — available on every platform)
+
+enum ZlibFixtures {
+    /// Raw DEFLATE (no zlib/gzip header, windowBits = -15) via the vendored CZlib,
+    /// symmetric with `Support/Zlib.inflate`'s vendored decode path. Used to build
+    /// realistic compressed test payloads (Engine DJ `quickCues` blobs, zlib parity)
+    /// without depending on an Apple-only encoder.
+    static func rawDeflate(_ input: [UInt8]) -> [UInt8] {
+        var stream = z_stream()
+        guard CZlib.deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
+                                   Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK
+        else { return [] }
+        defer { CZlib.deflateEnd(&stream) }
+
+        var output = [UInt8]()
+        let chunkSize = 4096
+        var chunk = [UInt8](repeating: 0, count: chunkSize)
+        var src = input
+
+        src.withUnsafeMutableBufferPointer { srcBuf in
+            stream.next_in = srcBuf.baseAddress
+            stream.avail_in = UInt32(srcBuf.count)
+            var status: Int32 = Z_OK
+            repeat {
+                status = chunk.withUnsafeMutableBufferPointer { chunkBuf -> Int32 in
+                    stream.next_out = chunkBuf.baseAddress
+                    stream.avail_out = UInt32(chunkSize)
+                    let r = CZlib.deflate(&stream, Z_FINISH)
+                    let producedCount = chunkSize - Int(stream.avail_out)
+                    if producedCount > 0 { output.append(contentsOf: chunkBuf.prefix(producedCount)) }
+                    return r
+                }
+            } while status != Z_STREAM_END && status == Z_OK
+        }
+        return output
     }
 }
 

@@ -2,14 +2,17 @@ import Foundation
 import XCTest
 #if canImport(SQLite3)
 import SQLite3
+#else
+import CSQLite
 #endif
 
 // Builds Engine DJ SQLite fixtures in-process via the SQLite3 C API (parameterised
 // inserts, no string-built SQL) instead of shelling out to the `sqlite3` CLI, so the
 // test target is self-contained on windows-latest, which has no `sqlite3` binary on
-// PATH by default (spec item E.28).
+// PATH by default (spec item E.28). SQLite is always available — Apple's system
+// module on Darwin, the vendored CSQLite target everywhere else — so these fixtures
+// compile and run identically on every platform.
 enum EngineDJFixtures {
-    #if canImport(SQLite3)
 
     private static let trackDDL =
         "CREATE TABLE Track(id INTEGER PRIMARY KEY, title TEXT, artist TEXT, album TEXT, genre TEXT, length INTEGER, bpmAnalyzed REAL, key INTEGER, path TEXT, filename TEXT);"
@@ -122,6 +125,4 @@ enum EngineDJFixtures {
         var rng = XorShift64(seed: 0xC0FF_EE00)
         try? Data(rng.bytes(64)).write(to: url)
     }
-
-    #endif
 }

@@ -41,6 +41,8 @@
 		A10001000000000000000033 /* BrandIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002000000000000000033 /* BrandIcons.swift */; };
 		A10001000000000000000034 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = A10002000000000000000034 /* AppIcon.icns */; };
 		A10001000000000000000035 /* NonSelectingTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002000000000000000035 /* NonSelectingTextField.swift */; };
+		A10001000000000000000036 /* SQLite.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002000000000000000036 /* SQLite.swift */; };
+		A10001000000000000000037 /* Zlib.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002000000000000000037 /* Zlib.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -75,6 +77,8 @@
 		A10002000000000000000019 /* ThemeColors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeColors.swift; sourceTree = "<group>"; };
 		A1000200000000000000001A /* FileDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileDialogs.swift; sourceTree = "<group>"; };
 		A10002000000000000000035 /* NonSelectingTextField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NonSelectingTextField.swift; sourceTree = "<group>"; };
+		A10002000000000000000036 /* SQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLite.swift; sourceTree = "<group>"; };
+		A10002000000000000000037 /* Zlib.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Zlib.swift; sourceTree = "<group>"; };
 		A1000200000000000000001B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000200000000000000001C /* CueSync.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CueSync.entitlements; sourceTree = "<group>"; };
 		A10002000000000000000033 /* BrandIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandIcons.swift; sourceTree = "<group>"; };
@@ -119,6 +123,7 @@
 				A10005000000000000000008 /* Views */,
 				A10005000000000000000009 /* Theme */,
 				A1000500000000000000000A /* Utilities */,
+				A1000500000000000000000D /* Support */,
 				A1000500000000000000000B /* Resources */,
 			);
 			path = CueSync;
@@ -211,6 +216,15 @@
 				A10002000000000000000035 /* NonSelectingTextField.swift */,
 			);
 			path = Utilities;
+			sourceTree = "<group>";
+		};
+		A1000500000000000000000D /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				A10002000000000000000036 /* SQLite.swift */,
+				A10002000000000000000037 /* Zlib.swift */,
+			);
+			path = Support;
 			sourceTree = "<group>";
 		};
 		A1000500000000000000000B /* Resources */ = {
@@ -325,6 +339,8 @@
 				A1000100000000000000001A /* FileDialogs.swift in Sources */,
 				A10001000000000000000033 /* BrandIcons.swift in Sources */,
 				A10001000000000000000035 /* NonSelectingTextField.swift in Sources */,
+				A10001000000000000000036 /* SQLite.swift in Sources */,
+				A10001000000000000000037 /* Zlib.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

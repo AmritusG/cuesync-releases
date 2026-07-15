@@ -28,7 +28,7 @@ enum ResolumeExporter {
         envPoints.sort { $0.x < $1.x }
 
         let uniqueId = "\(Int(Date().timeIntervalSince1970 * 1000))"
-        let escapedName = escapeXml(presetName)
+        let escapedName = escapeXml(stripIllegalXmlScalars(presetName))
 
         var xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
         xml += "<Preset name=\"\(escapedName)\" uniqueId=\"MOD_ENVELOPE\" className=\"Envelope\" default=\"0\">\n"
@@ -52,6 +52,27 @@ enum ResolumeExporter {
         xml += "</Preset>"
 
         return xml
+    }
+
+    /// The preset name is untrusted (it can come from a hostile `.cueproj` or an
+    /// imported track title). `escapeXml` only escapes the five XML metacharacters,
+    /// but XML 1.0 also forbids most C0 control bytes outright — they have no valid
+    /// character reference, so leaving one in would make `ResolumeParser` (and
+    /// Resolume itself) reject the document. Keep only the XML 1.0 `Char` set
+    /// (U+0009, U+000A, U+000D, U+0020–U+D7FF, U+E000–U+FFFD, U+10000–U+10FFFF) and
+    /// drop everything else; legal Unicode (accents, emoji) passes through untouched.
+    private static func stripIllegalXmlScalars(_ str: String) -> String {
+        String(String.UnicodeScalarView(str.unicodeScalars.filter(isLegalXmlScalar)))
+    }
+
+    private static func isLegalXmlScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x9, 0xA, 0xD: return true
+        case 0x20...0xD7FF: return true
+        case 0xE000...0xFFFD: return true
+        case 0x10000...0x10FFFF: return true
+        default: return false
+        }
     }
 
     private static func escapeXml(_ str: String) -> String {

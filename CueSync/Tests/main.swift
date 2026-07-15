@@ -1,19 +1,9 @@
 import Foundation
 import Dispatch
 
-// Shim: ParseError lives in App/AppState.swift which depends on SwiftUI and is
-// not part of the standalone test build. Definition mirrors AppState.swift.
-enum ParseError: LocalizedError {
-    case invalidFormat(String)
-    case noData
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidFormat(let msg): return msg
-        case .noData: return "No data found in file"
-        }
-    }
-}
+// ParseError now lives in Models/ParseError.swift (Foundation-only, compiled into
+// this standalone build via SRC in run-tests.sh) rather than App/AppState.swift, so
+// it no longer needs a shim redeclaration here.
 
 // MARK: - Micro test framework
 

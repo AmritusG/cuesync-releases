@@ -58,7 +58,7 @@ SQL
 head -c 64 /dev/urandom > "$FIX/engine-corrupt.db"
 
 echo "==> Compiling test binary"
-SRC=( CueSync/Models/*.swift CueSync/Parsers/*.swift CueSync/Exporters/*.swift )
+SRC=( CueSync/Models/*.swift CueSync/Parsers/*.swift CueSync/Exporters/*.swift CueSync/Support/*.swift )
 if ! swiftc -O -o "$BIN" Tests/main.swift Tests/CueSyncTests.swift "${SRC[@]}" -lsqlite3; then
   echo "COMPILE FAILED"; exit 2
 fi

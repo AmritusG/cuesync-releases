@@ -1,9 +1,6 @@
 import Foundation
 import XCTest
 @testable import CueSyncCore
-#if canImport(Compression)
-import Compression
-#endif
 
 // =============================================================================
 // Red-Team adversarial suite (CUESYNC-3).
@@ -381,12 +378,11 @@ final class AdversarialProjectJSONTests: XCTestCase {
 
 // MARK: - Engine DJ: decompressed cue-slot parsing (threat model §4 bounds)
 
-#if canImport(SQLite3) && canImport(Compression)
-
-/// These reach `parseCueSlots` through a REAL (raw-DEFLATE / COMPRESSION_ZLIB) blob —
-/// the code path the existing garbage-blob tests never exercise because their bytes
-/// fail decompression. Raw DEFLATE is exactly what Apple's `COMPRESSION_ZLIB` decoder
-/// consumes and what the vendored `inflateInit2(-15)` path must match (spec §2.B.6).
+/// These reach `parseCueSlots` through a REAL raw-DEFLATE blob — the code path the
+/// existing garbage-blob tests never exercise because their bytes fail decompression.
+/// SQLite (via CSQLite) and raw DEFLATE (via CZlib, matching the vendored
+/// `inflateInit2(-15)` path — spec §2.B.6) are both available on every platform, so
+/// this suite runs identically on macOS and Windows.
 final class AdversarialEngineDJCueSlotTests: XCTestCase {
 
     /// Big-endian float64 bit pattern, matching `EngineDJParser.readBigEndianFloat64`.
@@ -395,23 +391,11 @@ final class AdversarialEngineDJCueSlotTests: XCTestCase {
         return (0..<8).map { UInt8(truncatingIfNeeded: bits >> (8 * (7 - $0))) }
     }
 
-    /// Raw DEFLATE via Apple's Compression framework (symmetric with the parser's decoder).
-    private func rawDeflate(_ input: [UInt8]) -> [UInt8] {
-        let cap = max(64, input.count * 2 + 128)
-        var dst = [UInt8](repeating: 0, count: cap)
-        let n = dst.withUnsafeMutableBufferPointer { d in
-            input.withUnsafeBufferPointer { s in
-                compression_encode_buffer(d.baseAddress!, cap, s.baseAddress!, input.count, nil, COMPRESSION_ZLIB)
-            }
-        }
-        return Array(dst.prefix(n))
-    }
-
     /// Wrap a decompressed cue-slot payload into the Engine DJ blob layout
     /// (LE32 uncompressed size + raw-DEFLATE bytes) and load it through the parser.
     private func parseSlots(_ payload: [UInt8], _ label: String) throws -> [CuePoint] {
         let url = Scratch.makeDirectory(label).appendingPathComponent("m.db")
-        EngineDJFixtures.badBlob(at: url, declaredSize: UInt32(payload.count), compressedGarbage: rawDeflate(payload))
+        EngineDJFixtures.badBlob(at: url, declaredSize: UInt32(payload.count), compressedGarbage: ZlibFixtures.rawDeflate(payload))
         let tracks = try EngineDJParser.parse(databaseURL: url)
         XCTAssertFalse(tracks.isEmpty, "track must load")
         return tracks.first?.cuePoints ?? []
@@ -467,11 +451,11 @@ final class AdversarialEngineDJBombTests: XCTestCase {
     /// size (< 1e6) is the bomb guard; a big blob with garbage bytes must never be
     /// trusted to produce cues. (decompression bomb / fail-closed)
     ///
-    /// NOTE (residual risk surfaced by this attack): the Apple decode path sizes its
-    /// output buffer as `max(expectedSize + 256, compressed.count * 4)`, so the buffer
-    /// still scales with the attacker-controlled *compressed* length even though the
-    /// declared size is clamped — a multi-hundred-MB blob would drive a multi-GB
-    /// allocation. This test keeps the blob modest; the sizing is flagged for the port.
+    /// `Support/Zlib.inflate`'s output buffer is sized only by the (already-clamped)
+    /// declared size, never by the attacker-controlled *compressed* length — a prior
+    /// version scaled the Apple decode buffer by `compressed.count`, which would have
+    /// let a multi-hundred-MB blob drive a multi-GB allocation even with a small
+    /// declared size. This test's 2 MB blob would have exercised that path.
     func testLargeGarbageBlobWithTinyDeclaredSizeFailsClosed() throws {
         let url = Scratch.makeDirectory("engine-bomb-large").appendingPathComponent("m.db")
         let garbage = [UInt8](repeating: 0xA5, count: 2_000_000) // 2 MB of non-DEFLATE bytes
@@ -481,5 +465,3 @@ final class AdversarialEngineDJBombTests: XCTestCase {
         for t in tracks { XCTAssertTrue(t.cuePoints.isEmpty, "garbage that cannot inflate must yield no cues") }
     }
 }
-
-#endif
