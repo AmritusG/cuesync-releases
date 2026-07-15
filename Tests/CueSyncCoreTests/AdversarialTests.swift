@@ -464,4 +464,150 @@ final class AdversarialEngineDJBombTests: XCTestCase {
         XCTAssertFalse(tracks.isEmpty, "track must still load")
         for t in tracks { XCTAssertTrue(t.cuePoints.isEmpty, "garbage that cannot inflate must yield no cues") }
     }
+
+    /// The existing bomb test feeds *garbage* that never inflates, so it never exercises
+    /// the "abort a genuine stream once it blows the cap" branch. This one hands the parser
+    /// a perfectly valid raw-DEFLATE stream that expands ~3000× (300 KB from ~300 bytes)
+    /// while the blob DECLARES a 100-byte uncompressed size. The cap given to
+    /// `Zlib.inflate` is derived from that small declared size, so the honest-but-huge
+    /// stream must be aborted mid-inflate → the track loads with **no cues**, never a
+    /// multi-hundred-KB allocation driven off a lie. (decompression bomb via valid DEFLATE)
+    func testValidDeflateStreamExceedingDeclaredCapYieldsNoCues() throws {
+        let url = Scratch.makeDirectory("engine-valid-bomb").appendingPathComponent("m.db")
+        let payload = [UInt8](repeating: 0x00, count: 300_000)   // inflates far past the cap
+        let compressed = ZlibFixtures.rawDeflate(payload)
+        XCTAssertFalse(compressed.isEmpty, "vendored deflate must produce a valid stream")
+        EngineDJFixtures.badBlob(at: url, declaredSize: 100, compressedGarbage: compressed)
+        let tracks = try EngineDJParser.parse(databaseURL: url)
+        XCTAssertFalse(tracks.isEmpty, "track must still load")
+        for t in tracks {
+            XCTAssertTrue(t.cuePoints.isEmpty,
+                          "a valid DEFLATE stream that exceeds the small declared cap must abort → no cues")
+        }
+    }
+}
+
+// =============================================================================
+// Red-Team adversarial additions (CUESYNC-4).
+//
+// The port added a pure-Swift Support/ layer (AudioDuration, Hex) that now sits
+// on the untrusted-input boundary: a hostile audio file or `.cueproj` reaches it
+// directly. These tests attack the *acceptance criteria* — "parsing fails closed,
+// never crashes, never emits a value that traps a downstream consumer" (spec §4) —
+// on code paths the existing suite exercises only with well-formed input.
+// =============================================================================
+
+// MARK: - AudioDuration: non-finite / degenerate header fields (threat model §4)
+
+/// Spec §4: "Audio duration header parsing: bound every read; an unknown/oversized
+/// WAV/AIFF header field → give up gracefully and defer to the manual duration modal
+/// (return nil)." A detected duration is later used as `trackDuration`; a NON-FINITE
+/// one (NaN/Inf) flows into the envelope math and the exporters, where an `Int(...)`
+/// conversion traps. So the invariant these tests pin is: for ANY input, the returned
+/// duration is either `nil` or a finite value — never NaN/Inf.
+final class AdversarialAudioDurationTests: XCTestCase {
+
+    private func be32(_ v: UInt32) -> [UInt8] { BinaryFixtures.be32(v) }
+    private func le32(_ v: UInt32) -> [UInt8] {
+        [UInt8(truncatingIfNeeded: v), UInt8(truncatingIfNeeded: v >> 8),
+         UInt8(truncatingIfNeeded: v >> 16), UInt8(truncatingIfNeeded: v >> 24)]
+    }
+    private func write(_ bytes: [UInt8], ext: String, _ label: String) -> URL {
+        Scratch.writeFile(bytes, name: "atk.\(ext)", in: Scratch.makeDirectory(label))
+    }
+
+    /// EXPLOIT. AIFF stores its sample rate as an 80-bit IEEE-754 extended float in the
+    /// COMM chunk — an attacker-controlled 10-byte field. A crafted value decodes to a
+    /// legal, positive-but-vanishingly-small rate (~9.3e-302 here), which passes the
+    /// `sampleRate > 0` guard, and then `numSampleFrames / sampleRate` with a maxed-out
+    /// (0xFFFFFFFF) frame count OVERFLOWS to +Infinity. `aiffDuration` returns that +Inf
+    /// with no finiteness check on the quotient — a non-finite duration escapes the parser,
+    /// violating the "give up gracefully / return nil" contract. This test pins the fix
+    /// (reject a non-finite/degenerate result → nil). (numeric overflow / non-finite output)
+    func testAIFFCraftedTinySampleRateNeverReturnsNonFiniteDuration() {
+        // COMM body: numChannels(2) numSampleFrames(4) sampleSize(2) extended80 rate(10) = 18 bytes.
+        // Extended80 [0x3C,0x17,0x80,0,0,0,0,0,0,0] => exponent -1000, mantissa 2^63 => 2^-1000.
+        var comm: [UInt8] = [0x00, 0x02]                 // numChannels = 2
+        comm += be32(0xFFFF_FFFF)                        // numSampleFrames = 4_294_967_295
+        comm += [0x00, 0x10]                             // sampleSize = 16
+        comm += [0x3C, 0x17, 0x80, 0, 0, 0, 0, 0, 0, 0] // sampleRate ~= 9.3e-302
+        var aiff = Array("FORM".utf8) + be32(UInt32(4 + 8 + comm.count)) + Array("AIFF".utf8)
+        aiff += Array("COMM".utf8) + be32(UInt32(comm.count)) + comm
+
+        let duration = AudioDuration.duration(of: write(aiff, ext: "aiff", "aiff-inf-rate"))
+        if let duration {
+            XCTAssertTrue(duration.isFinite,
+                          "a crafted AIFF sample rate must not yield a non-finite (\(duration)) duration — return nil instead")
+            XCTAssertFalse(duration.isInfinite, "AIFF duration overflowed to Infinity")
+        }
+    }
+
+    /// A WAV `data` chunk that CLAIMS a size far beyond the file (here ~4 GiB in a tiny
+    /// file) must not turn into a non-finite duration. WAV uses an integer byte-rate so it
+    /// can't reach Inf, but this locks the same finiteness invariant on the RIFF path so a
+    /// future refactor can't regress it. (oversized header field / finiteness guard)
+    func testWAVLyingDataChunkSizeStaysFinite() {
+        var wav = Array("RIFF".utf8) + le32(0xFFFF_FFF0) + Array("WAVE".utf8)
+        wav += Array("fmt ".utf8) + le32(16)
+        wav += [0x01, 0x00, 0x02, 0x00]           // PCM, 2 channels
+        wav += le32(44_100)                       // sample rate
+        wav += le32(1)                            // byteRate = 1 (maximizes a lying duration)
+        wav += [0x04, 0x00, 0x10, 0x00]
+        wav += Array("data".utf8) + le32(0xFFFF_FFF0)  // claims ~4 GiB of samples
+        wav += [0x00, 0x00, 0x00, 0x00]                // but only 4 bytes present
+        let duration = AudioDuration.duration(of: write(wav, ext: "wav", "wav-lying-data"))
+        if let duration {
+            XCTAssertTrue(duration.isFinite, "WAV duration must stay finite for a lying data-chunk size")
+        }
+    }
+}
+
+// MARK: - Hex / CSS color: non-finite components from an untrusted color string
+
+/// A `CuePoint.color` is a free-form `Codable` string, so a hostile `.cueproj` can set it
+/// to anything — and every importer (Rekordbox/Serato/ShowKontrol) also stamps colors that
+/// later round-trip through a saved project. `Hex.parseCSSColor` is the cross-platform
+/// replacement for `NSColor.fromCSSString` and feeds the (future swift-cross-ui) renderer,
+/// which will convert each 0…1 component with `Int(component * 255)` / `UInt8(...)` — a
+/// conversion that TRAPS on NaN/Inf. `NSColor` absorbed such values; the pure-Swift port
+/// hands them straight through. The invariant: a parsed color component is always finite.
+final class AdversarialHexColorTests: XCTestCase {
+
+    /// EXPLOIT. `rgb(...)` parsing uses `Double(_:)`, which happily parses "nan", "inf",
+    /// and overflowing literals like "1e400" (→ ±Inf). `parseRGBFunction` /
+    /// `parseCSSColor` then divide by 255 and return the non-finite component unchecked.
+    /// A hostile color in an imported/loaded cue therefore produces a NaN/Inf render
+    /// component — a latent `Int(NaN)` trap. Pin: no CSS parse ever returns a non-finite
+    /// component. (encoding trick / non-finite output / fail-closed)
+    func testHostileColorStringsNeverYieldNonFiniteComponents() {
+        let hostile = [
+            "rgb(nan, 0, 0)", "rgb(0, inf, 0)", "rgb(0, 0, -inf)",
+            "rgb(1e400, 0, 0)", "rgb(0, infinity, 0)", "rgb(nan, nan, nan)",
+        ]
+        for s in hostile {
+            let c = Hex.parseCSSColor(s) // the entry point the renderer uses (never returns nil)
+            XCTAssertTrue(c.r.isFinite && c.g.isFinite && c.b.isFinite,
+                          "parseCSSColor(\"\(s)\") returned a non-finite component (\(c)) — would trap Int(NaN/Inf) in the renderer")
+            if let rgb = Hex.parseRGBFunction(s) {
+                XCTAssertTrue(rgb.r.isFinite && rgb.g.isFinite && rgb.b.isFinite,
+                              "parseRGBFunction(\"\(s)\") returned a non-finite component (\(rgb))")
+            }
+        }
+    }
+
+    /// End-to-end reproduction: a hand-edited `.cueproj` carries a NaN-laced cue color;
+    /// decoding succeeds (color is just a string), and rendering that cue's color through
+    /// the shared parser must not surface a non-finite component. (hostile `.cueproj` → render)
+    func testHostileCueprojColorDecodesAndRendersFinite() throws {
+        let json = """
+        { "cuePoints": [
+            { "id": "a", "start": 0, "name": "n", "color": "rgb(nan, 0, 0)", "yValue": 0, "curve": 1, "enabled": true }
+        ] }
+        """
+        let project = try JSONDecoder().decode(Project.self, from: Data(json.utf8))
+        let color = project.cuePoints.first!.color
+        let c = Hex.parseCSSColor(color)
+        XCTAssertTrue(c.r.isFinite && c.g.isFinite && c.b.isFinite,
+                      "a NaN color loaded from a hostile .cueproj must not render as a non-finite component (\(c))")
+    }
 }
