@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 import Combine
 
@@ -589,3 +590,4 @@ extension JSONEncoder {
         return e
     }
 }
+#endif

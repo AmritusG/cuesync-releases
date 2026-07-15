@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 enum AppTheme: String, Codable, CaseIterable {
@@ -177,3 +178,4 @@ extension Color {
         self.init(nsColor: NSColor.fromCSSString(cssString))
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 import AppKit
 
@@ -58,3 +59,4 @@ private class NoSelectTextField: NSTextField {
         return result
     }
 }
+#endif
