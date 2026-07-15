@@ -46,13 +46,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the Swift toolchain + Windows SDK. If the signed-installer step
-      # 404s on swift.org, bump `tag`/`branch` to a release whose windows
-      # package is published with a signature.
+      # Installs the Swift toolchain + Windows SDK. `branch`/`tag` are the
+      # deprecated input names; the action now takes `swift-version`. If a
+      # signed-installer step 404s on swift.org, bump this to a release whose
+      # windows package is published with a signature.
       - uses: compnerd/gha-setup-swift@main
         with:
-          branch: swift-6.0.3-release
-          tag: 6.0.3-RELEASE
+          swift-version: 6.0.3-RELEASE
 
       - name: Swift version
         run: swift --version
