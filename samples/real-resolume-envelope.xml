@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Preset name="KLV 06" uniqueId="MOD_ENVELOPE" className="Envelope" default="0">
+	<versionInfo name="Resolume Arena" majorVersion="7" minorVersion="23" microVersion="2" revision="51094"/>
+	<ModifierEnvelope name="ModifierEnvelope" altName="Envelope" uniqueId="1769101136792">
+		<points>
+			<point x="0" y="0" curve="33"/>
+			<point x="0.06488565379999999827" y="0" curve="1"/>
+			<point x="0.098311596600000009105" y="0.98319327731092431844" curve="1"/>
+			<point x="0.303059371080712181" y="1" curve="1"/>
+			<point x="0.45697329376854600724" y="0.99159663865546221473" curve="1"/>
+			<point x="0.5281899109792285163" y="1" curve="1"/>
+			<point x="0.61424332344213650181" y="1" curve="1"/>
+			<point x="0.65281899109792285163" y="0" curve="1"/>
+			<point x="1" y="0" curve="8"/>
+		</points>
+	</ModifierEnvelope>
+</Preset>
+

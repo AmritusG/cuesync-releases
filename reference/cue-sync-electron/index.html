@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://unpkg.com">
+  <title>Cue Sync</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background-color: #0a0a0f;
+      color: #e0e0e8;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    /* macOS title bar - only visible on macOS */
+    .titlebar {
+      display: none;
+      height: 38px;
+      background: linear-gradient(180deg, rgba(30, 215, 96, 0.08) 0%, transparent 100%);
+      border-bottom: 1px solid rgba(30, 215, 96, 0.15);
+      -webkit-app-region: drag;
+      flex-shrink: 0;
+    }
+    /* Show title bar only on macOS (detected via class added by JS) */
+    body.darwin .titlebar {
+      display: block;
+    }
+    #root {
+      flex: 1;
+      overflow: auto;
+      width: 100%;
+    }
+    /* Make buttons and inputs clickable (not draggable) */
+    button, input, select, label, a, textarea {
+      -webkit-app-region: no-drag;
+    }
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.05);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+    /* Loading state */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      font-size: 18px;
+      color: #1ed760;
+    }
+    .error {
+      color: #ff4444;
+      padding: 20px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <!-- Title bar for macOS (window drag region) -->
+  <div class="titlebar"></div>
+  
+  <div id="root">
+    <div class="loading">Loading Cue Sync...</div>
+  </div>
+
+  <!-- React and ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Bundled App -->
+  <script src="src/app.js"></script>
+  
+  <script>
+    // Detect platform and add class to body for CSS targeting
+    if (window.electronAPI && window.electronAPI.platform === 'darwin') {
+      document.body.classList.add('darwin');
+    }
+    
+    // Error handling
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+      console.error('Error:', msg, url, lineNo, columnNo, error);
+      document.getElementById('root').innerHTML = '<div class="error">Error loading app: ' + msg + '</div>';
+      return false;
+    };
+    
+    // Check if React loaded
+    if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+      document.getElementById('root').innerHTML = '<div class="error">Failed to load React. Please check your internet connection.</div>';
+    }
+  </script>
+</body>
+</html>

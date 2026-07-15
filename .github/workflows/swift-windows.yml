@@ -1,0 +1,44 @@
+# Copy to `.github/workflows/swift-windows.yml` in the app you're porting.
+# Compiles the Swift port on a REAL Windows x64 runner (and macOS) so the build
+# is verified where you can't compile locally. Download the built artifact from
+# the run's "Artifacts" section.
+name: swift-windows
+
+on:
+  push:
+    branches: [main, "adw/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: swift · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cross-platform Swift toolchain setup (macOS/Linux/Windows).
+      - uses: SwiftyLab/setup-swift@latest
+        with:
+          swift-version: "6.0" # pin to the toolchain you build against
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
+
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuesync-${{ matrix.os }}
+          path: .build/release/
+          if-no-files-found: ignore

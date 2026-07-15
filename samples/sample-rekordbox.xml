@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="6.7.4" Company="AlphaTheta"/>
+  <COLLECTION Entries="3">
+    <TRACK TrackID="1" 
+           Name="Midnight Dreams" 
+           Artist="Aurora Beats" 
+           Album="Neon Horizons" 
+           Genre="Deep House" 
+           Kind="MP3 File"
+           Size="8547632"
+           TotalTime="245" 
+           DiscNumber="0" 
+           TrackNumber="1"
+           Year="2024"
+           AverageBpm="124.00" 
+           DateAdded="2024-01-15"
+           BitRate="320"
+           SampleRate="44100"
+           Comments=""
+           PlayCount="42"
+           Rating="5"
+           Location="file://localhost/Users/dj/Music/Tracks/Aurora%20Beats%20-%20Midnight%20Dreams.mp3"
+           Remixer=""
+           Tonality="Am"
+           Label="Nocturnal Records"
+           Mix="">
+      <TEMPO Inizio="0.123" Bpm="124.00" Metro="4/4" Battito="1"/>
+      <POSITION_MARK Name="Intro" Type="0" Start="0.000" Num="0" Red="30" Green="215" Blue="96"/>
+      <POSITION_MARK Name="Build" Type="0" Start="32.500" Num="1" Red="255" Green="165" Blue="0"/>
+      <POSITION_MARK Name="Drop" Type="0" Start="64.750" Num="2" Red="255" Green="0" Blue="0"/>
+      <POSITION_MARK Name="Breakdown" Type="0" Start="128.250" Num="3" Red="0" Green="104" Blue="169"/>
+      <POSITION_MARK Name="Drop 2" Type="0" Start="160.500" Num="4" Red="255" Green="0" Blue="0"/>
+      <POSITION_MARK Name="Outro" Type="0" Start="224.000" Num="5" Red="128" Green="128" Blue="128"/>
+    </TRACK>
+    <TRACK TrackID="2" 
+           Name="Solar Flare" 
+           Artist="Cosmic Pulse" 
+           Album="Stellar Journey" 
+           Genre="Tech House" 
+           TotalTime="312" 
+           AverageBpm="128.00" 
+           Tonality="Cm"
+           Location="file://localhost/Users/dj/Music/Tracks/Cosmic%20Pulse%20-%20Solar%20Flare.mp3">
+      <POSITION_MARK Name="Start" Type="0" Start="0.000" Num="0" Red="30" Green="215" Blue="96"/>
+      <POSITION_MARK Name="Vocal" Type="0" Start="48.000" Num="1" Red="239" Green="40" Blue="138"/>
+      <POSITION_MARK Name="Main Drop" Type="0" Start="96.000" Num="2" Red="255" Green="0" Blue="0"/>
+      <POSITION_MARK Name="Break" Type="0" Start="192.000" Num="3" Red="0" Green="104" Blue="169"/>
+      <POSITION_MARK Name="Final Drop" Type="0" Start="240.000" Num="4" Red="255" Green="0" Blue="0"/>
+      <POSITION_MARK Name="End" Type="0" Start="304.000" Num="5" Red="128" Green="128" Blue="128"/>
+    </TRACK>
+    <TRACK TrackID="3" 
+           Name="Night Drive" 
+           Artist="Velvet Underground" 
+           Album="Urban Tales" 
+           Genre="Progressive House" 
+           TotalTime="420" 
+           AverageBpm="122.00" 
+           Tonality="Fm"
+           Location="file://localhost/Users/dj/Music/Tracks/Velvet%20Underground%20-%20Night%20Drive.mp3">
+      <POSITION_MARK Name="Intro" Type="0" Start="0.000" Num="0" Red="30" Green="215" Blue="96"/>
+      <POSITION_MARK Name="Theme" Type="0" Start="60.000" Num="1" Red="255" Green="215" Blue="0"/>
+      <POSITION_MARK Name="Climax" Type="0" Start="180.000" Num="2" Red="255" Green="0" Blue="0"/>
+      <POSITION_MARK Name="Outro" Type="0" Start="360.000" Num="3" Red="128" Green="128" Blue="128"/>
+    </TRACK>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="2">
+      <NODE Type="0" Name="Sets" Count="2">
+        <NODE Type="1" Name="Friday Night" KeyType="0" Entries="2">
+          <TRACK Key="1"/>
+          <TRACK Key="2"/>
+        </NODE>
+        <NODE Type="1" Name="Weekend Warmup" KeyType="0" Entries="1">
+          <TRACK Key="3"/>
+        </NODE>
+      </NODE>
+      <NODE Type="1" Name="Favorites" KeyType="0" Entries="3">
+        <TRACK Key="1"/>
+        <TRACK Key="2"/>
+        <TRACK Key="3"/>
+      </NODE>
+    </NODE>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

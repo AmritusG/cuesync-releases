@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.swiftmodule
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# CueSync build artifacts (signed/notarized output kept out of source)
+builds/
+
+# Local secrets / signing
+.env
+*.p12
+*.mobileprovision
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Release output / binaries
+*.dmg
+*.zip
+CueSync.app/
+windows-build-package/
+scripts-old/
+
+# Agentic factory run artifacts
+.factory/
+factory.toml

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  CueSync entitlements. App-sandbox is OFF: importing DJ library
+	  files and exporting to arbitrary destinations needs unrestricted
+	  filesystem access. Direct/Developer-ID distribution doesn't
+	  require sandboxing.
+
+	  user-selected.read-only is set so Open... panels work cleanly
+	  even though we're unsandboxed.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+</dict>
+</plist>
