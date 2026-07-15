@@ -108,6 +108,31 @@ final class PortComplianceTests: XCTestCase {
                                "spec §2.C.13: pure-Swift hex/CSS color parsing to replace NSColor.fromCSSString")
     }
 
+    func testSupportLayerSQLiteExists() {
+        assertSourceFileExists("Support/SQLite.swift",
+                               "spec §2.C.9: shared SQLite glue (guarded import + SQLITE_TRANSIENT) for CueSyncCore")
+    }
+
+    func testSupportLayerZlibExists() {
+        assertSourceFileExists("Support/Zlib.swift",
+                               "spec §2.C.10: cross-platform raw-DEFLATE inflate used by EngineDJParser")
+    }
+
+    /// Spec §3: "Support/ contains exactly the six new files" — not five, not seven.
+    /// A stray file left behind (or a rename that silently orphans an old name) would
+    /// slip past the individual existence checks above.
+    func testSupportDirectoryContainsExactlyTheSixSpecifiedFiles() throws {
+        let expected: Set<String> = [
+            "FileDialogs.swift", "Preferences.swift", "AudioDuration.swift",
+            "Hex.swift", "SQLite.swift", "Zlib.swift",
+        ]
+        let dir = Self.sourceRoot.appendingPathComponent("Support")
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        let swiftFiles = Set(names.filter { $0.hasSuffix(".swift") })
+        XCTAssertEqual(swiftFiles, expected,
+                       "Support/ must contain exactly the six files the spec names (spec §3), got \(swiftFiles.sorted())")
+    }
+
     // MARK: - Helpers
 
     private func assertSourceFileExists(_ relativePath: String, _ reason: String,

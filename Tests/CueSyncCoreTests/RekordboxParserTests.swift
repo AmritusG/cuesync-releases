@@ -77,6 +77,72 @@ final class RekordboxParserTests: XCTestCase {
         XCTAssertThrowsError(try RekordboxParser.parse(xml: ""))
     }
 
+    /// Rekordbox exports `Location` as a `file://localhost`-prefixed, percent-encoded
+    /// URI on every platform (spec §4: exports/imports must be byte-for-byte identical
+    /// across macOS and Windows). A macOS-style path with spaces must decode cleanly.
+    func testLocationDecodesFileLocalhostPrefixAndPercentEncodedSpaces() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="1">
+            <TRACK TrackID="1" Name="T" TotalTime="1" AverageBpm="1"
+                   Location="file://localhost/Users/dj/Music/My%20Track%20(Remix).mp3"/>
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """
+        let result = try RekordboxParser.parse(xml: xml)
+        XCTAssertEqual(result.tracks.first?.location, "/Users/dj/Music/My Track (Remix).mp3")
+    }
+
+    /// Rekordbox for Windows emits the same `file://localhost` URI scheme but with a
+    /// drive-letter path (forward slashes, no leading path separator quirk) — this must
+    /// decode identically to the macOS form, not be mangled by the "file://localhost"
+    /// strip or the percent-decoding pass.
+    func testLocationDecodesWindowsDriveLetterPath() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="1">
+            <TRACK TrackID="1" Name="T" TotalTime="1" AverageBpm="1"
+                   Location="file://localhost/C:/Users/dj/Music/Track%2001.mp3"/>
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """
+        let result = try RekordboxParser.parse(xml: xml)
+        XCTAssertEqual(result.tracks.first?.location, "/C:/Users/dj/Music/Track 01.mp3")
+    }
+
+    /// Percent-encoded UTF-8 bytes (e.g. a Japanese folder name) must decode to the
+    /// original Unicode text, not mojibake or a truncated string.
+    func testLocationDecodesPercentEncodedUnicodePathSegments() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="1">
+            <TRACK TrackID="1" Name="T" TotalTime="1" AverageBpm="1"
+                   Location="file://localhost/Users/dj/%E9%9F%B3%E6%A5%BD/track.mp3"/>
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """
+        let result = try RekordboxParser.parse(xml: xml)
+        XCTAssertEqual(result.tracks.first?.location, "/Users/dj/音楽/track.mp3")
+    }
+
+    /// A track with no `Location` attribute at all (hand-edited or truncated XML) must
+    /// default to an empty string, never crash or produce a non-nil garbage path.
+    func testMissingLocationAttributeDefaultsToEmptyString() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="1">
+            <TRACK TrackID="1" Name="T" TotalTime="1" AverageBpm="1"/>
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """
+        let result = try RekordboxParser.parse(xml: xml)
+        XCTAssertEqual(result.tracks.first?.location, "")
+    }
+
     func testFuzzedMutationsOfSampleNeverProduceInsaneCues() throws {
         var rng = XorShift64(seed: 0xCAFE)
         let base = try Samples.string("sample-rekordbox.xml")
