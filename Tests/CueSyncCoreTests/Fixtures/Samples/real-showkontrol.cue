@@ -1,0 +1,1 @@
+00:00:00:00,00000000,0,CUE0,TAG,,,,,,00:00:00:06,00000006,198,CUE2,TAG,OSC OUT: /composition/columns/6/connect F 1; ,,,,,01:05:01:06,01050106,3901198,CUE1,TAG,MIDI OUT: 128:0:0; DMX OUT: 1 1=1; PRODJ LINK: PLAY 1; OSC OUT: /composition/layers/1/clips/1/connect F 1; DATA: COLOR=15; SYSTEM: SOURCE M=?; ,,,,,

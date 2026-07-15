@@ -30,5 +30,14 @@ let package = Package(
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters"],
             sources: ["UI"]
         ),
+        // Ports CueSync/Tests/CueSyncTests.swift (custom-runner suite) into XCTest so
+        // `swift test` exercises Models/Parsers/Exporters on windows-latest + macos-latest
+        // (spec item E.27). The old standalone runner (scripts/run-tests.sh) is unchanged.
+        .testTarget(
+            name: "CueSyncCoreTests",
+            dependencies: ["CueSyncCore"],
+            path: "Tests/CueSyncCoreTests",
+            resources: [.copy("Fixtures/Samples")]
+        ),
     ]
 )
