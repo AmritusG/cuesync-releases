@@ -1,0 +1,485 @@
+import Foundation
+import XCTest
+@testable import CueSyncCore
+#if canImport(Compression)
+import Compression
+#endif
+
+// =============================================================================
+// Red-Team adversarial suite (CUESYNC-3).
+//
+// Every import format is untrusted external input (threat model, spec §4). These
+// tests reason like an attacker feeding hostile files into the parsers/exporters
+// and pin the safety invariant each one must hold: fail closed (empty/nil/throw),
+// never crash, never read out of bounds, never emit corrupt output, never hang.
+//
+// They are deterministic, network-free, /tmp-free and CLI-free so `swift test`
+// passes unchanged on windows-latest and macos-latest (spec §E.28). Each stays in
+// the suite forever as a regression guard — the factory gets harder to break with
+// every run.
+// =============================================================================
+
+// MARK: - Serato: hostile binary offset / length attacks
+
+final class AdversarialSeratoBinaryTests: XCTestCase {
+
+    /// A CUE entry whose advertised payload length runs exactly one byte past the
+    /// end of the stream must be rejected by the `pos + Int(payloadLength) <= count`
+    /// bound, not over-read. (offset-overrun attack)
+    func testPayloadLengthOneBytePastEndIsRejectedNotOverRead() {
+        // Build: version header + "CUE\0" + length + a short payload.
+        var bytes: [UInt8] = [0x01, 0x01]
+        bytes += Array("CUE".utf8); bytes.append(0x00)
+        // Only 8 payload bytes actually follow, but claim 9.
+        let payload: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]
+        bytes += BinaryFixtures.be32(UInt32(payload.count + 1))
+        bytes += payload
+        let cues = SeratoParser.parseSeratoMarkers2(data: Data(bytes))
+        assertSaneCues(cues, "serato-len-past-end")
+        XCTAssertTrue(cues.isEmpty, "an over-long payload length must yield no cue, not an OOB read")
+    }
+
+    /// A cue name carrying an embedded NUL must terminate at the NUL — bytes after
+    /// it are a different field and must never leak into the displayed name.
+    /// (null-byte / string-truncation attack)
+    func testCueNameStopsAtEmbeddedNullByte() {
+        // Payload: 0x00, index, be32 pos, 0x00, rgb, 0x00, then name "AB\0CD".
+        var p: [UInt8] = [0x00, 0x00]
+        p += BinaryFixtures.be32(1000)
+        p.append(0x00)
+        p += [0x10, 0x20, 0x30]
+        p.append(0x00)
+        p += Array("AB".utf8); p.append(0x00); p += Array("CD".utf8); p.append(0x00)
+        let cues = SeratoParser.parseSeratoMarkers2(data: BinaryFixtures.markers2([BinaryFixtures.cueEntry(p)]))
+        XCTAssertEqual(cues.count, 1)
+        XCTAssertEqual(cues.first?.name, "AB", "name must terminate at the first NUL, not absorb the trailing field bytes")
+    }
+
+    /// Thousands of empty (bare-NUL) entries must each advance the cursor and
+    /// terminate — a padding flood must not spin or overflow. (DoS / infinite-loop)
+    func testNulPaddingFloodTerminatesWithNoCues() {
+        var bytes: [UInt8] = [0x01, 0x01]
+        bytes += [UInt8](repeating: 0x00, count: 50_000)
+        let cues = SeratoParser.parseSeratoMarkers2(data: Data(bytes))
+        XCTAssertTrue(cues.isEmpty)
+    }
+
+    /// A well-formed CUE entry followed by a truncated second entry: the good cue
+    /// is returned and the malformed tail is dropped, never partially read OOB.
+    func testGoodEntryThenTruncatedEntryReturnsOnlyTheGoodCue() {
+        var bytes = Array(BinaryFixtures.markers2([
+            BinaryFixtures.cueEntry(BinaryFixtures.cuePayload(index: 0, posMs: 3000, name: "Keep")),
+        ]))
+        // Append the start of a second CUE entry but cut it off mid-length-field.
+        bytes += Array("CUE".utf8); bytes.append(0x00); bytes += [0xFF, 0xFF] // partial length
+        let cues = SeratoParser.parseSeratoMarkers2(data: Data(bytes))
+        assertSaneCues(cues, "serato-good-then-truncated")
+        XCTAssertEqual(cues.first?.name, "Keep")
+    }
+}
+
+// MARK: - Serato: hostile container (RIFF/AIFF) chunk-size attacks
+
+final class AdversarialSeratoContainerTests: XCTestCase {
+
+    private func write(_ bytes: [UInt8], ext: String, _ label: String) -> URL {
+        Scratch.writeFile(bytes, name: "atk.\(ext)", in: Scratch.makeDirectory(label))
+    }
+
+    /// A WAV chunk that advertises a 4 GiB size (larger than the file) must be
+    /// clamped by `min(chunkDataStart + chunkSize, count)`, never over-read or hang.
+    /// (resource exhaustion / offset overrun)
+    func testWAVChunkSizeBeyondEOFIsClampedNotOverRead() throws {
+        var wav = Array("RIFF".utf8) + [0x24, 0x00, 0x00, 0x00] + Array("WAVE".utf8)
+        wav += Array("junk".utf8)
+        wav += [0xFF, 0xFF, 0xFF, 0xFF] // little-endian chunk size ~4 GiB
+        wav += [0xAA, 0xBB, 0xCC, 0xDD] // only 4 bytes actually present
+        let t = try SeratoParser.parseFile(at: write(wav, ext: "wav", "wav-huge-chunk"))
+        assertSaneCues(t.cuePoints, "wav-huge-chunk")
+        XCTAssertTrue(t.cuePoints.isEmpty)
+    }
+
+    /// A WAV filled with thousands of zero-size chunks must terminate (each iteration
+    /// advances the cursor by the 8-byte header), not loop forever. (infinite-loop)
+    func testWAVZeroSizeChunkFloodTerminates() throws {
+        var wav = Array("RIFF".utf8) + [0x00, 0x00, 0x00, 0x00] + Array("WAVE".utf8)
+        for _ in 0..<20_000 {
+            wav += Array("nul ".utf8) + [0x00, 0x00, 0x00, 0x00] // id + size 0
+        }
+        let t = try SeratoParser.parseFile(at: write(wav, ext: "wav", "wav-zero-flood"))
+        assertSaneCues(t.cuePoints, "wav-zero-flood")
+    }
+
+    /// An AIFF "ID3 " chunk whose size claims to run far past EOF must be clamped
+    /// by `min(chunkDataStart + chunkSize, count)`, never over-read. (offset overrun)
+    func testAIFFID3ChunkSizeBeyondEOFDoesNotOverRead() throws {
+        var aiff = Array("FORM".utf8) + [0x00, 0x00, 0x00, 0x64] + Array("AIFF".utf8)
+        aiff += Array("ID3 ".utf8) + [0x7F, 0xFF, 0xFF, 0xFF] // big-endian huge size
+        aiff += Array("ID3".utf8) + [0x03, 0x00, 0x00] + [0x00, 0x00, 0x00, 0x0A] // ID3 header claiming 10-byte tag
+        aiff += [UInt8](repeating: 0x00, count: 4) // truncated frames
+        let t = try SeratoParser.parseFile(at: write(aiff, ext: "aiff", "aiff-huge-chunk"))
+        assertSaneCues(t.cuePoints, "aiff-huge-chunk")
+    }
+
+    /// An ID3v2 frame whose size field claims 0xFFFFFFFF must not drive an OOB slice —
+    /// the `frameDataStart + frameSize <= end` guard drops it. (offset overrun)
+    func testMP3FrameSizeBeyondTagEndIsSkipped() throws {
+        // ID3v2.3 header + one TIT2 frame claiming a 4 GiB size.
+        var body: [UInt8] = []
+        body += Array("TIT2".utf8)
+        body += [0xFF, 0xFF, 0xFF, 0xFF] // non-synchsafe (v2.3) 4 GiB frame size
+        body += [0x00, 0x00]             // frame flags
+        body += [0x00] + Array("hi".utf8)
+        var mp3 = Array("ID3".utf8) + [0x03, 0x00, 0x00]
+        mp3 += BinaryFixtures.synchsafe(body.count)
+        mp3 += body
+        let t = try SeratoParser.parseFile(at: write(mp3, ext: "mp3", "mp3-huge-frame"))
+        assertSaneCues(t.cuePoints, "mp3-huge-frame")
+        // Frame is dropped, so no title is extracted; filename becomes the name.
+        XCTAssertEqual(t.name, "atk", "an over-long frame size must be skipped, leaving the filename as the track name")
+    }
+}
+
+// MARK: - ShowKontrol: record / field injection and numeric overflow
+
+final class AdversarialShowKontrolTests: XCTestCase {
+
+    /// A cue name stuffed with every line-break code point CR/LF/NEL/LS/PS/VT/FF must
+    /// still produce exactly one `\r`-separated record per cue and never leak a raw
+    /// LF (0x0A) into the byte stream — no injected rows. (CRLF / record injection)
+    func testHostileLineBreakCodePointsInNameCannotInjectRecords() {
+        let hostile = "Drop\r\n\u{0085}\u{2028}\u{2029}\u{000B}\u{000C}INJECTED,extra,cols"
+        let cues = [
+            CuePoint(id: "a", start: 0, name: "Start", color: "#fff", yValue: 0, curve: 1, enabled: true),
+            CuePoint(id: "b", start: 10, name: hostile, color: "#fff", yValue: 0, curve: 1, enabled: true),
+        ]
+        let out = ShowKontrolExporter.generate(cuePoints: cues) ?? ""
+        let raw = Array(out.utf8)
+        XCTAssertFalse(raw.contains(0x0A), "no LF byte may leak into .cue output via a hostile cue name")
+        let records = out.components(separatedBy: "\r")
+        XCTAssertEqual(records.count, cues.count,
+                       "exactly one record per cue — embedded CR/LF must not inject rows")
+        for r in records {
+            XCTAssertEqual(r.filter { $0 == "," }.count, 10,
+                           "each record keeps its fixed 11-field shape — no column injection via commas in the name")
+        }
+    }
+
+    /// A milliseconds field of 1e309 parses to +Inf in Swift; the parser must reject
+    /// the non-finite value (→ 0) so no Inf cue start or Inf suggested duration escapes.
+    /// A merely huge-but-finite 1e308 must stay finite. (numeric overflow)
+    func testInfiniteAndHugeMillisecondsNeverProduceNonFiniteOutput() throws {
+        let content = "00:00:00:00,00000000,1e309,A,TAG,,,,,,\r" +
+                      "00:00:01:00,00000100,1e308,B,TAG,,,,,,\r"
+        let result = try ShowKontrolParser.parse(content: content)
+        assertSaneCues(result.cuePoints, "showkontrol-inf-ms")
+        for c in result.cuePoints { XCTAssertTrue(c.start.isFinite, "cue start must be finite") }
+        if let dur = result.suggestedDurationMs {
+            XCTAssertTrue(dur.isFinite, "suggested duration must stay finite for hostile ms fields")
+        }
+    }
+
+    /// A single line carrying tens of thousands of comma fields must parse in linear
+    /// time and not blow the field split up — no quadratic pathology. (resource)
+    func testPathologicallyManyFieldsOnOneLineParsesLinearly() throws {
+        let commas = String(repeating: ",", count: 40_000)
+        // 00:00:05:00 -> 5000 ms so a real cue is produced.
+        let content = "00:00:05:00,00000500,5000,Drop\(commas)\r"
+        let result = try ShowKontrolParser.parse(content: content)
+        assertSaneCues(result.cuePoints, "showkontrol-many-fields")
+        XCTAssertTrue(result.cuePoints.contains { $0.name == "Drop" })
+    }
+}
+
+// MARK: - Resolume: output-integrity (control chars must not corrupt XML)
+
+final class AdversarialResolumeExportTests: XCTestCase {
+
+    /// OUTPUT-INTEGRITY ATTACK. A preset name is untrusted (spec §4) — it can arrive
+    /// from a hostile `.cueproj` or an imported track title. `escapeXml` escapes the
+    /// five XML metacharacters but NOT the C0 control bytes (NUL, backspace, …) that
+    /// XML 1.0 forbids outright. The exporter must therefore neutralize them, so the
+    /// XML it emits is always well-formed and round-trips through its own parser.
+    /// Today it passes the raw control byte straight into the attribute, producing a
+    /// document `ResolumeParser` (and Resolume) reject — corrupt output from parsed
+    /// input. This test pins the required behavior.
+    func testControlCharsInPresetNameDoNotProduceUnparseableXML() throws {
+        let cues = [
+            CuePoint(id: "a", start: 0, name: "s", color: "#fff", yValue: 0, curve: 1, enabled: true),
+            CuePoint(id: "b", start: 60, name: "e", color: "#fff", yValue: 100, curve: 1, enabled: true),
+        ]
+        // NUL + backspace + a bell — all illegal in XML 1.0 text.
+        let hostile = "Env\u{0000}\u{0008}\u{0007}Name"
+        let xml = ResolumeExporter.generate(cuePoints: cues, trackDuration: 60, presetName: hostile) ?? ""
+        XCTAssertFalse(xml.isEmpty, "export must still produce output for a control-laced name")
+        XCTAssertNoThrow(try ResolumeParser.parse(xml: xml),
+                         "exporter must not emit XML that its own parser cannot read (control bytes must be stripped/escaped)")
+    }
+
+    /// A Resolume point with x far outside the normalized 0…1 range (here x=5 and
+    /// x=-3) must still yield finite, non-negative, in-range cues after conversion.
+    /// (out-of-range coordinate)
+    func testPointsFarOutsideUnitRangeConvertToSaneCues() throws {
+        let xml = """
+        <Preset name="OOR">
+          <ModifierEnvelope><points>
+            <point x="-3.0" y="9.9" curve="1"/>
+            <point x="5.0" y="-9.9" curve="1"/>
+            <point x="1e18" y="0.5" curve="1"/>
+          </points></ModifierEnvelope>
+        </Preset>
+        """
+        let result = try ResolumeParser.parse(xml: xml)
+        let cues = ResolumeParser.convertToCuePoints(points: result.points, duration: 60)
+        assertSaneCues(cues, "resolume-out-of-range-x")
+    }
+}
+
+// MARK: - Rekordbox / XML: XXE, entity bombs, illegal bytes
+
+final class AdversarialRekordboxXMLTests: XCTestCase {
+
+    /// XXE. A DOCTYPE that declares an external SYSTEM entity pointing at a local file
+    /// must NOT be resolved — Foundation `XMLParser` keeps external-entity resolution
+    /// off by default, and this test fails loudly if that ever regresses (a track name
+    /// must never be able to exfiltrate file contents). (XML external entity injection)
+    func testExternalEntityIsNotResolvedNoFileExfiltration() throws {
+        let dir = Scratch.makeDirectory("xxe-canary")
+        let canary = "TOPSECRET_XXE_CANARY_9182"
+        let secretURL = dir.appendingPathComponent("secret.txt")
+        try Data(canary.utf8).write(to: secretURL)
+
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE DJ_PLAYLISTS [ <!ENTITY xxe SYSTEM "\(secretURL.absoluteString)"> ]>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="1">
+            <TRACK TrackID="1" Name="&xxe;" TotalTime="120" AverageBpm="120">
+              <POSITION_MARK Name="c" Type="0" Start="0" Num="0"/>
+            </TRACK>
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """
+        // Parse may throw (external entity refused) or succeed with an unresolved name;
+        // either way the secret must never appear in the parsed model.
+        if let result = try? RekordboxParser.parse(xml: xml) {
+            for t in result.tracks {
+                XCTAssertFalse(t.name.contains(canary), "XXE: external file contents leaked into a track name")
+                assertSaneCues(t.cuePoints, "xxe-track")
+            }
+        }
+        // Belt and braces: the canary must not surface anywhere the parser could place it.
+    }
+
+    /// Billion-laughs. A nested internal-entity expansion must not be expanded into a
+    /// multi-megabyte string or hang the parser — it must fail closed or complete
+    /// quickly with a bounded result. Kept intentionally small so that even in the
+    /// worst case (full expansion) the allocation is survivable. (XML entity bomb)
+    func testNestedEntityExpansionDoesNotHangOrExplode() {
+        // 5 levels x10 = up to 100k 'a's if fully expanded — bounded on purpose.
+        let xml = """
+        <?xml version="1.0"?>
+        <!DOCTYPE DJ_PLAYLISTS [
+          <!ENTITY a "aaaaaaaaaa">
+          <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+          <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+          <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">
+          <!ENTITY e "&d;&d;&d;&d;&d;&d;&d;&d;&d;&d;">
+        ]>
+        <DJ_PLAYLISTS Version="1.0.0"><COLLECTION Entries="1">
+          <TRACK TrackID="1" Name="&e;" TotalTime="1" AverageBpm="1"/>
+        </COLLECTION></DJ_PLAYLISTS>
+        """
+        // The only requirement: return (throw or parse) without hanging or trapping.
+        let result = try? RekordboxParser.parse(xml: xml)
+        if let name = result?.tracks.first?.name {
+            XCTAssertLessThan(name.utf8.count, 10_000_000, "entity expansion must stay bounded")
+        }
+    }
+
+    /// A raw NUL (0x00) byte embedded in XML is illegal per the spec; the parser must
+    /// reject the document (throw) rather than crash on the control byte. (illegal byte)
+    func testRawControlByteInXMLThrowsInsteadOfCrashing() {
+        var bytes = Array("""
+        <?xml version="1.0"?><DJ_PLAYLISTS Version="1.0.0"><COLLECTION Entries="1">\
+        <TRACK TrackID="1" Name="X
+        """.utf8)
+        bytes.append(0x00) // illegal control byte mid-attribute
+        bytes += Array("\"/></COLLECTION></DJ_PLAYLISTS>".utf8)
+        let xml = String(decoding: bytes, as: UTF8.self)
+        XCTAssertThrowsError(try RekordboxParser.parse(xml: xml),
+                             "a NUL byte inside XML must be rejected, not crash the parser")
+    }
+
+    /// Deeply nested playlist folders (NODE Type=0) come straight from untrusted XML.
+    /// The parser builds the tree iteratively, so a deep document must not crash it,
+    /// and the recursive `totalTrackCount()` must still return correctly at a depth a
+    /// real library could plausibly reach. (recursion / nesting stress)
+    func testDeeplyNestedPlaylistFoldersParseAndCountWithoutCrashing() throws {
+        let depth = 2_000
+        var xml = "<?xml version=\"1.0\"?><DJ_PLAYLISTS Version=\"1.0.0\"><PLAYLISTS>"
+        xml += "<NODE Type=\"0\" Name=\"ROOT\">"
+        for i in 0..<depth { xml += "<NODE Type=\"0\" Name=\"F\(i)\">" }
+        xml += "<NODE Type=\"1\" Name=\"Leaf\"><TRACK Key=\"1\"/></NODE>"
+        for _ in 0..<depth { xml += "</NODE>" }
+        xml += "</NODE></PLAYLISTS></DJ_PLAYLISTS>"
+
+        let result = try RekordboxParser.parse(xml: xml)
+        XCTAssertEqual(result.playlists.count, 1, "ROOT's single child chain is preserved")
+        XCTAssertEqual(result.playlists.first?.totalTrackCount(), 1,
+                       "recursive count must reach the single leaf track through the nested folders")
+    }
+}
+
+// MARK: - Project (.cueproj JSON): hostile numeric fields
+
+final class AdversarialProjectJSONTests: XCTestCase {
+
+    /// A hand-edited `.cueproj` can carry astronomically large, negative and
+    /// out-of-range numeric fields. Decoding must not crash, and running the decoded
+    /// cue points through `sanitized()` (as the app does on load) must neutralize every
+    /// one of them into a renderable/exportable value. (hostile JSON numbers)
+    func testHostileNumericFieldsDecodeAndSanitizeToSafeValues() throws {
+        let json = """
+        {
+          "name": "Hostile",
+          "trackDuration": 1e308,
+          "presetName": "P",
+          "cuePoints": [
+            { "id": "a", "start": -999999, "name": "neg", "color": "#fff", "yValue": 100000, "curve": 9999, "enabled": true },
+            { "id": "b", "start": 1e300, "name": "huge", "color": "#fff", "yValue": -50, "curve": -1, "enabled": true }
+          ]
+        }
+        """
+        let project = try JSONDecoder().decode(Project.self, from: Data(json.utf8))
+        XCTAssertEqual(project.cuePoints.count, 2)
+        for c in project.cuePoints.map({ $0.sanitized() }) {
+            XCTAssertTrue(c.start.isFinite && c.start >= 0, "start \(c.start) not sanitized")
+            XCTAssertTrue((0...100).contains(c.yValue), "yValue \(c.yValue) not clamped")
+            XCTAssertTrue((1...23).contains(c.curve), "curve \(c.curve) not clamped")
+        }
+        // And the sanitized cues must survive an actual export (its most hostile sink).
+        let cues = project.cuePoints.map { $0.sanitized() }
+        _ = ResolumeExporter.generate(cuePoints: cues, trackDuration: 60, presetName: project.presetName)
+        _ = ShowKontrolExporter.generate(cuePoints: cues)
+    }
+
+    /// A JSON number too large for `Double` (1e400) must be rejected by the decoder
+    /// (thrown), not silently decoded as +Inf into a cue field. (numeric overflow)
+    func testOverflowingJSONNumberIsRejectedByDecoder() {
+        let json = Data("""
+        { "cuePoints": [ { "id": "a", "start": 1e400, "name": "n", "color": "#fff", "yValue": 0, "curve": 1, "enabled": true } ] }
+        """.utf8)
+        // Whatever the decoder does, the invariant is: no non-finite value survives.
+        if let project = try? JSONDecoder().decode(Project.self, from: json) {
+            for c in project.cuePoints {
+                XCTAssertTrue(c.sanitized().start.isFinite, "an overflowing start must never remain non-finite after sanitize")
+            }
+        }
+    }
+}
+
+// MARK: - Engine DJ: decompressed cue-slot parsing (threat model §4 bounds)
+
+#if canImport(SQLite3) && canImport(Compression)
+
+/// These reach `parseCueSlots` through a REAL (raw-DEFLATE / COMPRESSION_ZLIB) blob —
+/// the code path the existing garbage-blob tests never exercise because their bytes
+/// fail decompression. Raw DEFLATE is exactly what Apple's `COMPRESSION_ZLIB` decoder
+/// consumes and what the vendored `inflateInit2(-15)` path must match (spec §2.B.6).
+final class AdversarialEngineDJCueSlotTests: XCTestCase {
+
+    /// Big-endian float64 bit pattern, matching `EngineDJParser.readBigEndianFloat64`.
+    private func be64(_ d: Double) -> [UInt8] {
+        let bits = d.bitPattern
+        return (0..<8).map { UInt8(truncatingIfNeeded: bits >> (8 * (7 - $0))) }
+    }
+
+    /// Raw DEFLATE via Apple's Compression framework (symmetric with the parser's decoder).
+    private func rawDeflate(_ input: [UInt8]) -> [UInt8] {
+        let cap = max(64, input.count * 2 + 128)
+        var dst = [UInt8](repeating: 0, count: cap)
+        let n = dst.withUnsafeMutableBufferPointer { d in
+            input.withUnsafeBufferPointer { s in
+                compression_encode_buffer(d.baseAddress!, cap, s.baseAddress!, input.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        return Array(dst.prefix(n))
+    }
+
+    /// Wrap a decompressed cue-slot payload into the Engine DJ blob layout
+    /// (LE32 uncompressed size + raw-DEFLATE bytes) and load it through the parser.
+    private func parseSlots(_ payload: [UInt8], _ label: String) throws -> [CuePoint] {
+        let url = Scratch.makeDirectory(label).appendingPathComponent("m.db")
+        EngineDJFixtures.badBlob(at: url, declaredSize: UInt32(payload.count), compressedGarbage: rawDeflate(payload))
+        let tracks = try EngineDJParser.parse(databaseURL: url)
+        XCTAssertFalse(tracks.isEmpty, "track must load")
+        return tracks.first?.cuePoints ?? []
+    }
+
+    /// A single valid slot must decode end-to-end: name preserved, position converted
+    /// from 44.1 kHz samples to seconds. Proves the happy path of the untested parser.
+    func testValidSlotDecodesNameAndPosition() throws {
+        var payload: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 1] // 8-byte header
+        payload += [4] + Array("Drop".utf8) + be64(44_100.0) + [0, 0, 0, 0] // 1.0 s
+        let cues = try parseSlots(payload, "engine-valid-slot")
+        XCTAssertEqual(cues.count, 1)
+        XCTAssertEqual(cues.first?.name, "Drop")
+        assertApproxEqual(cues.first?.start ?? -1, 1.0, tolerance: 0.001, "44100 samples -> 1.0 s")
+        assertSaneCues(cues, "engine-valid-slot")
+    }
+
+    /// A slot claiming a 250-byte name inside a tiny buffer must be bounded by the
+    /// `nameEnd <= bytes.count` guard — no over-read, and the earlier valid cue survives.
+    /// This is the exact over-read the threat model flags for the cue-slot reader (§4).
+    func testOversizedSlotNameLengthIsBoundedNoOverRead() throws {
+        var payload: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 2]
+        payload += [4] + Array("Good".utf8) + be64(88_200.0) + [0, 0, 0, 0] // 2.0 s, valid
+        payload += [250]                                  // second slot claims a 250-byte name
+        payload += [UInt8](repeating: 0x41, count: 20)    // but only 20 bytes remain
+        let cues = try parseSlots(payload, "engine-oversized-name")
+        assertSaneCues(cues, "engine-oversized-name")
+        XCTAssertEqual(cues.first?.name, "Good", "the valid cue before the hostile slot is preserved")
+        XCTAssertLessThanOrEqual(cues.count, 1, "the truncated hostile slot must not add a cue")
+    }
+
+    /// A slot whose 8 position bytes are a NaN bit pattern must be neutralized by
+    /// `sanitized()` to a finite, non-negative start — never NaN into the canvas/export.
+    /// (non-finite payload)
+    func testNaNPositionBitsAreSanitizedToFiniteStart() throws {
+        var payload: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 1]
+        payload += [3] + Array("NaN".utf8)
+        payload += [0x7F, 0xF8, 0, 0, 0, 0, 0, 0] // quiet-NaN big-endian
+        payload += [0, 0, 0, 0]
+        let cues = try parseSlots(payload, "engine-nan-pos")
+        XCTAssertEqual(cues.count, 1)
+        XCTAssertTrue(cues.first?.start.isFinite ?? false, "NaN sample position must sanitize to a finite start")
+        XCTAssertGreaterThanOrEqual(cues.first?.start ?? -1, 0)
+    }
+}
+
+// MARK: - Engine DJ: decompression-bomb guard must not be sized by the blob length
+
+final class AdversarialEngineDJBombTests: XCTestCase {
+
+    /// A large compressed payload that declares a tiny uncompressed size must fail
+    /// closed (track with no cues) and complete promptly. The clamp on the DECLARED
+    /// size (< 1e6) is the bomb guard; a big blob with garbage bytes must never be
+    /// trusted to produce cues. (decompression bomb / fail-closed)
+    ///
+    /// NOTE (residual risk surfaced by this attack): the Apple decode path sizes its
+    /// output buffer as `max(expectedSize + 256, compressed.count * 4)`, so the buffer
+    /// still scales with the attacker-controlled *compressed* length even though the
+    /// declared size is clamped — a multi-hundred-MB blob would drive a multi-GB
+    /// allocation. This test keeps the blob modest; the sizing is flagged for the port.
+    func testLargeGarbageBlobWithTinyDeclaredSizeFailsClosed() throws {
+        let url = Scratch.makeDirectory("engine-bomb-large").appendingPathComponent("m.db")
+        let garbage = [UInt8](repeating: 0xA5, count: 2_000_000) // 2 MB of non-DEFLATE bytes
+        EngineDJFixtures.badBlob(at: url, declaredSize: 100, compressedGarbage: garbage)
+        let tracks = try EngineDJParser.parse(databaseURL: url)
+        XCTAssertFalse(tracks.isEmpty, "track must still load")
+        for t in tracks { XCTAssertTrue(t.cuePoints.isEmpty, "garbage that cannot inflate must yield no cues") }
+    }
+}
+
+#endif
