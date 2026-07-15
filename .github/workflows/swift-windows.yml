@@ -2,6 +2,14 @@
 # Compiles the Swift port on a REAL Windows x64 runner (and macOS) so the build
 # is verified where you can't compile locally. Download the built artifact from
 # the run's "Artifacts" section.
+#
+# Design notes (why this is split per-OS):
+#   * macOS runners ship Xcode + Swift preinstalled — installing a second
+#     toolchain is unnecessary and was breaking the build. So macOS just uses
+#     the built-in `swift`.
+#   * Windows has no bundled Swift. We install it with compnerd's action, which
+#     sets up the toolchain + Windows SDK. A flaky signature check on swift.org
+#     can 404; pin the tag to a release whose windows package is known-good.
 name: swift-windows
 
 on:
@@ -11,20 +19,40 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: swift · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
+  # -------- macOS: use the preinstalled toolchain, no setup action --------
+  macos:
+    name: swift · macos-latest
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build (release)
+        run: swift build -c release
+      - name: Test
+        run: swift test
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuesync-macos
+          path: .build/release/
+          if-no-files-found: ignore
+
+  # -------- Windows x64: install Swift, then build --------
+  windows:
+    name: swift · windows-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Cross-platform Swift toolchain setup (macOS/Linux/Windows).
-      - uses: SwiftyLab/setup-swift@latest
+      # Installs the Swift toolchain + Windows SDK. If the signed-installer step
+      # 404s on swift.org, bump `tag`/`branch` to a release whose windows
+      # package is published with a signature.
+      - uses: compnerd/gha-setup-swift@main
         with:
-          swift-version: "6.0" # pin to the toolchain you build against
+          branch: swift-6.0.3-release
+          tag: 6.0.3-RELEASE
 
       - name: Swift version
         run: swift --version
@@ -39,6 +67,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cuesync-${{ matrix.os }}
+          name: cuesync-windows
           path: .build/release/
           if-no-files-found: ignore
