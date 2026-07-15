@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -181,3 +182,4 @@ private struct ShowKontrolExportButton: View {
         }
     }
 }
+#endif

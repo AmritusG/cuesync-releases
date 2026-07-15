@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct HeaderView: View {
@@ -84,3 +85,4 @@ struct HeaderView: View {
         }
     }
 }
+#endif

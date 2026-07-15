@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 /// A numeric text field with up/down stepper arrows, matching the Electron app's `<input type="number">`.
@@ -193,3 +194,4 @@ struct StepperIntField: View {
         onCommit?()
     }
 }
+#endif

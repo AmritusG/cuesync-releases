@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 @main
@@ -130,3 +131,4 @@ struct CueSyncApp: App {
         alert.runModal()
     }
 }
+#endif

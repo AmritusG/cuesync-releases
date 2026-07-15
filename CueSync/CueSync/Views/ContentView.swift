@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct ContentView: View {
@@ -186,3 +187,4 @@ private struct GridOverlay: View {
         .allowsHitTesting(false)
     }
 }
+#endif

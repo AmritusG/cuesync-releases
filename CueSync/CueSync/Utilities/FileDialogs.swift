@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import AppKit
 import UniformTypeIdentifiers
 
@@ -25,3 +26,4 @@ enum FileDialogs {
     static let cueType = UTType(filenameExtension: "cue") ?? UTType.plainText
     static let cueprojType = UTType(filenameExtension: "cueproj") ?? UTType.json
 }
+#endif

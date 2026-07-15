@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Preset name="Sample Envelope" uniqueId="MOD_ENVELOPE" className="Envelope" default="0">
+	<versionInfo name="Resolume Arena" majorVersion="7" minorVersion="23" microVersion="2" revision="51094"/>
+	<ModifierEnvelope name="ModifierEnvelope" altName="Envelope" uniqueId="1709912345678">
+		<points>
+			<point x="0" y="0" curve="1"/>
+			<point x="0.133" y="0.25" curve="2"/>
+			<point x="0.264" y="1" curve="3"/>
+			<point x="0.523" y="0.5" curve="1"/>
+			<point x="0.655" y="1" curve="1"/>
+			<point x="0.915" y="0.1" curve="5"/>
+			<point x="1" y="0" curve="1"/>
+		</points>
+	</ModifierEnvelope>
+</Preset>

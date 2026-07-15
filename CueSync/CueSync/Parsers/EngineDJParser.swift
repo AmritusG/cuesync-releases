@@ -1,6 +1,10 @@
 import Foundation
+#if canImport(SQLite3)
 import SQLite3
+#endif
+#if canImport(Compression)
 import Compression
+#endif
 
 enum EngineDJParser {
 
@@ -14,6 +18,7 @@ enum EngineDJParser {
 
     /// Parse an Engine DJ SQLite database and return all tracks with their cue points.
     static func parse(databaseURL: URL) throws -> [Track] {
+        #if canImport(SQLite3)
         guard FileManager.default.fileExists(atPath: databaseURL.path) else {
             throw ParseError.invalidFormat("Engine DJ database not found at \(databaseURL.path)")
         }
@@ -50,9 +55,15 @@ enum EngineDJParser {
         try loadCuePoints(into: &tracks, lookup: trackIndexByEngineId, from: db)
 
         return tracks
+        #else
+        // TODO: switch to the vendored CSQLite target so this path works on
+        // Windows/Linux too (tracked as a later port step).
+        throw ParseError.invalidFormat("Engine DJ import is not yet supported on this platform")
+        #endif
     }
 
     // MARK: - Track Loading
+    #if canImport(SQLite3)
 
     private static func loadTracks(from db: OpaquePointer) throws -> [Track] {
         let sql = "SELECT id, title, artist, album, genre, length, bpmAnalyzed, key, path, filename FROM Track"
@@ -138,6 +149,7 @@ enum EngineDJParser {
             }
         }
     }
+    #endif
 
     // MARK: - BLOB Parsing
 
@@ -224,6 +236,7 @@ enum EngineDJParser {
     // MARK: - Zlib Decompression
 
     private static func zlibDecompress(_ compressed: Data, expectedSize: Int) -> Data? {
+        #if canImport(Compression)
         // Use Apple's Compression framework with ZLIB algorithm
         let bufferSize = max(expectedSize + 256, compressed.count * 4)
         let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
@@ -243,6 +256,11 @@ enum EngineDJParser {
 
         guard decompressedSize > 0 else { return nil }
         return Data(bytes: destinationBuffer, count: decompressedSize)
+        #else
+        // TODO: switch to the vendored CZlib target so this path works on
+        // Windows/Linux too (tracked as a later port step).
+        return nil
+        #endif
     }
 
     // MARK: - Binary Helpers
@@ -255,6 +273,7 @@ enum EngineDJParser {
         return Double(bitPattern: value)
     }
 
+    #if canImport(SQLite3)
     private static func columnText(_ stmt: OpaquePointer?, _ col: Int32) -> String {
         guard let cStr = sqlite3_column_text(stmt, col) else { return "" }
         return String(cString: cStr)
@@ -274,6 +293,7 @@ enum EngineDJParser {
             throw ParseError.invalidFormat("Engine DJ database is missing the \(name) table")
         }
     }
+    #endif
 
     // MARK: - Engine DJ Cue Colors
 

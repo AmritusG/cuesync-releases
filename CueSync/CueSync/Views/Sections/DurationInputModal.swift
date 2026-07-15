@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct DurationInputModal: View {
@@ -119,3 +120,4 @@ struct DurationInputModal: View {
         .frame(width: 400)
     }
 }
+#endif

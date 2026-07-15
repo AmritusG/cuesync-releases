@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct DurationInputView: View {
@@ -67,3 +68,4 @@ struct DurationInputView: View {
         return String(format: "%d.%03d", Int(seconds), ms)
     }
 }
+#endif

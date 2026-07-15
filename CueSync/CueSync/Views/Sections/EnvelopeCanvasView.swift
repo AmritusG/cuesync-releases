@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct EnvelopeCanvasView: View {
@@ -291,3 +292,4 @@ struct EnvelopeCanvasView: View {
 
     private func clamp(_ v: Double) -> Double { min(max(v, 0), 1) }
 }
+#endif

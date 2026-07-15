@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import SwiftUI
 
 struct BrowseSectionView: View {
@@ -328,3 +329,4 @@ private struct TrackRow: View {
         .animation(.easeInOut(duration: 0.15), value: isHovered)
     }
 }
+#endif
