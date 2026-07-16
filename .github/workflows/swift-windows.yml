@@ -46,13 +46,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the Swift toolchain + Windows SDK. `branch`/`tag` are the
-      # deprecated input names; the action now takes `swift-version`. If a
-      # signed-installer step 404s on swift.org, bump this to a release whose
-      # windows package is published with a signature.
-      - uses: compnerd/gha-setup-swift@main
+      # Installs the Swift toolchain + Windows SDK. SwiftyLab/setup-swift
+      # resolves the Windows package from a plain version and handles the MSVC
+      # environment — avoids compnerd's shifting input-name requirements
+      # (`swift-build`/`swift-version`). Bump the version if a release's Windows
+      # package is unavailable.
+      - uses: SwiftyLab/setup-swift@latest
         with:
-          swift-version: 6.0.3-RELEASE
+          swift-version: "6.0.3"
 
       - name: Swift version
         run: swift --version
