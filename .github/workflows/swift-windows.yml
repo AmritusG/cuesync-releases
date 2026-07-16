@@ -42,6 +42,21 @@ jobs:
 
       - name: Swift version
         run: swift --version
+
+      # spec CUESYNC-6 §C.14: once the CueSync executable target depends
+      # unconditionally on GtkBackend (§A/§B), the macOS SwiftPM leg needs a
+      # real GTK 4 too, or "swift build -c release" goes red here exactly the
+      # way it would on Windows without one. Locally verified (findings doc
+      # §0.5): `brew install gtk4` (Homebrew 4.22.4 as of that check) is
+      # sufficient for GtkBackend to compile and link on macOS arm64; pkg-config
+      # ships with Homebrew's base install already, but naming it explicitly
+      # here matches upstream swift-cross-ui's own macOS job and costs nothing
+      # extra when it's already present. Not version-pinnable in the ordinary
+      # way — brew installs whatever the tap currently carries — flagged as a
+      # known weakness in the PR per spec §4, not silently treated as reproducible.
+      - name: Install GTK 4
+        run: brew install pkg-config gtk4
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -110,23 +125,207 @@ jobs:
           swift-version: swift-6.1-release
           swift-build: 6.1-RELEASE
 
+      # spec CUESYNC-6 §0.4/§C.13 — GTK 4 distribution: **vcpkg**, not the
+      # spec's original gvsbuild/MSYS2 candidates (findings doc §0.4 revised
+      # this after checking swift-cross-ui's own docs/CI at the pinned
+      # revision — upstream states plainly it only supports GTK-on-Windows via
+      # vcpkg). vcpkg builds GTK 4 from source rather than shipping a
+      # downloadable prebuilt binary, so — per spec §4 — the correct pin point
+      # is the vcpkg tool's own git commit, not a SHA-256 of an asset that
+      # doesn't exist. `2026.06.24` (commit 52c9e08cdf8580d2d9762f547d22b96fd81e82f2),
+      # the newest vcpkg tag at CI-wiring time, confirmed to contain a `gtk`
+      # port (version 4.22.4) via the GitHub API before being pinned here.
+      # Caching `vcpkg/installed` separately from the SwiftPM `.build` cache
+      # below: a cold-cache GTK 4 build is 45+ minutes (findings doc §0.4), so
+      # this is the single biggest cost in the job and deserves its own key.
+      - name: Cache vcpkg GTK 4 install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vcpkg/installed
+          key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2
+          restore-keys: |
+            windows-build-vcpkg-gtk4-
+
+      # Install GTK 4 (vcpkg, pinned). Deliberately clones vcpkg fresh rather
+      # than using the copy windows-latest ships at C:\vcpkg (runner-images'
+      # Windows2022-Readme.md documents it, unpinned and updated on whatever
+      # schedule the image maintainers choose) — cloning and checking out an
+      # exact commit is the reproducible pin spec §4 requires. Classic
+      # (non-manifest) mode: the port set available is exactly what ships at
+      # the pinned commit, so pinning the vcpkg checkout pins the GTK 4 build
+      # recipe with it. `vcpkg install` is idempotent against an
+      # already-populated `installed/` tree (restored above on a cache hit),
+      # so this step is left unconditional rather than skipped on cache hit —
+      # a skip-on-hit would be exactly the "stale cache hides a broken
+      # install" failure mode spec §C.13 warns against.
+      - name: Install GTK 4 (vcpkg, pinned)
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg
+          git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
+          ./vcpkg/bootstrap-vcpkg.bat
+          ./vcpkg/vcpkg install gtk --triplet x64-windows
+
+      # spec §0.3(a): SwiftPM's systemLibrary pkgConfig: resolution needs GTK's
+      # .pc files reachable via PKG_CONFIG_PATH. SwiftPM parses .pc files
+      # itself (PackageLoading/PkgConfig.swift) rather than shelling out for
+      # that part, but it does still probe for a literal `pkg-config`
+      # executable to discover built-in search paths — that probe degrades to
+      # a diagnostic rather than a hard failure if the binary is absent, but
+      # providing one is cheap and removes an unknown. vcpkg vendors pkgconf as
+      # a fetchable host tool; copy it to a `pkg-config.exe`-named copy since
+      # that is the literal name SwiftPM looks for.
+      - name: Configure pkg-config for vcpkg GTK 4
+        shell: pwsh
+        run: |
+          $pkgconf = (./vcpkg/vcpkg fetch pkgconf | Select-Object -Last 1)
+          $pkgconfDir = Split-Path $pkgconf
+          Copy-Item $pkgconf (Join-Path $pkgconfDir "pkg-config.exe") -Force
+          Add-Content $env:GITHUB_PATH $pkgconfDir
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
+
       # Same rationale as the macOS leg's cache step: a from-scratch compile of
       # swift-cross-ui's dependency closure is the dominant cost of this job
       # (Build (release) alone ran ~19 minutes with no cache), and Windows is
       # already the slower leg due to the toolchain/VS setup steps above.
+      # Key extended with the pinned vcpkg commit (spec §C.13): Package.resolved
+      # itself does not change for this ticket (§A.9), so hashing it alone can
+      # never invalidate this cache when the GTK version changes — the pinned
+      # commit literal is the actual GTK input and must be bumped by hand
+      # alongside the "Install GTK 4" step above whenever the pin moves.
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-build-spm-${{ hashFiles('Package.resolved') }}
+          key: windows-build-spm-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-build-spm-
+            windows-build-spm-vcpkg-
 
       - name: Swift version
         run: swift --version
 
       - name: Build (release)
         run: swift build -c release
+
+      # spec §D.17: bundle the GTK 4 runtime (and its transitive closure —
+      # glib, cairo, pango, harfbuzz, gdk-pixbuf, graphene, fribidi, libepoxy,
+      # the image codecs, intl, zlib and friends) next to CueSync.exe so the
+      # uploaded cuesync-windows artifact is self-contained. Copy everything
+      # vcpkg placed in the triplet's bin/ rather than hand-curating the list —
+      # the §D.18 closure check below is what tells us what's actually required.
+      - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
+        shell: pwsh
+        run: |
+          Get-ChildItem vcpkg\installed\x64-windows\bin -File |
+            Where-Object { $_.Extension -eq '.dll' } |
+            Copy-Item -Destination .build\release\ -Force
+
+      # spec §0.6/§D.18 — the dependency-checking tool: marcoesposito1988/
+      # dependency_runner's `wldd` ("ldd for Windows"), corrected from the
+      # ticket's conflated owner/binary name per findings doc §0.6. Its
+      # release assets publish no checksums, so — per spec §4 — the SHA-256 is
+      # computed once here and verified BEFORE extraction, not after.
+      - name: Install dependency-closure checker (wldd v1.5.0, pinned)
+        shell: pwsh
+        run: |
+          $wlddZip = "$env:RUNNER_TEMP\wldd.zip"
+          Invoke-WebRequest -Uri "https://github.com/marcoesposito1988/dependency_runner/releases/download/v1.5.0/wldd-x86_64-pc-windows-msvc.zip" -OutFile $wlddZip
+          $expectedSha256 = "2DFB5102A00D5E6A368F2A5E0F78733B9EFD7D629B4E90952F3759625971D016"
+          $actualSha256 = (Get-FileHash $wlddZip -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            Write-Error "wldd.zip checksum mismatch: expected $expectedSha256, got $actualSha256"
+            exit 1
+          }
+          Expand-Archive -Path $wlddZip -DestinationPath "$env:RUNNER_TEMP\wldd" -Force
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\wldd"
+
+      # spec §D.18/§D.19 — the closure check itself, plus its mandatory
+      # negative control. Contract (§D.18): resolve CueSync.exe's transitive
+      # import closure via the real Windows DLL search order; fail the job on
+      # any unresolved DLL, or any non-system DLL resolved from outside the
+      # artifact directory. The system allowlist is the narrow, explicit list
+      # below — no wildcard beyond the spec-sanctioned `api-ms-win-*` family.
+      # `wldd` itself always exits 0 (it is an inspection tool, not a gate —
+      # confirmed by reading its source), so the gating is done here by
+      # parsing its `name => path` / `name => not found` output, matching
+      # spec §D.18's "fails the job" requirement rather than trusting an exit
+      # code nobody would otherwise inspect.
+      #
+      # The Swift runtime DLLs (swiftCore.dll, Foundation.dll, dispatch.dll,
+      # BlocksRuntime.dll, ...) are deliberately NOT in this allowlist and are
+      # NOT bundled — spec §D.18 forbids allowlisting them into silence, and
+      # this ticket leaves bundling them genuinely out of scope: on the CI
+      # runner they resolve via the Swift toolchain's PATH, so this check
+      # stays green here, but a DJ's machine will not have them. That gap is
+      # real, is not covered by this check, and is the next ticket's work.
+      #
+      # §D.19: a check that passes proves nothing until watched to fail for
+      # the right reason. This step removes one bundled DLL, re-runs the
+      # check and asserts it FAILS, restores the DLL, then re-runs once more
+      # and asserts it PASSES again.
+      - name: Verify DLL closure (clean run, then negative control)
+        shell: pwsh
+        run: |
+          $allow = @(
+            'kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','ole32.dll',
+            'oleaut32.dll','shell32.dll','shlwapi.dll','ws2_32.dll','ucrtbase.dll',
+            'msvcrt.dll','ntdll.dll','crypt32.dll','bcrypt.dll','version.dll',
+            'winmm.dll','dwmapi.dll','comctl32.dll','comdlg32.dll','imm32.dll',
+            'setupapi.dll','api-ms-win-*'
+          )
+          $artifactDir = (Resolve-Path ".build\release").Path
+
+          function Test-DllClosure {
+            param([string]$exePath)
+            $lines = & wldd $exePath
+            $lines | ForEach-Object { Write-Host $_ }
+            $failed = $false
+            foreach ($rawLine in $lines) {
+              $trimmedLine = $rawLine.Trim()
+              if ($trimmedLine.EndsWith(' => not found')) {
+                Write-Error "unresolved dependency: $trimmedLine"
+                $failed = $true
+                continue
+              }
+              $separatorIndex = $trimmedLine.IndexOf(' => ')
+              if ($separatorIndex -gt 0) {
+                $name = $trimmedLine.Substring(0, $separatorIndex).Trim()
+                $path = $trimmedLine.Substring($separatorIndex + 4).Trim()
+                $isInsideArtifact = $path.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)
+                $isAllowedSystemDll = [bool]($allow | Where-Object { $name -like $_ })
+                if (-not $isInsideArtifact -and -not $isAllowedSystemDll) {
+                  Write-Error "non-system DLL resolved outside the artifact directory: $name => $path"
+                  $failed = $true
+                }
+              }
+            }
+            return -not $failed
+          }
+
+          Write-Host "== Dependency-closure check (clean) =="
+          if (-not (Test-DllClosure ".build\release\CueSync.exe")) { throw "clean dependency-closure check failed" }
+          Write-Host "Closure check passed: no missing or non-system DLL found outside the artifact directory."
+
+          $victimDll = (Get-ChildItem ".build\release" -File |
+            Where-Object { $_.Extension -eq '.dll' } | Select-Object -First 1).BaseName
+          if (-not $victimDll) { Write-Error "no bundled DLL found to use for the negative control"; exit 1 }
+
+          Write-Host "== Negative control: removing $victimDll.dll =="
+          Copy-Item ".build\release\$victimDll.dll" "$env:RUNNER_TEMP\$victimDll.dll.bak" -Force
+          Remove-Item ".build\release\$victimDll.dll" -Force
+
+          if (Test-DllClosure ".build\release\CueSync.exe") {
+            throw "negative control failed: the closure check still passed with $victimDll.dll removed"
+          }
+          Write-Host "Negative control confirmed: the check correctly failed with $victimDll.dll removed."
+
+          Write-Host "== Restoring $victimDll.dll =="
+          Copy-Item "$env:RUNNER_TEMP\$victimDll.dll.bak" ".build\release\$victimDll.dll" -Force
+
+          if (-not (Test-DllClosure ".build\release\CueSync.exe")) {
+            throw "closure check still fails after restoring $victimDll.dll"
+          }
+          Write-Host "Closure check passes again after restoring the DLL."
 
       - name: Upload build artifact
         if: always()
