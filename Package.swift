@@ -60,7 +60,9 @@ let package = Package(
             dependencies: [
                 "CueSyncCore",
                 .product(name: "SwiftCrossUI", package: "swift-cross-ui"),
-                .product(name: "DefaultBackend", package: "swift-cross-ui"),
+                // Pinned explicitly to GtkBackend rather than DefaultBackend (which
+                // would pick WinUIBackend on Windows) — spec CUESYNC-6 §0.1/§A.8.
+                .product(name: "GtkBackend", package: "swift-cross-ui"),
             ],
             path: "CueSync/CueSync",
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters", "Support"],

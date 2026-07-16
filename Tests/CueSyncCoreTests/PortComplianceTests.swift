@@ -81,6 +81,29 @@ final class PortComplianceTests: XCTestCase {
         )
     }
 
+    /// spec CUESYNC-6 §A.8/§E.21: the CueSync target must depend on the swift-cross-ui
+    /// **GtkBackend** product specifically, and no longer on DefaultBackend. Asserts on the
+    /// target block's structure (via `targetBlock`), not a substring of the whole manifest,
+    /// so a comment elsewhere mentioning "DefaultBackend" (this spec's own rationale
+    /// quotes it) can't accidentally satisfy or fail this — the CUESYNC-5 §D.15 lesson.
+    func testCueSyncTargetDependsOnGtkBackendAndNotDefaultBackend() throws {
+        let manifest = try readPackageSwift()
+        guard let cueSyncBlock = targetBlock(named: "CueSync", in: manifest) else {
+            XCTFail("could not locate the CueSync target block in Package.swift")
+            return
+        }
+        XCTAssertTrue(
+            cueSyncBlock.range(of: #"\.product\(\s*name:\s*"GtkBackend",\s*package:\s*"swift-cross-ui"\s*\)"#,
+                               options: .regularExpression) != nil,
+            "the CueSync target must depend on .product(name: \"GtkBackend\", package: \"swift-cross-ui\") (spec CUESYNC-6 §A.8)"
+        )
+        XCTAssertTrue(
+            cueSyncBlock.range(of: #"\.product\(\s*name:\s*"DefaultBackend",\s*package:\s*"swift-cross-ui"\s*\)"#,
+                               options: .regularExpression) == nil,
+            "the CueSync target must no longer depend on DefaultBackend (spec CUESYNC-6 §A.8)"
+        )
+    }
+
     /// spec acceptance criteria (§3, Manifest): `CUESYNC_CROSSUI` is defined in
     /// `swiftSettings` for the `CueSync` target only — `CueSyncCore` stays UI-free and
     /// gains no new dependency (spec §A, flag semantics table).
@@ -342,6 +365,44 @@ final class PortComplianceTests: XCTestCase {
         for name in forbidden {
             XCTAssertFalse(src.contains(name),
                            "UI/ContentView.swift must not reference \(name) yet — this ticket's ContentView is empty by design (spec §B.11)")
+        }
+    }
+
+    /// spec CUESYNC-6 §B.10/§E.22: `UI/CueSyncApp.swift` must import GtkBackend and must
+    /// not import DefaultBackend, still inside its `#if CUESYNC_CROSSUI` guard. Checks
+    /// whole-line imports (not a substring match) so a comment mentioning "DefaultBackend"
+    /// — this spec's own rationale for the swap quotes it — can't trip either assertion.
+    func testUICueSyncAppImportsGtkBackendNotDefaultBackend() throws {
+        let url = Self.sourceRoot.appendingPathComponent("UI/CueSyncApp.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        let trimmed = src.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(trimmed.hasPrefix("#if CUESYNC_CROSSUI"),
+                      "UI/CueSyncApp.swift must stay fully wrapped in #if CUESYNC_CROSSUI (spec §3)")
+        let lines = src.replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        XCTAssertTrue(lines.contains("import GtkBackend"),
+                      "UI/CueSyncApp.swift must import GtkBackend (spec CUESYNC-6 §B.10)")
+        XCTAssertFalse(lines.contains("import DefaultBackend"),
+                       "UI/CueSyncApp.swift must no longer import DefaultBackend (spec CUESYNC-6 §B.10)")
+    }
+
+    /// spec CUESYNC-6 §B.11/§E.23: `UI/ContentView.swift` is explicitly left byte-for-byte
+    /// alone by this ticket — it still declares the empty placeholder `View` and imports no
+    /// backend module (only `SwiftCrossUI`, which is backend-agnostic).
+    func testUIContentViewUnmodifiedAndImportsNoBackendModule() throws {
+        let url = Self.sourceRoot.appendingPathComponent("UI/ContentView.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(src.contains("struct ContentView: View"),
+                      "UI/ContentView.swift must still declare struct ContentView: View (spec CUESYNC-6 §B.11)")
+        XCTAssertTrue(src.contains(#"Text("CUE SYNC")"#),
+                      "UI/ContentView.swift must still hold only the placeholder body (spec CUESYNC-6 §B.11)")
+        let lines = src.replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        for backend in ["GtkBackend", "DefaultBackend", "WinUIBackend", "AppKitBackend", "Gtk3Backend"] {
+            XCTAssertFalse(lines.contains("import \(backend)"),
+                           "UI/ContentView.swift must import no backend module, found import \(backend) (spec CUESYNC-6 §B.11)")
         }
     }
 
