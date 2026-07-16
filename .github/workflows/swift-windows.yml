@@ -24,16 +24,21 @@ jobs:
     name: swift · macos-latest
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Swift version
         run: swift --version
       - name: Build (release)
         run: swift build -c release
+      # -c release: reuses the object files "Build (release)" just produced
+      # instead of triggering a second, fully separate debug compile of the
+      # whole dependency graph (swift-cross-ui, swift-syntax macros, CSQLite,
+      # CZlib) — that redundant double-build is what was pushing total CI
+      # time past the 1800s ceiling.
       - name: Test
-        run: swift test
+        run: swift test -c release
       - name: Upload build artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cuesync-macos
           path: .build/release/
@@ -44,7 +49,7 @@ jobs:
     name: swift · windows-latest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # swift-cross-ui's WinUIBackend (CUESYNC-5) depends on swift-winui, whose
       # own compile-time prerequisite is the Windows 10.0.17763.0 SDK
@@ -88,10 +93,16 @@ jobs:
       # is XCTest) and exits non-zero even when every XCTest passes — a spurious
       # failure. So we gate on the XCTest result: fail only if XCTest reports an
       # actual failure; the "0 tests" swift-testing exit is ignored.
+      #
+      # -c release: reuses the object files "Build (release)" just produced
+      # instead of triggering a second, fully separate debug compile of the
+      # whole dependency graph (swift-cross-ui, swift-syntax macros, CSQLite,
+      # CZlib) — that redundant double-build, already slow on Windows, is what
+      # was pushing total CI time past the 1800s ceiling.
       - name: Test
         shell: pwsh
         run: |
-          $out = swift test 2>&1 | Tee-Object -Variable log | Out-String
+          $out = swift test -c release 2>&1 | Tee-Object -Variable log | Out-String
           if ($out -match "with (\d+) failures") {
             $fails = [int]$Matches[1]
             if ($fails -gt 0) { Write-Error "XCTest reported $fails failure(s)"; exit 1 }
@@ -103,7 +114,7 @@ jobs:
 
       - name: Upload build artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cuesync-windows
           path: .build/release/
