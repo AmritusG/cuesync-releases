@@ -46,13 +46,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # swift-cross-ui's WinUIBackend (CUESYNC-5) depends on swift-winui, whose
+      # own compile-time prerequisite is the Windows 10.0.17763.0 SDK
+      # (https://github.com/moreSwift/swift-winui#compiletime-dependencies:
+      # `winget install --id Microsoft.WindowsSDK.10.0.17763`). No install step
+      # is added here: actions/runner-images' own Windows2022-Readme.md lists
+      # 10.0.17763.0 among the SDKs windows-latest already ships, and winget
+      # itself isn't in that image's documented tool inventory, so adding an
+      # unverified winget step would trade a real, checked prerequisite for an
+      # unverified one. If a future runner image drops this SDK, that will
+      # surface as a hard failure in "Build (release)" below — the fix then is
+      # a pinned SDK install step here, not a silent workaround.
+
+      # WinUIBackend needs the MSVC linker + Windows SDK environment that
+      # Visual Studio's vcvars normally sets up — swift-cross-ui's own CI
+      # (build-test-and-docs.yml, windows job) does the same before building
+      # WinUIBackend. Pinned to the v5 tag's commit, not a floating major-version ref.
+      - name: Setup VS Dev Environment
+        uses: seanmiddleditch/gha-setup-vsdevenv@cf96bf5b227cac6af28c04c4a4e69286ea444163 # v5
+
       # Installs the Swift toolchain + Windows SDK via the official
       # Swift-on-Windows action. We use compnerd (not SwiftyLab) because recent
       # swift.org Windows installers are published WITHOUT a `.sig` file, and
       # SwiftyLab hard-fails signature verification ("No signature at
       # .../windows10.exe.sig"). compnerd installs directly, no swiftorg signature
-      # gate. It needs BOTH the release branch and the build id.
-      - uses: compnerd/gha-setup-swift@main
+      # gate. It needs BOTH the release branch and the build id. Pinned to the
+      # v0.4.0 tag's commit, not the floating `main` branch.
+      - uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
         with:
           swift-version: swift-6.1-release
           swift-build: 6.1-RELEASE

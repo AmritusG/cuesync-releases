@@ -53,6 +53,15 @@ typedef unsigned long  ulg;
 #  endif
 #endif
 
+/* Upstream zlib's Z_PREFIX rename table (zconf.h) covers every symbol in the
+ * public zlib.h API but misses this one internal, externally-linked array —
+ * so it still collides at link time with any other zlib copy in the same
+ * binary (e.g. swift-cross-ui's ImageFormats -> libpng -> zlib chain) even
+ * with Z_PREFIX defined. Rename it unconditionally; it is declared only in
+ * this private header, never in the public module map, so nothing outside
+ * this target can reference it by either name.
+ */
+#define z_errmsg cuesync_z_errmsg
 extern z_const char * const z_errmsg[10]; /* indexed by 2-zlib_error */
 /* (size given to avoid silly warnings with Visual C++) */
 

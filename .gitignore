@@ -22,7 +22,8 @@ xcuserdata/
 # Swift Package Manager
 .swiftpm/
 .build/
-Package.resolved
+# Package.resolved is committed once swift-cross-ui is a dependency (CUESYNC-5
+# §A.8) — it's the record of exactly which commit was audited and pinned.
 
 # CueSync build artifacts (signed/notarized output kept out of source)
 builds/

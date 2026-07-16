@@ -8,6 +8,12 @@ let package = Package(
         .library(name: "CueSyncCore", targets: ["CueSyncCore"]),
         .executable(name: "CueSync", targets: ["CueSync"]),
     ],
+    dependencies: [
+        // Pinned to the exact release tag v0.8.0, resolved commit
+        // a6d206370812e3b9edba259d167e848892c5013d (spec CUESYNC-5 §0.1). `exact:`,
+        // never `branch:`/`from:` — the bytes are pinned, not a moving label (§4).
+        .package(url: "https://github.com/moreSwift/swift-cross-ui", exact: "0.8.0"),
+    ],
     targets: [
         // Vendored SQLite amalgamation (see Sources/CSQLite/README.md). Compiling it
         // directly removes any "install SQLite" prerequisite on Windows/Linux.
@@ -22,6 +28,11 @@ let package = Package(
         ),
         // Vendored zlib source (see Sources/CZlib/README.md). Compiling it directly
         // removes any "install zlib" prerequisite on Windows/Linux/ARM.
+        // include/zconf.h unconditionally defines Z_PREFIX, renaming every exported
+        // symbol (deflate -> z_deflate, etc.) so this vendored copy can coexist in
+        // the same binary as swift-cross-ui's own vendored zlib (pulled in
+        // transitively via ImageFormats -> libpng) without a duplicate-symbol link
+        // error — both link into the single CueSync executable (CUESYNC-5 §0).
         .target(
             name: "CZlib",
             path: "Sources/CZlib",
@@ -37,14 +48,24 @@ let package = Package(
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "UI"],
             sources: ["Models", "Parsers", "Exporters", "Support"]
         ),
-        // Placeholder executable shell. The real swift-cross-ui presentation
-        // layer is re-hosted here screen-by-screen in later steps.
+        // swift-cross-ui app shell, re-hosted here screen-by-screen in later steps.
+        // CUESYNC_CROSSUI is defined ONLY by this SwiftPM target, never by
+        // CueSyncCore and never by the Xcode build — it exists to make the split
+        // between the SwiftUI/AppKit presentation (App/, Views/, Theme/, built by
+        // CueSync.xcodeproj, untouched) and this cross-platform presentation
+        // (UI/, built by `swift build`) explicit and machine-checkable, since the
+        // directory split alone can't guard a file that ends up compiled into both.
         .executableTarget(
             name: "CueSync",
-            dependencies: ["CueSyncCore"],
+            dependencies: [
+                "CueSyncCore",
+                .product(name: "SwiftCrossUI", package: "swift-cross-ui"),
+                .product(name: "DefaultBackend", package: "swift-cross-ui"),
+            ],
             path: "CueSync/CueSync",
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters", "Support"],
-            sources: ["UI"]
+            sources: ["UI"],
+            swiftSettings: [.define("CUESYNC_CROSSUI")]
         ),
         // Ports CueSync/Tests/CueSyncTests.swift (custom-runner suite) into XCTest so
         // `swift test` exercises Models/Parsers/Exporters on windows-latest + macos-latest

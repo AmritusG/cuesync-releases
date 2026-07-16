@@ -54,10 +54,13 @@ enum Zlib {
     /// stream instead of growing `output` without bound.
     private static func vendoredInflate(_ src: Data, cap: Int) -> Data? {
         var stream = z_stream()
-        guard CZlib.inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+        // CZlib is compiled with Z_PREFIX (Package.swift) so it can coexist with
+        // other vendored zlib copies in the same binary; every exported symbol
+        // gains a z_ prefix, e.g. inflateInit2_ -> z_inflateInit2_.
+        guard CZlib.z_inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
             return nil
         }
-        defer { CZlib.inflateEnd(&stream) }
+        defer { CZlib.z_inflateEnd(&stream) }
 
         var output = [UInt8]()
         let chunkSize = 4096
@@ -73,7 +76,7 @@ enum Zlib {
                 status = chunk.withUnsafeMutableBufferPointer { chunkBuf -> Int32 in
                     stream.next_out = chunkBuf.baseAddress
                     stream.avail_out = UInt32(chunkSize)
-                    let r = CZlib.inflate(&stream, Z_NO_FLUSH)
+                    let r = CZlib.z_inflate(&stream, Z_NO_FLUSH)
                     let producedCount = chunkSize - Int(stream.avail_out)
                     if producedCount > 0 { output.append(contentsOf: chunkBuf.prefix(producedCount)) }
                     return r

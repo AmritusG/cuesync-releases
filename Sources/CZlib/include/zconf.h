@@ -13,7 +13,17 @@
  * compile with -DZ_PREFIX. The "standard" zlib should be compiled without it.
  * Even better than compiling with -DZ_PREFIX would be to use configure to set
  * this permanently in zconf.h using "./configure --zprefix".
+ *
+ * CueSync always wants the prefixed symbols: this vendored copy has to
+ * coexist in the same binary as swift-cross-ui's own vendored zlib (pulled
+ * in transitively via ImageFormats -> libpng), so its exported names must
+ * never collide (CUESYNC-5 §0). Defining it here, unconditionally, rather
+ * than passing -DZ_PREFIX via Package.swift's cSettings, guarantees every
+ * Swift target that imports this header sees the same renamed symbols —
+ * a C target's cSettings define is not guaranteed to reach every downstream
+ * target's ClangImporter invocation the header is parsed under.
  */
+#define Z_PREFIX 1
 #ifdef Z_PREFIX     /* may be set to #if 1 by ./configure */
 #  define Z_PREFIX_SET
 

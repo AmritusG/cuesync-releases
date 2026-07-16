@@ -94,10 +94,13 @@ enum ZlibFixtures {
     /// without depending on an Apple-only encoder.
     static func rawDeflate(_ input: [UInt8]) -> [UInt8] {
         var stream = z_stream()
-        guard CZlib.deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
+        // CZlib is compiled with Z_PREFIX (Package.swift) so it can coexist with
+        // other vendored zlib copies in the same binary; every exported symbol
+        // gains a z_ prefix, e.g. deflateInit2_ -> z_deflateInit2_.
+        guard CZlib.z_deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
                                    Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK
         else { return [] }
-        defer { CZlib.deflateEnd(&stream) }
+        defer { CZlib.z_deflateEnd(&stream) }
 
         var output = [UInt8]()
         let chunkSize = 4096
@@ -112,7 +115,7 @@ enum ZlibFixtures {
                 status = chunk.withUnsafeMutableBufferPointer { chunkBuf -> Int32 in
                     stream.next_out = chunkBuf.baseAddress
                     stream.avail_out = UInt32(chunkSize)
-                    let r = CZlib.deflate(&stream, Z_FINISH)
+                    let r = CZlib.z_deflate(&stream, Z_FINISH)
                     let producedCount = chunkSize - Int(stream.avail_out)
                     if producedCount > 0 { output.append(contentsOf: chunkBuf.prefix(producedCount)) }
                     return r
