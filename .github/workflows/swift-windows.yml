@@ -63,8 +63,23 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+      # On Windows, `swift test` spawns BOTH the XCTest runner and the
+      # swift-testing runner. The swift-testing runner finds 0 tests (the suite
+      # is XCTest) and exits non-zero even when every XCTest passes — a spurious
+      # failure. So we gate on the XCTest result: fail only if XCTest reports an
+      # actual failure; the "0 tests" swift-testing exit is ignored.
       - name: Test
-        run: swift test
+        shell: pwsh
+        run: |
+          $out = swift test 2>&1 | Tee-Object -Variable log | Out-String
+          if ($out -match "with (\d+) failures") {
+            $fails = [int]$Matches[1]
+            if ($fails -gt 0) { Write-Error "XCTest reported $fails failure(s)"; exit 1 }
+            Write-Host "All XCTest tests passed ($fails failures)."
+            exit 0
+          }
+          # No XCTest summary line found — surface the real exit for diagnosis.
+          if ($LASTEXITCODE -ne 0) { Write-Error "swift test failed and no XCTest summary was found"; exit 1 }
 
       - name: Upload build artifact
         if: always()
