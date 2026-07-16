@@ -46,14 +46,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the Swift toolchain + Windows SDK. Pinned to 6.1 because the
-      # 6.0.3 Windows installer on swift.org ships WITHOUT a `.sig` signature
-      # file, so signature-verifying setup actions refuse it ("No signature
-      # at .../swift-6.0.3-RELEASE-windows10.exe.sig"). 6.1's Windows package is
-      # signed. Bump only to another release whose windows .exe.sig exists.
-      - uses: SwiftyLab/setup-swift@latest
+      # Installs the Swift toolchain + Windows SDK via the official
+      # Swift-on-Windows action. We use compnerd (not SwiftyLab) because recent
+      # swift.org Windows installers are published WITHOUT a `.sig` file, and
+      # SwiftyLab hard-fails signature verification ("No signature at
+      # .../windows10.exe.sig"). compnerd installs directly, no swiftorg signature
+      # gate. It needs BOTH the release branch and the build id.
+      - uses: compnerd/gha-setup-swift@main
         with:
-          swift-version: "6.1"
+          swift-version: swift-6.1-release
+          swift-build: 6.1-RELEASE
 
       - name: Swift version
         run: swift --version
