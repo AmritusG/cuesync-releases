@@ -25,6 +25,21 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # swift-cross-ui's own dependency closure (swift-syntax macros, WinUI/image
+      # codec targets, etc. — CUESYNC-5 §0) compiles from absolute zero on every
+      # push with no cache, which by itself was pushing "Build (release)" past
+      # 15 minutes and total job time past the 1800s ceiling. Caching `.build`
+      # keyed on Package.resolved means only a changed manifest re-triggers a
+      # full rebuild; unrelated commits hit a warm cache.
+      - name: Cache SwiftPM build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .build
+          key: macos-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            macos-spm-
+
       - name: Swift version
         run: swift --version
       - name: Build (release)
@@ -45,8 +60,21 @@ jobs:
           if-no-files-found: ignore
 
   # -------- Windows x64: install Swift, then build --------
-  windows:
-    name: swift · windows-latest
+  #
+  # Split into two independent jobs (build / test) instead of one sequential
+  # job. `CueSyncCoreTests` depends only on CueSyncCore/CSQLite/CZlib (see
+  # Package.swift) — never on the CueSync executable target, which is what
+  # pulls in swift-cross-ui's whole dependency closure (swift-syntax macros,
+  # WinUI projections, image codecs). That closure is what made "Build
+  # (release)" alone take ~19 minutes with a cold cache; running it after Test
+  # serialized the two into ~30 minutes in a single job, over the 1800s
+  # ceiling. Since GitHub Actions already runs jobs without a `needs:` edge in
+  # parallel, giving build and test their own jobs lets the ~10-minute test
+  # job finish alongside the ~19-minute build job instead of after it — the
+  # toolchain/VS setup steps are duplicated, but that's a couple of minutes,
+  # not the ~10 minutes this saves off the critical path.
+  windows-build:
+    name: swift · windows-latest (build)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -82,23 +110,66 @@ jobs:
           swift-version: swift-6.1-release
           swift-build: 6.1-RELEASE
 
+      # Same rationale as the macOS leg's cache step: a from-scratch compile of
+      # swift-cross-ui's dependency closure is the dominant cost of this job
+      # (Build (release) alone ran ~19 minutes with no cache), and Windows is
+      # already the slower leg due to the toolchain/VS setup steps above.
+      - name: Cache SwiftPM build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .build
+          key: windows-build-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            windows-build-spm-
+
       - name: Swift version
         run: swift --version
 
       - name: Build (release)
         run: swift build -c release
 
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cuesync-windows
+          path: .build/release/
+          if-no-files-found: ignore
+
+  windows-test:
+    name: swift · windows-latest (test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup VS Dev Environment
+        uses: seanmiddleditch/gha-setup-vsdevenv@cf96bf5b227cac6af28c04c4a4e69286ea444163 # v5
+
+      - uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
+        with:
+          swift-version: swift-6.1-release
+          swift-build: 6.1-RELEASE
+
+      # Keyed separately from windows-build's cache: this job only ever builds
+      # CueSyncCoreTests' own dependency subset (CueSyncCore/CSQLite/CZlib),
+      # never the CueSync executable target or swift-cross-ui, so its .build
+      # is a different, much smaller artifact set.
+      - name: Cache SwiftPM build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .build
+          key: windows-test-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            windows-test-spm-
+
+      - name: Swift version
+        run: swift --version
+
       # On Windows, `swift test` spawns BOTH the XCTest runner and the
       # swift-testing runner. The swift-testing runner finds 0 tests (the suite
       # is XCTest) and exits non-zero even when every XCTest passes — a spurious
       # failure. So we gate on the XCTest result: fail only if XCTest reports an
       # actual failure; the "0 tests" swift-testing exit is ignored.
-      #
-      # -c release: reuses the object files "Build (release)" just produced
-      # instead of triggering a second, fully separate debug compile of the
-      # whole dependency graph (swift-cross-ui, swift-syntax macros, CSQLite,
-      # CZlib) — that redundant double-build, already slow on Windows, is what
-      # was pushing total CI time past the 1800s ceiling.
       - name: Test
         shell: pwsh
         run: |
@@ -111,11 +182,3 @@ jobs:
           }
           # No XCTest summary line found — surface the real exit for diagnosis.
           if ($LASTEXITCODE -ne 0) { Write-Error "swift test failed and no XCTest summary was found"; exit 1 }
-
-      - name: Upload build artifact
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cuesync-windows
-          path: .build/release/
-          if-no-files-found: ignore
