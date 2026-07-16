@@ -46,14 +46,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the Swift toolchain + Windows SDK. SwiftyLab/setup-swift
-      # resolves the Windows package from a plain version and handles the MSVC
-      # environment — avoids compnerd's shifting input-name requirements
-      # (`swift-build`/`swift-version`). Bump the version if a release's Windows
-      # package is unavailable.
+      # Installs the Swift toolchain + Windows SDK. Pinned to 6.1 because the
+      # 6.0.3 Windows installer on swift.org ships WITHOUT a `.sig` signature
+      # file, so signature-verifying setup actions refuse it ("No signature
+      # at .../swift-6.0.3-RELEASE-windows10.exe.sig"). 6.1's Windows package is
+      # signed. Bump only to another release whose windows .exe.sig exists.
       - uses: SwiftyLab/setup-swift@latest
         with:
-          swift-version: "6.0.3"
+          swift-version: "6.1"
 
       - name: Swift version
         run: swift --version
