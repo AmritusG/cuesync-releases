@@ -241,6 +241,194 @@ final class PortComplianceTests: XCTestCase {
         }
     }
 
+    /// spec §3 Source: "each fully wrapped in `#if CUESYNC_CROSSUI`" — stronger than just
+    /// opening with the guard (the prefix check above): the file must also *close* with
+    /// `#endif`, so no declaration in it can ever compile outside the flag. Uses
+    /// `.whitespacesAndNewlines` (covers CR, LF, and CRLF alike) so this holds regardless
+    /// of which line-ending convention a Windows checkout produces.
+    func testUIShellFilesAreFullyWrappedEndToEndInCUESYNCCROSSUIGuard() throws {
+        let uiDir = Self.sourceRoot.appendingPathComponent("UI")
+        for fileName in ["CueSyncApp.swift", "ContentView.swift"] {
+            let url = uiDir.appendingPathComponent(fileName)
+            guard let src = try? String(contentsOf: url, encoding: .utf8) else {
+                XCTFail("UI/\(fileName) does not exist (spec §B)")
+                continue
+            }
+            let trimmed = src.trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(trimmed.hasSuffix("#endif"),
+                          "UI/\(fileName) must close with #endif so nothing in it compiles outside CUESYNC_CROSSUI")
+        }
+    }
+
+    /// spec §3 Source: "`UI/` contains exactly `CueSyncApp.swift` and `ContentView.swift`" —
+    /// this ticket is step 1 of an incremental re-host and explicitly forbids porting any
+    /// screen yet (spec §B.11), so a stray extra file under `UI/` would itself be scope
+    /// creep. Mirrors the existing `Support/` exact-file-count pattern.
+    func testUIDirectoryContainsExactlyTheTwoShellFiles() throws {
+        let expected: Set<String> = ["CueSyncApp.swift", "ContentView.swift"]
+        let dir = Self.sourceRoot.appendingPathComponent("UI")
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        let swiftFiles = Set(names.filter { $0.hasSuffix(".swift") })
+        XCTAssertEqual(swiftFiles, expected,
+                       "UI/ must contain exactly the two shell files this ticket adds (spec §B), got \(swiftFiles.sorted())")
+    }
+
+    /// spec §3 Source: "No file under `UI/` imports AppKit, SwiftUI, CoreGraphics,
+    /// UniformTypeIdentifiers, AVFoundation, or Compression — guarded or not." This is
+    /// strictly stronger than `testNoSwiftPMSourceFileHasAnUnguardedAppleOnlyImport`, which
+    /// only requires those imports to be *guarded* elsewhere in the tree — inside `UI/`
+    /// even a `#if canImport(AppKit)`-guarded import is banned outright, because the
+    /// swift-cross-ui shell must never gain an Apple-only code path at all. Normalizes
+    /// CRLF to LF before scanning so a Windows checkout with `core.autocrlf` doesn't dodge
+    /// the check by leaving a trailing `\r` on every line.
+    func testNoFileUnderUIImportsBannedAppleFrameworksEvenIfGuarded() throws {
+        let banned = ["AppKit", "SwiftUI", "CoreGraphics", "UniformTypeIdentifiers", "AVFoundation", "Compression"]
+        let uiDir = Self.sourceRoot.appendingPathComponent("UI")
+        guard let files = swiftFiles(under: uiDir), !files.isEmpty else {
+            XCTFail("expected to find .swift files under UI/")
+            return
+        }
+        for file in files {
+            let src = try String(contentsOf: file, encoding: .utf8)
+            let lines = src.replacingOccurrences(of: "\r\n", with: "\n")
+                .split(separator: "\n", omittingEmptySubsequences: false)
+            for module in banned {
+                let hit = lines.contains { $0.trimmingCharacters(in: .whitespaces) == "import \(module)" }
+                XCTAssertFalse(hit, "UI/\(file.lastPathComponent) must never import \(module), guarded or not (spec §3)")
+            }
+        }
+    }
+
+    /// spec §B.10/§3 Behavior: the swift-cross-ui window must mirror `App/CueSyncApp.swift`
+    /// exactly — title **CUE SYNC**, default size **1200×800**, minimum **1200×700**. CI is
+    /// headless and can't launch the window (spec §E.22), so this structural check on the
+    /// literal source values is the closest automated proxy to that manual acceptance check.
+    func testUICueSyncAppDeclaresTheSpecifiedWindowTitleAndSizing() throws {
+        let url = Self.sourceRoot.appendingPathComponent("UI/CueSyncApp.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(src.contains("\"CUE SYNC\""), "UI/CueSyncApp.swift must title the window exactly \"CUE SYNC\"")
+        XCTAssertTrue(src.contains("width: 1200") && src.contains("height: 800"),
+                      "UI/CueSyncApp.swift must set the default size to 1200x800 (spec §B.10)")
+        XCTAssertTrue(src.contains("minWidth: 1200") && src.contains("minHeight: 700"),
+                      "UI/CueSyncApp.swift must set the minimum size to 1200x700 (spec §B.10)")
+    }
+
+    /// spec §1/§B: this ticket is step 1 of an incremental re-host — "No CUE SYNC screen is
+    /// ported in this ticket ... the menu commands are later tickets." A `.commands` scene
+    /// modifier (the swift-cross-ui/SwiftUI equivalent of `App/CueSyncApp.swift`'s
+    /// `CommandGroup`/`CommandMenu` block) would be exactly that kind of premature port.
+    func testUICueSyncAppDeclaresNoMenuCommandsYet() throws {
+        let url = Self.sourceRoot.appendingPathComponent("UI/CueSyncApp.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        for forbidden in [".commands", "CommandGroup", "CommandMenu"] {
+            XCTAssertFalse(src.contains(forbidden),
+                           "UI/CueSyncApp.swift must not declare menu commands yet (\(forbidden) found) — spec §1/§B")
+        }
+    }
+
+    /// spec §3 Source: "No screen, section, collapsible wrapper, grid overlay, menu
+    /// command, or envelope code ported. ContentView is empty by design." Scans for every
+    /// concrete section/screen type name that exists in the SwiftUI presentation
+    /// (`Views/Sections/*.swift`, `Views/CollapsibleSection.swift`, etc.) to catch a
+    /// premature port of any of them into the swift-cross-ui shell.
+    func testUIContentViewPortsNoScreenSectionOrChrome() throws {
+        let forbidden = [
+            "ProjectSectionView", "BrowseSectionView", "ConfigureSectionView", "ExportSectionView",
+            "CollapsibleSection", "EnvelopeCanvasView", "CuePointsTableView", "DurationInputView",
+            "DurationInputModal", "StepperField", "HeaderView", "FooterView", "HoverButton", "BrandIcons",
+        ]
+        let url = Self.sourceRoot.appendingPathComponent("UI/ContentView.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        for name in forbidden {
+            XCTAssertFalse(src.contains(name),
+                           "UI/ContentView.swift must not reference \(name) yet — this ticket's ContentView is empty by design (spec §B.11)")
+        }
+    }
+
+    /// spec §4 threat model / §B.13: "Do not make any CueSyncCore type public in this
+    /// ticket." `internal` (the implicit default) keeps the type unreachable from `UI/`
+    /// until a later ticket actually needs it; widening to `public` now would be exactly
+    /// the premature API-surface expansion the spec calls out. Scans with a word-boundary
+    /// regex (not a plain substring check) so an identifier merely containing "public"
+    /// can't produce a false positive.
+    func testNoPublicDeclarationExistsInCueSyncCoreScopedSources() throws {
+        let dirs = ["Models", "Parsers", "Exporters", "Support"]
+        let pattern = #"(^|[^A-Za-z0-9_])public\s+(class|struct|enum|protocol|func|var|let|init|extension|typealias)\b"#
+        var checked = 0
+        for dir in dirs {
+            let dirURL = Self.sourceRoot.appendingPathComponent(dir)
+            guard let files = swiftFiles(under: dirURL) else { continue }
+            for file in files {
+                let src = try String(contentsOf: file, encoding: .utf8)
+                checked += 1
+                let hit = src.range(of: pattern, options: .regularExpression) != nil
+                XCTAssertFalse(hit, "\(file.lastPathComponent) declares a public API — CueSyncCore must stay internal-only " +
+                               "in this ticket (spec §B.13); widening the surface belongs to the ticket that consumes it")
+            }
+        }
+        XCTAssertGreaterThan(checked, 0, "expected to scan at least the Models/Parsers/Exporters/Support sources")
+    }
+
+    /// spec §3 Manifest: "The resolved dependency tree contains no package beyond
+    /// swift-cross-ui and its own transitive closure" — the direct-dependency half of that
+    /// guarantee is that `Package.swift` itself never grows a second, unaudited
+    /// `.package(...)` entry alongside swift-cross-ui (spec §4: "any unexpected transitive
+    /// package [is] a finding to report, not a detail to wave through").
+    func testPackageSwiftDeclaresExactlyOneDirectPackageDependency() throws {
+        let manifest = try readPackageSwift()
+        let count = manifest.components(separatedBy: ".package(").count - 1
+        XCTAssertEqual(count, 1,
+                       "Package.swift must declare exactly one .package(...) entry (swift-cross-ui) — " +
+                       "got \(count). An extra direct dependency is an unaudited supply-chain addition (spec §4)")
+    }
+
+    /// spec §3 Manifest / §4 threat model: "commit Package.resolved so the audited commit
+    /// is the one that builds" applies to swift-cross-ui's *entire* transitive closure, not
+    /// just the top-level pin already checked by
+    /// `testPackageResolvedExistsAndPinsSwiftCrossUIToAFullRevisionSHA`. A branch-tracking
+    /// or otherwise symbolic pin on any transitive dependency would reintroduce the exact
+    /// "moving pin" risk §4 forbids, just one hop further down the tree.
+    func testPackageResolvedPinsEveryTransitiveDependencyToAFullRevisionSHA() throws {
+        let data = try Data(contentsOf: Self.packageResolvedURL)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let pins = (json?["pins"] as? [[String: Any]])
+            ?? ((json?["object"] as? [String: Any])?["pins"] as? [[String: Any]])
+            ?? []
+        XCTAssertGreaterThan(pins.count, 0, "Package.resolved must contain at least the swift-cross-ui pin")
+        for pin in pins {
+            let identity = (pin["identity"] as? String) ?? (pin["package"] as? String) ?? "<unknown>"
+            guard let state = pin["state"] as? [String: Any], let revision = state["revision"] as? String else {
+                XCTFail("pin \(identity) in Package.resolved has no resolved revision")
+                continue
+            }
+            XCTAssertEqual(revision.count, 40, "pin \(identity) must resolve to a full 40-char SHA, got \(revision)")
+            XCTAssertTrue(revision.allSatisfy(\.isHexDigit), "pin \(identity) revision must be hex: \(revision)")
+        }
+    }
+
+    /// spec §3 Source: "Zero edits to App/, Views/, Theme/, Utilities/, or
+    /// CueSync.xcodeproj ... Do not add UI/ to the Xcode target." A `git diff` check isn't
+    /// reliable inside a deterministic, network-free unit test (CI checkouts may be
+    /// shallow), but this is directly verifiable from the committed project file itself:
+    /// it must contain no group or file reference naming the `UI/` directory or either of
+    /// its two shell files, since the spec requires the SwiftUI build to stay completely
+    /// unaware the swift-cross-ui shell exists.
+    func testXcodeProjectDoesNotReferenceTheCrossUIShell() throws {
+        let pbxprojURL = Self.repoRoot.appendingPathComponent("CueSync/CueSync.xcodeproj/project.pbxproj")
+        let contents = try String(contentsOf: pbxprojURL, encoding: .utf8)
+        XCTAssertFalse(contents.contains("UI/"),
+                       "CueSync.xcodeproj must not reference the UI/ directory (spec §C.14)")
+        for path in ["path = CueSyncApp.swift", "path = ContentView.swift"] {
+            // Both file names are legitimately reused by App/CueSyncApp.swift and
+            // Views/ContentView.swift (the SwiftUI originals) — those references are
+            // expected and unrelated to this check, which only guards against a *second*,
+            // UI/-directory group being added. The absence-of-"UI/"-substring assertion
+            // above is what actually enforces the ticket's requirement; this loop is a
+            // sanity check that both expected SwiftUI references still resolve at all.
+            XCTAssertTrue(contents.contains(path), "expected the pre-existing SwiftUI \(path) reference to remain")
+        }
+    }
+
     // MARK: - Helpers
 
     /// Extracts the full `.target(...)`/`.executableTarget(...)`/`.testTarget(...)` call
