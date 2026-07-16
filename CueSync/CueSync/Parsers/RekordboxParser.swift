@@ -1,4 +1,10 @@
 import Foundation
+// XMLParser/XMLParserDelegate live in Foundation on Apple platforms but in the
+// separate FoundationXML module on Linux/Windows. Import it where it exists so
+// the XML parsing compiles cross-platform; the macOS path is unchanged.
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 
 struct RekordboxResult {
     let tracks: [Track]
