@@ -33,6 +33,7 @@ from pathlib import Path
 # Workflow-file access + tiny structural parser (stdlib only)
 # ---------------------------------------------------------------------------
 
+
 def _find_workflow():
     """Locate swift-windows.yml by walking up from this test file.
 
@@ -116,7 +117,7 @@ def _repair_run_body(block_text):
         None,
     )
     assert run_idx is not None, "repair step has no `run: |` body:\n" + block_text
-    body = lines[run_idx + 1:]
+    body = lines[run_idx + 1 :]
     # Common indent = the run body's indentation (10 spaces in this file).
     indented = [ln for ln in body if ln.strip()]
     common = min((len(ln) - len(ln.lstrip()) for ln in indented), default=0)
@@ -156,6 +157,7 @@ def _resolve_windows_lexical(link_dir, posix_target):
 # Sanity: the surface we're attacking actually exists as spec §0 describes.
 # ---------------------------------------------------------------------------
 
+
 def test_two_windows_repair_steps_exist():
     """spec §0.2/§2: the repair step is present in *both* Windows jobs and only
     there — the entire attack surface these tests probe."""
@@ -185,6 +187,7 @@ def test_two_windows_repair_steps_exist():
 # posture." This test reproduces the escape and demands that guard.
 # ---------------------------------------------------------------------------
 
+
 def test_out_of_tree_symlink_target_is_rejected():
     checkout_root = r"D:\a\cue-sync\cue-sync\.build\checkouts\swift-java"
     # The nested layer #2 link lives here; a hostile blob at this path is the
@@ -197,8 +200,7 @@ def test_out_of_tree_symlink_target_is_rejected():
     # First: prove the escape is geometrically real with the step's own math.
     root_prefix = checkout_root.rstrip("\\") + "\\"
     assert not (resolved + "\\").startswith(root_prefix), (
-        "sanity: crafted target should resolve OUTSIDE the checkout; got "
-        + resolved
+        "sanity: crafted target should resolve OUTSIDE the checkout; got " + resolved
     )
 
     # Then: the step must contain a containment guard that would refuse it.
@@ -208,15 +210,21 @@ def test_out_of_tree_symlink_target_is_rejected():
     body = next(iter(_windows_repair_bodies().values()))
     has_guard = bool(
         re.search(r"\.StartsWith\(", body)
-        or re.search(r"GetFullPath\(\s*\$repo", body) and "StartsWith" in body
+        or re.search(r"GetFullPath\(\s*\$repo", body)
+        and "StartsWith" in body
         or re.search(r"targetAbs.*-(?:like|match).*repo", body, re.IGNORECASE)
     )
     assert has_guard, (
         "spec §4 defense-in-depth: the repair step creates an NTFS junction to "
         "$targetAbs after only a Test-Path existence check, with NO assertion "
         "that $targetAbs stays within the checkout root.\n"
-        "A symlink blob containing '" + hostile_target + "' resolves to '"
-        + resolved + "' — OUTSIDE '" + checkout_root + "' — and would be "
+        "A symlink blob containing '"
+        + hostile_target
+        + "' resolves to '"
+        + resolved
+        + "' — OUTSIDE '"
+        + checkout_root
+        + "' — and would be "
         "junctioned anyway. Add: reject any $targetAbs that does not start with "
         "[System.IO.Path]::GetFullPath($repo) (Write-Error + exit 1), per the "
         "spec's own recommended hardening."
@@ -228,6 +236,7 @@ def test_out_of_tree_symlink_target_is_rejected():
 # If the two jobs diverge, the build artifact and the test evidence come from
 # differently-patched checkouts — the exact split-brain CUESYNC-6d suffered.
 # ---------------------------------------------------------------------------
+
 
 def test_both_windows_repair_steps_are_byte_identical():
     bodies = _windows_repair_bodies()
@@ -249,13 +258,14 @@ def test_both_windows_repair_steps_are_byte_identical():
 # silent": zero repairs MUST exit 1.
 # ---------------------------------------------------------------------------
 
+
 def test_zero_repairs_fails_loud():
     for job, body in _windows_repair_bodies().items():
         assert re.search(r"\$repaired\s+-eq\s+0", body), (
             job + ": missing the `$repaired -eq 0` fail-loud guard (spec §2.4)"
         )
         # The zero-repair branch must terminate the job, not warn-and-continue.
-        block = body[body.index("$repaired -eq 0"):]
+        block = body[body.index("$repaired -eq 0") :]
         assert "exit 1" in block, (
             job + ": zero-repairs branch must `exit 1`, not continue (spec §3)"
         )
@@ -267,6 +277,7 @@ def test_zero_repairs_fails_loud():
 # spec §2.4 / §3: "fail if `git ls-files` / `git cat-file` returns a nonzero
 # exit … do not allowlist errors into silence."
 # ---------------------------------------------------------------------------
+
 
 def test_git_plumbing_exit_codes_are_checked():
     for job, body in _windows_repair_bodies().items():
@@ -286,6 +297,7 @@ def test_git_plumbing_exit_codes_are_checked():
 # authoritative index — never from the possibly-broken on-disk materialization
 # an attacker/race could influence.
 # ---------------------------------------------------------------------------
+
 
 def test_target_is_read_from_git_blob_not_disk():
     for job, body in _windows_repair_bodies().items():
@@ -308,6 +320,7 @@ def test_target_is_read_from_git_blob_not_disk():
 # very reparse-point class the step exists to avoid.
 # ---------------------------------------------------------------------------
 
+
 def test_no_symbolic_link_only_junction_and_hardlink():
     for job, body in _windows_repair_bodies().items():
         assert "-ItemType SymbolicLink" not in body, (
@@ -329,6 +342,7 @@ def test_no_symbolic_link_only_junction_and_hardlink():
 # such step. A copy-paste into `macos` would silently change what macOS builds.
 # ---------------------------------------------------------------------------
 
+
 def test_repair_step_absent_from_macos_job():
     assert "macos" in JOBS, "macos job missing — workflow shape changed"
     start, end = JOBS["macos"]
@@ -340,7 +354,8 @@ def test_repair_step_absent_from_macos_job():
     # And it must be pwsh (Windows-only mechanism), never bash/sh.
     for job, block in REPAIR_BLOCKS:
         assert "shell: pwsh" in block, (
-            job + ": repair step must be `shell: pwsh` (Windows-only) (spec §4 Portability)"
+            job
+            + ": repair step must be `shell: pwsh` (Windows-only) (spec §4 Portability)"
         )
 
 
@@ -352,6 +367,7 @@ def test_repair_step_absent_from_macos_job():
 # `Test`. Otherwise it repairs nothing, or repairs too late to matter.
 # ---------------------------------------------------------------------------
 
+
 def test_repair_runs_after_resolve_and_before_build():
     for job in ("windows-build", "windows-test"):
         start, end = JOBS[job]
@@ -361,20 +377,24 @@ def test_repair_runs_after_resolve_and_before_build():
             return next((k for k, ln in enumerate(seg) if pred(ln)), None)
 
         resolve_i = line_of(lambda ln: "swift package resolve" in ln)
-        repair_i = line_of(
-            lambda ln: STEP_NAME_RE.match(ln) and REPAIR_STEP_NAME in ln
-        )
+        repair_i = line_of(lambda ln: STEP_NAME_RE.match(ln) and REPAIR_STEP_NAME in ln)
         build_i = line_of(
-            lambda ln: STEP_NAME_RE.match(ln)
-            and ("Build (release)" in ln or ln.strip() == "- name: Test")
+            lambda ln: (
+                STEP_NAME_RE.match(ln)
+                and ("Build (release)" in ln or ln.strip() == "- name: Test")
+            )
         )
         assert resolve_i is not None, job + ": no `swift package resolve` step"
         assert repair_i is not None, job + ": no repair step"
         assert build_i is not None, job + ": no Build/Test step"
         assert resolve_i < repair_i < build_i, (
             job + ": repair step must sit AFTER `swift package resolve` and "
-            "BEFORE Build/Test (spec §2); got resolve@" + str(resolve_i)
-            + " repair@" + str(repair_i) + " build@" + str(build_i)
+            "BEFORE Build/Test (spec §2); got resolve@"
+            + str(resolve_i)
+            + " repair@"
+            + str(repair_i)
+            + " build@"
+            + str(build_i)
         )
 
 
@@ -387,6 +407,7 @@ def test_repair_runs_after_resolve_and_before_build():
 # §3 "idempotent": the reparse-point case must be handled FIRST and WITHOUT
 # `-Recurse`.
 # ---------------------------------------------------------------------------
+
 
 def test_idempotent_delete_handles_reparse_point_before_container():
     for job, body in _windows_repair_bodies().items():
@@ -415,17 +436,21 @@ def test_idempotent_delete_handles_reparse_point_before_container():
 # otherwise the nested SwiftJavaConfigurationShared layer breaks again.
 # ---------------------------------------------------------------------------
 
+
 def test_enumeration_is_generic_not_a_hardcoded_plugin_list():
     for job, body in _windows_repair_bodies().items():
         assert "120000" in body, (
             job + ": must filter git entries by symlink mode 120000 (spec §2.2)"
         )
         hardcoded = [
-            n for n in ("JExtractSwiftPlugin", "SwiftJavaPlugin", "JavaCompilerPlugin")
+            n
+            for n in ("JExtractSwiftPlugin", "SwiftJavaPlugin", "JavaCompilerPlugin")
             if n in body
         ]
         assert not hardcoded, (
-            job + ": repair step still names hardcoded plugin(s) " + repr(hardcoded)
+            job
+            + ": repair step still names hardcoded plugin(s) "
+            + repr(hardcoded)
             + " — CUESYNC-6e requires a generic mode-120000 enumeration that "
             "replaces, not extends, the 3-plugin list (spec §3)"
         )
