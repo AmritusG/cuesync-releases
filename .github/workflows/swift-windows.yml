@@ -351,23 +351,78 @@ jobs:
       # regardless of how the git checkout raced. Idempotent: re-running
       # against an already-repaired link just replaces it with an equivalent
       # one.
-      - name: Repair swift-java Windows plugin symlinks (pinned via Package.resolved, 0.5.1)
+      #
+      # CUESYNC-6e: the above fixed only that one layer, by a hardcoded
+      # 3-plugin list. swift-java shares plugin sources via git symlinks in
+      # TWO nested layers:
+      #   1. Plugins/<Plugin>/_PluginsShared -> ../PluginsShared        (outer)
+      #   2. Plugins/PluginsShared/SwiftJavaConfigurationShared
+      #                       -> ../../Sources/SwiftJavaConfigurationShared (nested)
+      # `readConfiguration` lives behind layer #2
+      # (Sources/SwiftJavaConfigurationShared/Configuration.swift), so a
+      # broken layer #2 on Windows produces "cannot find 'readConfiguration'
+      # in scope" even after layer #1 is repaired. This repairs EVERY git
+      # symlink in the checkout generically: git's index is the source of
+      # truth for which tracked entries are symlinks (mode 120000),
+      # regardless of how Windows materialized them (broken reparse point /
+      # plain text file / raced dir). Directory targets become privilege-free
+      # NTFS junctions (transparent to enumeration, which is why junctions
+      # already fixed layer #1); file targets (none known today) become
+      # hardlinks. Idempotent: a second pass deletes the junction/hardlink it
+      # made and recreates an equivalent one.
+      - name: Repair swift-java Windows symlinks (all layers, generic; pinned via Package.resolved 0.5.1)
         shell: pwsh
         run: |
-          $pluginsRoot = ".build\checkouts\swift-java\Plugins"
-          $sharedDir = (Resolve-Path (Join-Path $pluginsRoot "PluginsShared")).Path
-          foreach ($pluginName in @("JExtractSwiftPlugin", "SwiftJavaPlugin", "JavaCompilerPlugin")) {
-            $link = Join-Path $pluginsRoot "$pluginName\_PluginsShared"
-            $existing = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+          $repo = ".build\checkouts\swift-java"
+          if (-not (Test-Path -LiteralPath $repo)) {
+            Write-Error "swift-java checkout not found at $repo — did 'swift package resolve' run?"; exit 1
+          }
+          $entries = & git -c core.quotePath=false -C $repo ls-files -s
+          if ($LASTEXITCODE -ne 0) { Write-Error "git ls-files failed in $repo"; exit 1 }
+
+          $repaired = 0
+          foreach ($entry in $entries) {
+            # "<mode> <sha> <stage>\t<path>" — keep symlinks only
+            if ($entry -notmatch '^120000\s+([0-9a-f]{40})\s+\d+\t(.+)$') { continue }
+            $blobSha = $Matches[1]; $relPath = $Matches[2]
+
+            $linkFull = [System.IO.Path]::GetFullPath((Join-Path $repo $relPath))
+            $linkDir  = Split-Path -Parent $linkFull
+
+            $target = (& git -C $repo cat-file blob $blobSha | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($target)) {
+              Write-Error "could not read symlink target for $relPath"; exit 1
+            }
+            $targetAbs = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($linkDir, $target))
+            if (-not (Test-Path -LiteralPath $targetAbs)) {
+              Write-Error "symlink $relPath -> $targetAbs : target does not exist on disk"; exit 1
+            }
+
+            $existing = Get-Item -LiteralPath $linkFull -Force -ErrorAction SilentlyContinue
             if ($existing) {
               if ($existing.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-                Remove-Item -LiteralPath $link -Force
+                Remove-Item -LiteralPath $linkFull -Force
+              } elseif ($existing.PSIsContainer) {
+                Remove-Item -LiteralPath $linkFull -Recurse -Force
               } else {
-                Remove-Item -LiteralPath $link -Force -Recurse
+                Remove-Item -LiteralPath $linkFull -Force
               }
             }
-            New-Item -ItemType Junction -Path $link -Target $sharedDir | Out-Null
+
+            if (Test-Path -LiteralPath $targetAbs -PathType Container) {
+              New-Item -ItemType Junction -Path $linkFull -Target $targetAbs | Out-Null
+              Write-Host "junction: $relPath -> $targetAbs"
+            } else {
+              New-Item -ItemType HardLink -Path $linkFull -Target $targetAbs | Out-Null
+              Write-Host "hardlink: $relPath -> $targetAbs"
+            }
+            $repaired++
           }
+
+          if ($repaired -eq 0) {
+            Write-Error "no git symlinks (mode 120000) found under $repo — enumeration is broken; refusing to proceed silently"; exit 1
+          }
+          Write-Host "repaired $repaired swift-java symlink(s)"
 
       - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
         shell: pwsh
@@ -712,23 +767,78 @@ jobs:
       # regardless of how the git checkout raced. Idempotent: re-running
       # against an already-repaired link just replaces it with an equivalent
       # one.
-      - name: Repair swift-java Windows plugin symlinks (pinned via Package.resolved, 0.5.1)
+      #
+      # CUESYNC-6e: the above fixed only that one layer, by a hardcoded
+      # 3-plugin list. swift-java shares plugin sources via git symlinks in
+      # TWO nested layers:
+      #   1. Plugins/<Plugin>/_PluginsShared -> ../PluginsShared        (outer)
+      #   2. Plugins/PluginsShared/SwiftJavaConfigurationShared
+      #                       -> ../../Sources/SwiftJavaConfigurationShared (nested)
+      # `readConfiguration` lives behind layer #2
+      # (Sources/SwiftJavaConfigurationShared/Configuration.swift), so a
+      # broken layer #2 on Windows produces "cannot find 'readConfiguration'
+      # in scope" even after layer #1 is repaired. This repairs EVERY git
+      # symlink in the checkout generically: git's index is the source of
+      # truth for which tracked entries are symlinks (mode 120000),
+      # regardless of how Windows materialized them (broken reparse point /
+      # plain text file / raced dir). Directory targets become privilege-free
+      # NTFS junctions (transparent to enumeration, which is why junctions
+      # already fixed layer #1); file targets (none known today) become
+      # hardlinks. Idempotent: a second pass deletes the junction/hardlink it
+      # made and recreates an equivalent one.
+      - name: Repair swift-java Windows symlinks (all layers, generic; pinned via Package.resolved 0.5.1)
         shell: pwsh
         run: |
-          $pluginsRoot = ".build\checkouts\swift-java\Plugins"
-          $sharedDir = (Resolve-Path (Join-Path $pluginsRoot "PluginsShared")).Path
-          foreach ($pluginName in @("JExtractSwiftPlugin", "SwiftJavaPlugin", "JavaCompilerPlugin")) {
-            $link = Join-Path $pluginsRoot "$pluginName\_PluginsShared"
-            $existing = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+          $repo = ".build\checkouts\swift-java"
+          if (-not (Test-Path -LiteralPath $repo)) {
+            Write-Error "swift-java checkout not found at $repo — did 'swift package resolve' run?"; exit 1
+          }
+          $entries = & git -c core.quotePath=false -C $repo ls-files -s
+          if ($LASTEXITCODE -ne 0) { Write-Error "git ls-files failed in $repo"; exit 1 }
+
+          $repaired = 0
+          foreach ($entry in $entries) {
+            # "<mode> <sha> <stage>\t<path>" — keep symlinks only
+            if ($entry -notmatch '^120000\s+([0-9a-f]{40})\s+\d+\t(.+)$') { continue }
+            $blobSha = $Matches[1]; $relPath = $Matches[2]
+
+            $linkFull = [System.IO.Path]::GetFullPath((Join-Path $repo $relPath))
+            $linkDir  = Split-Path -Parent $linkFull
+
+            $target = (& git -C $repo cat-file blob $blobSha | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($target)) {
+              Write-Error "could not read symlink target for $relPath"; exit 1
+            }
+            $targetAbs = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($linkDir, $target))
+            if (-not (Test-Path -LiteralPath $targetAbs)) {
+              Write-Error "symlink $relPath -> $targetAbs : target does not exist on disk"; exit 1
+            }
+
+            $existing = Get-Item -LiteralPath $linkFull -Force -ErrorAction SilentlyContinue
             if ($existing) {
               if ($existing.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-                Remove-Item -LiteralPath $link -Force
+                Remove-Item -LiteralPath $linkFull -Force
+              } elseif ($existing.PSIsContainer) {
+                Remove-Item -LiteralPath $linkFull -Recurse -Force
               } else {
-                Remove-Item -LiteralPath $link -Force -Recurse
+                Remove-Item -LiteralPath $linkFull -Force
               }
             }
-            New-Item -ItemType Junction -Path $link -Target $sharedDir | Out-Null
+
+            if (Test-Path -LiteralPath $targetAbs -PathType Container) {
+              New-Item -ItemType Junction -Path $linkFull -Target $targetAbs | Out-Null
+              Write-Host "junction: $relPath -> $targetAbs"
+            } else {
+              New-Item -ItemType HardLink -Path $linkFull -Target $targetAbs | Out-Null
+              Write-Host "hardlink: $relPath -> $targetAbs"
+            }
+            $repaired++
           }
+
+          if ($repaired -eq 0) {
+            Write-Error "no git symlinks (mode 120000) found under $repo — enumeration is broken; refusing to proceed silently"; exit 1
+          }
+          Write-Host "repaired $repaired swift-java symlink(s)"
 
       - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
         shell: pwsh
