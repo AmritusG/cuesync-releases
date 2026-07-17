@@ -164,6 +164,28 @@ jobs:
           restore-keys: |
             windows-build-vcpkg-gtk4-
 
+      # CI-observed (this branch and adw/CUESYNC-6, both runs): the
+      # win25-vs2026 runner image does not resolve a bare `powershell.exe` on
+      # PATH — only `pwsh.exe` (PowerShell 7) is present, even though PATH
+      # still lists the legacy WindowsPowerShell\v1.0 directory. vcpkg's
+      # bootstrap-vcpkg.bat (verified at the pinned commit below) hardcodes
+      # `powershell.exe -NoProfile -ExecutionPolicy Bypass "& {...}"` — a bare
+      # name, not a full path — so it fails with "not recognized as an
+      # internal or external command" before vcpkg ever builds, and every
+      # step after it fails in turn. Shim a `powershell.exe` that forwards to
+      # the pwsh already running this job: pwsh accepts the identical
+      # -NoProfile/-ExecutionPolicy/-Command CLI surface, so the shim is a
+      # transparent substitute for what bootstrap-vcpkg.bat expects. Sourced
+      # via $PSHOME rather than `Get-Command pwsh` so the shim doesn't itself
+      # depend on the PATH resolution that's broken here.
+      - name: Shim powershell.exe for vcpkg bootstrap
+        shell: pwsh
+        run: |
+          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
+          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
+          Add-Content $env:GITHUB_PATH $shimDir
+
       # Install GTK 4 (vcpkg, pinned). Deliberately clones vcpkg fresh rather
       # than using the copy windows-latest ships at C:\vcpkg (runner-images'
       # Windows2022-Readme.md documents it, unpinned and updated on whatever
@@ -176,6 +198,17 @@ jobs:
       # so this step is left unconditional rather than skipped on cache hit —
       # a skip-on-hit would be exactly the "stale cache hides a broken
       # install" failure mode spec §C.13 warns against.
+      #
+      # The pin (52c9e08c...) is the SHA of the `2026.06.24` *tag object*, not
+      # a commit — `git checkout` correctly detaches to the tag's target
+      # commit (subject "[comms-ublox] update to 3.0.7 (#52583)"), which is
+      # why that subject looks unrelated to GTK: it's just whatever commit
+      # happened to be tip-of-branch when upstream cut that release tag.
+      # Confirmed via `git fetch --depth 1 origin 52c9e08c...` against the
+      # real microsoft/vcpkg remote before writing this comment — the object
+      # exists and resolves deterministically; GitHub's REST commits API
+      # 404s on it only because that endpoint doesn't accept tag object SHAs,
+      # not because the pin is wrong.
       - name: Install GTK 4 (vcpkg, pinned)
         shell: pwsh
         run: |
@@ -404,10 +437,21 @@ jobs:
       # is XCTest) and exits non-zero even when every XCTest passes — a spurious
       # failure. So we gate on the XCTest result: fail only if XCTest reports an
       # actual failure; the "0 tests" swift-testing exit is ignored.
+      #
+      # CI-observed (this branch and adw/CUESYNC-6, both runs): assigning the
+      # whole pipeline directly to $out — `$out = swift test ... | Out-String`
+      # — captures every line into the variable and prints NONE of it, because
+      # output bound to an assignment never reaches the success stream. That
+      # made every past failure here show up as a bare "no XCTest summary was
+      # found" with the actual compiler/test output nowhere in the log. Run
+      # the pipeline as its own statement instead so Tee-Object's pass-through
+      # still reaches the host (and therefore the Action log) while $log keeps
+      # the same capture the regex below needs.
       - name: Test
         shell: pwsh
         run: |
-          $out = swift test -c release 2>&1 | Tee-Object -Variable log | Out-String
+          swift test -c release 2>&1 | Tee-Object -Variable log
+          $out = $log | Out-String
           if ($out -match "with (\d+) failures") {
             $fails = [int]$Matches[1]
             if ($fails -gt 0) { Write-Error "XCTest reported $fails failure(s)"; exit 1 }
