@@ -590,6 +590,29 @@ jobs:
             if ($swiftRootMatch.Success) { $swiftToolchainRoot = $swiftRootMatch.Value }
           }
 
+          # CI-observed (this branch, run 29610922066): the clean run passed (proving
+          # the allow-list above is now complete) but the negative control crashed
+          # instead of confirming — a "Test-DllClosure: ... non-system DLL resolved
+          # outside the artifact directory: pango-1.0-0.dll => C:\gtk-build\gtk\x64\
+          # release\bin\pango-1.0-0.dll" script-terminating error, never reaching the
+          # `if (Test-DllClosure ...) { throw "negative control failed..." }` check
+          # below it, so the DLL was never restored and the intended pass/fail
+          # message never printed. Root cause: this pwsh runner defaults
+          # $ErrorActionPreference to Stop (see the "Write-Error is terminating"
+          # comment above), so a bare `Write-Error` inside a function is a
+          # *terminating* error that unwinds out of the function entirely rather
+          # than logging and letting execution continue — exactly the behavior that
+          # comment already diagnosed as forcing these CI-fix rounds to surface one
+          # disallowed DLL at a time. It went unnoticed on every prior clean run
+          # because the loop always reached the end of `$lines` without hitting a
+          # disallowed name; the negative control is the first path guaranteed to
+          # hit one (it removes a DLL from the artifact directory specifically so
+          # the closure check finds it resolved from somewhere else instead), which
+          # is why it's what finally exposed this. `-ErrorAction Continue` makes
+          # `Write-Error` log and continue instead of unwinding, regardless of the
+          # runner's global preference, so the loop finishes checking every
+          # remaining dependency (surfacing every violation in one pass, not just
+          # the first) and `return -not $failed` executes normally either way.
           function Test-DllClosure {
             param([string]$exePath)
             $lines = & wldd $exePath
@@ -607,7 +630,7 @@ jobs:
                   Write-Host "API Set stub (resolved at runtime via apiset schema, not the filesystem): $trimmedLine"
                   continue
                 }
-                Write-Error "unresolved dependency: $trimmedLine"
+                Write-Error "unresolved dependency: $trimmedLine" -ErrorAction Continue
                 $failed = $true
                 continue
               }
@@ -621,7 +644,7 @@ jobs:
                 if ($isFromSwiftToolchain) {
                   Write-Host "known gap, not bundled (spec CUESYNC-6d/CUESYNC-6 §D.18, next ticket's work): $name => $path"
                 } elseif (-not $isInsideArtifact -and -not $isAllowedSystemDll) {
-                  Write-Error "non-system DLL resolved outside the artifact directory: $name => $path"
+                  Write-Error "non-system DLL resolved outside the artifact directory: $name => $path" -ErrorAction Continue
                   $failed = $true
                 }
               }
