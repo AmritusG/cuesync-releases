@@ -210,7 +210,108 @@ final class CUESYNC6dPortabilityTests: XCTestCase {
     }
 }
 
+// =============================================================================
+// Red-team — the guard this ticket silently disarmed.
+//
+// Both `AdversarialCUESYNC6Tests.Rules.checksumOrdering` and this file's own
+// `testBothWindowsJobsVerifyTheGtkChecksumBeforeExtractingTheArchive` locate
+// the download/verify/extract verbs with a FIRST-match-in-the-job scan. That
+// was sound while wldd owned the only such triple in the job.
+//
+// This ticket inserts a SECOND triple — the gvsbuild GTK download — ahead of
+// it. Every first-match scan now terminates on the GTK step and never looks at
+// wldd again, so wldd's own verify-before-extract ordering became unasserted
+// the moment this ticket landed. spec §2 step 4 half-noticed the shadowing
+// ("it becomes the first match for all three") but read it only as making the
+// NEW step checked; it silently also made the OLD one unchecked.
+//
+// Demonstrated, not theorised: hoisting wldd's `Expand-Archive` above its
+// `Get-FileHash` — spec §4's named defect, extracting untrusted bytes before
+// they are verified — leaves the suite at 274 tests / 0 failures. That is
+// exactly the "check that passes because it silently stopped checking" §D.19
+// exists to catch, and swapping the GTK source is precisely when it happened.
+//
+// The fix is to stop scanning per-job and start scanning per-STEP, so every
+// archive carries its own proof rather than inheriting the first one's.
+// =============================================================================
+
+final class CUESYNC6dAdversarialChecksumOrderingTests: XCTestCase {
+
+    private static let verifyVerb = #"Get-FileHash"#
+    private static let extractVerb = #"Expand-Archive|tar\s+-x|unzip\s|\b7z\b\s+x"#
+
+    /// spec §4: "verified **before** extraction ... checking a hash after
+    /// unpacking checks it after untrusted bytes have already touched the
+    /// filesystem." Applies that rule to EVERY step in EVERY Windows job that
+    /// extracts an archive — not merely the first one a job-wide scan happens
+    /// to land on. Any step that unpacks bytes off the network must carry its
+    /// own SHA-256 check, ahead of its own extraction.
+    ///
+    /// Fails today's workflow if wldd's checksum is moved after its
+    /// Expand-Archive, and fails any future step that extracts a downloaded
+    /// archive with no verification at all — neither of which any other test
+    /// in the suite currently notices.
+    func testEveryStepThatExtractsAnArchiveVerifiesItsOwnChecksumFirst() throws {
+        var stepsChecked = 0
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks.require(jobName)
+            for step in job.steps() {
+                guard let extractIndex = step.firstLineIndex(matching: Self.extractVerb) else { continue }
+                stepsChecked += 1
+
+                guard let verifyIndex = step.firstLineIndex(matching: Self.verifyVerb) else {
+                    XCTFail("\(jobName) step \"\(step.name)\" extracts an archive with no Get-FileHash " +
+                            "checksum verification in the step at all (spec CUESYNC-6d §4). A job-wide " +
+                            "first-match scan would credit this step with an EARLIER step's checksum; " +
+                            "every extracted archive must carry its own.")
+                    continue
+                }
+                XCTAssertLessThan(verifyIndex, extractIndex,
+                    "\(jobName) step \"\(step.name)\" extracts the archive before verifying its SHA-256 " +
+                    "(spec CUESYNC-6d §4: verify BEFORE extraction — checking a hash after unpacking " +
+                    "checks it after untrusted bytes have already touched the filesystem).")
+            }
+        }
+        // Guards the guard: if step parsing silently matched nothing, every
+        // assertion above would vacuously pass and this test would be theatre.
+        XCTAssertGreaterThanOrEqual(stepsChecked, 3,
+            "expected at least 3 archive-extracting steps across the two Windows jobs (windows-build's " +
+            "GTK 4 + wldd, windows-test's GTK 4) — only \(stepsChecked) were found, so this test is no " +
+            "longer looking at what it claims to look at")
+    }
+
+    /// The shadowing above was invisible because nothing asserted that the
+    /// job contains more than one independently-verified download. Pins the
+    /// structural fact directly: windows-build downloads two distinct archives
+    /// (GTK 4 and wldd) and each has its own SHA-256 literal, so neither can
+    /// borrow the other's proof.
+    func testWindowsBuildVerifiesTwoIndependentlyPinnedArchives() throws {
+        let job = try JobBlocks.require("windows-build")
+        let shaLiterals = job.lines.compactMap { firstCapture(#"\$expectedSha256 = "([0-9A-Fa-f]{64})""#, in: $0) }
+        XCTAssertEqual(Set(shaLiterals).count, 2,
+            "windows-build must pin exactly two distinct SHA-256 literals — one for the gvsbuild GTK 4 " +
+            "asset, one for wldd. Found \(Set(shaLiterals).count): \(shaLiterals). If a download lost its " +
+            "own pin it is now trusting a different archive's checksum.")
+    }
+}
+
 // MARK: - Helpers (deliberately self-contained — see file header)
+
+private struct WorkflowStep {
+    let name: String
+    let lines: [String]
+
+    /// Comment lines are excluded before matching: the prose above these steps
+    /// discusses `Expand-Archive` and checksum ordering by name, and matching
+    /// it would let a comment stand in as evidence for code that isn't there.
+    func firstLineIndex(matching pattern: String) -> Int? {
+        lines.firstIndex {
+            let trimmed = $0.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#") else { return false }
+            return $0.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+    }
+}
 
 private func firstCapture(_ pattern: String, in text: String) -> String? {
     guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
@@ -242,6 +343,34 @@ private struct JobBlock {
     func firstLineIndex(matching pattern: String, caseInsensitive: Bool = false) -> Int? {
         let options: String.CompareOptions = caseInsensitive ? [.regularExpression, .caseInsensitive] : [.regularExpression]
         return lines.firstIndex { $0.range(of: pattern, options: options) != nil }
+    }
+
+    /// Splits the job into its `- name:` steps. Scanning per-step rather than
+    /// per-job is what stops one step's checksum from vouching for another's
+    /// extraction — see CUESYNC6dAdversarialChecksumOrderingTests.
+    func steps() -> [WorkflowStep] {
+        var result: [WorkflowStep] = []
+        var currentName = ""
+        var currentLines: [String] = []
+
+        func flush() {
+            if !currentLines.isEmpty {
+                result.append(WorkflowStep(name: currentName, lines: currentLines))
+            }
+        }
+
+        for line in lines {
+            if line.range(of: #"^\s*- name:"#, options: .regularExpression) != nil {
+                flush()
+                currentName = line.replacingOccurrences(
+                    of: #"^\s*- name:\s*"#, with: "", options: .regularExpression)
+                currentLines = [line]
+            } else if !currentLines.isEmpty {
+                currentLines.append(line)
+            }
+        }
+        flush()
+        return result
     }
 }
 
