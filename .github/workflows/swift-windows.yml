@@ -120,10 +120,28 @@ jobs:
       # .../windows10.exe.sig"). compnerd installs directly, no swiftorg signature
       # gate. It needs BOTH the release branch and the build id. Pinned to the
       # v0.4.0 tag's commit, not the floating `main` branch.
-      - uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
+      #
+      # spec CUESYNC-6c §2 step 6: the install reaches out to swift.org over the
+      # public network and a transient blip fails the whole job, so the first
+      # attempt is allowed to fail (continue-on-error) and a second, identical
+      # attempt runs only if it did. Gated on `outcome`, not `conclusion` —
+      # under continue-on-error a failed step still reports `conclusion: success`,
+      # so gating on conclusion would mean the retry step never fires. The retry
+      # itself must NOT carry continue-on-error, so a total failure still fails
+      # the job loudly instead of surfacing as a confusing compile error later.
+      - id: swift-install
+        continue-on-error: true
+        uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
         with:
-          swift-version: swift-6.1-release
-          swift-build: 6.1-RELEASE
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+
+      - name: Retry Swift toolchain install
+        if: steps.swift-install.outcome == 'failure'
+        uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
 
       # spec CUESYNC-6 §0.4/§C.13 — GTK 4 distribution: **vcpkg**, not the
       # spec's original gvsbuild/MSYS2 candidates (findings doc §0.4 revised
@@ -193,13 +211,16 @@ jobs:
       # never invalidate this cache when the GTK version changes — the pinned
       # commit literal is the actual GTK input and must be bumped by hand
       # alongside the "Install GTK 4" step above whenever the pin moves.
+      # spec CUESYNC-6c §2 step 7: also extended with the Swift toolchain
+      # version — .swiftmodule files are compiler-version-locked, so a 6.1-built
+      # .build tree must not be handed to the 6.3.3 compiler this job now installs.
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-build-spm-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
+          key: windows-build-spm-swift-6.3.3-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-build-spm-vcpkg-
+            windows-build-spm-swift-6.3.3-vcpkg-
 
       - name: Swift version
         run: swift --version
@@ -344,22 +365,36 @@ jobs:
       - name: Setup VS Dev Environment
         uses: seanmiddleditch/gha-setup-vsdevenv@cf96bf5b227cac6af28c04c4a4e69286ea444163 # v5
 
-      - uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
+      # spec CUESYNC-6c §2 step 6: retry the toolchain install once on a
+      # transient failure — see windows-build's identical comment above for
+      # why continue-on-error/outcome/no-continue-on-error-on-retry all matter.
+      - id: swift-install
+        continue-on-error: true
+        uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
         with:
-          swift-version: swift-6.1-release
-          swift-build: 6.1-RELEASE
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+
+      - name: Retry Swift toolchain install
+        if: steps.swift-install.outcome == 'failure'
+        uses: compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5 # v0.4.0
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
 
       # Keyed separately from windows-build's cache: this job only ever builds
       # CueSyncCoreTests' own dependency subset (CueSyncCore/CSQLite/CZlib),
       # never the CueSync executable target or swift-cross-ui, so its .build
       # is a different, much smaller artifact set.
+      # spec CUESYNC-6c §2 step 7: extended with the Swift toolchain version —
+      # see windows-build's identical cache comment for why.
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-test-spm-${{ hashFiles('Package.resolved') }}
+          key: windows-test-spm-swift-6.3.3-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-test-spm-
+            windows-test-spm-swift-6.3.3-
 
       - name: Swift version
         run: swift --version

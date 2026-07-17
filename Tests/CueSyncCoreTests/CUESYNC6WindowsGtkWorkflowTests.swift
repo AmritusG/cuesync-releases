@@ -106,11 +106,24 @@ final class CUESYNC6WindowsGtkInstallTests: XCTestCase {
     /// not silently still DefaultBackend." A `continue-on-error: true` anywhere
     /// in windows-build would let the job report green while GtkBackend fails to
     /// compile or link — exactly the vacuous-green outcome this ticket forbids.
+    ///
+    /// spec CUESYNC-6c §2 step 6 legitimately introduces one narrow exception: the
+    /// first Swift-toolchain-install attempt carries `continue-on-error: true` as
+    /// part of its retry-on-transient-network-failure pattern — paired with an
+    /// unconditioned retry attempt that does NOT carry it, so a total install
+    /// failure still fails the job loudly. This test still forbids the flag
+    /// everywhere else (the GTK install, the build step, ...), so a GtkBackend
+    /// compile/link failure still cannot be massaged into green.
     func testWindowsBuildStepIsNeitherSkippedNorContinueOnErrorNorConditional() throws {
         let job = try JobBlocks.require("windows-build")
-        XCTAssertNil(job.firstLineIndex(matching: #"continue-on-error:\s*true"#),
-            "windows-build must not set continue-on-error: true anywhere — a red Windows build reported " +
-            "honestly is the correct outcome per spec §0.4, not one massaged into green")
+        for (index, lineText) in job.lines.enumerated()
+        where lineText.range(of: #"continue-on-error:\s*true"#, options: .regularExpression) != nil {
+            let precedingLines = job.lines[max(0, index - 3)..<index]
+            XCTAssertTrue(precedingLines.contains { $0.contains("id: swift-install") },
+                "windows-build line \(index) sets continue-on-error: true outside the Swift-toolchain-install " +
+                "retry step (spec CUESYNC-6c §2 step 6) — a red Windows build reported honestly is the correct " +
+                "outcome per spec §0.4, not one massaged into green")
+        }
 
         guard let buildStepLine = job.lines.first(where: {
             $0.range(of: #"run:\s*swift build -c release\s*$"#, options: .regularExpression) != nil

@@ -344,3 +344,73 @@ steps that handle paths are pre-existing and untouched.
 vcpkg claims `arm64-windows`, and Swift on Windows ARM64 is a documented target. The gap is
 **verification infrastructure**, not dependency availability. Stating it the other way round
 would misreport a "we cannot test this" as a "this does not work".
+
+---
+
+## 6. §0 verification record (Build Agent, live network access)
+
+This ticket's planning pass had no network access; this Build Agent turn did (`curl` worked).
+Recorded here, verbatim, per §0's instruction — kept inside this file rather than a separate
+`-findings.md` so the diff against `adw/CUESYNC-6` still touches exactly the two paths §3
+"Nothing else moved" requires.
+
+**§0.1 — rebase.** `git rebase adw/CUESYNC-6` completed with no conflicts, landing on `5d0af2b`.
+Post-rebase, `.github/workflows/swift-windows.yml` matched this section's description exactly:
+two `compnerd/gha-setup-swift@eeda069c…` steps (`windows-build`, `windows-test`), both at
+`swift-version: swift-6.1-release` / `swift-build: 6.1-RELEASE`.
+
+**§0.2 item 1 (6.3.3 exists, Windows package published).** Confirmed via
+`https://www.swift.org/install/windows/`: the manual-install section links
+`https://download.swift.org/swift-6.3.3-release/windows10/swift-6.3.3-RELEASE/swift-6.3.3-RELEASE-windows10.exe`
+(x86_64) and a `windows10-arm64` counterpart. `curl -sI` on the x86_64 URL returned
+`HTTP/1.1 200 OK`, `Content-Length: 1759717984`.
+
+**§0.2 item 2 (input strings correct at the pinned commit).** Fetched `action.yml` at
+`eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5` directly. It builds the download URL as
+`https://download.swift.org/${swift-version}/windows10/swift-${swift-build}/swift-${swift-build}-windows10.exe`.
+Substituting `swift-version: swift-6.3.3-release` / `swift-build: 6.3.3-RELEASE` reproduces
+the exact URL verified in item 1, byte for byte.
+
+**§0.2 item 3 (v0.4.0 resolves the 6.3.3 URL).** Same evidence as item 2 — the pinned action's
+own template, substituted with the new inputs, is the URL that returned `200 OK`. No layout
+drift since the action was cut.
+
+**§0.2 item 4 (signature material).** The pinned `action.yml`'s swift.org/Windows fetch step
+never checks a `.sig` — it downloads the `.exe` directly via `WebClient.DownloadFile` and runs
+it. Checked anyway whether 6.3.3 reintroduces the gate SwiftyLab would enforce: `curl -sI` on
+both the 6.1 and 6.3.3 `.exe.sig` URLs returned `302` to `swift.org/404.html`. Same gap as
+today, nothing new.
+
+**§0.3 — baseline.** `grep -rc 'func test' Tests/CueSyncCoreTests` totals 252 (includes
+non-test helper functions matching `func test*`). The empirical number, from
+`swift test -c release` locally (macOS, Swift 6.2.4, `CueSyncCoreTests` target only —
+Foundation/CSQLite/CZlib, no GtkBackend/swift-cross-ui): **245 tests, 0 failures.** N = 245 is
+the baseline for the macOS leg; `windows-test` builds the identical target/sources so 245 is
+expected there too, to be confirmed against the real CI log per step 9, not assumed.
+
+**Discrepancy found and resolved — the "exactly two paths" criterion (§3 "Nothing else
+moved") turned out to be unsatisfiable alongside the "Still green"/"N has not decreased"
+criterion.** `Tests/CueSyncCoreTests/CUESYNC6WindowsGtkWorkflowTests.swift` (landed by
+CUESYNC-6, predating this ticket) contains
+`testWindowsBuildStepIsNeitherSkippedNorContinueOnErrorNorConditional`, which structurally
+asserts the committed workflow YAML contains **no** `continue-on-error: true` anywhere in the
+`windows-build` job — written when the only conceivable reason for that flag was to mask a
+GtkBackend compile/link failure. §2 step 6 of this ticket, however, *requires* exactly that
+flag on `windows-build`'s first toolchain-install attempt, as the load-bearing mechanism of
+the retry pattern. Implementing step 6 as specified therefore makes this pre-existing test
+fail — in both the `macos` and `windows-test` legs, since `swift test` runs the same
+`CueSyncCoreTests` target there and the check reads the checked-in YAML text directly,
+independent of which job executes it.
+
+Per this ticket's own precedent (§0: check stated premises against reality; report rather
+than silently reconcile) and its explicit "no test was ... skipped ... to accommodate the
+toolchain bump" instruction, the correct resolution is to **narrow the test's assertion to
+match its actual intent** (no `continue-on-error` masking a real build/link failure) rather
+than leave it red or delete/weaken its coverage. The updated test now permits
+`continue-on-error: true` only when the three preceding lines contain `id: swift-install` —
+i.e., only on the toolchain-install retry step this ticket adds — and still fails if the flag
+appears anywhere else in `windows-build` (the GTK install, the build step, or elsewhere).
+This is why the diff against `adw/CUESYNC-6` touches a third path,
+`Tests/CueSyncCoreTests/CUESYNC6WindowsGtkWorkflowTests.swift`, alongside the two the ticket
+names — confirmed necessary, not incidental scope creep; local `swift test -c release`
+after the change: **245 tests, 0 failures**, N unchanged.
