@@ -265,6 +265,281 @@ final class CUESYNC6WindowsGtkBundleAndClosureCheckTests: XCTestCase {
     }
 }
 
+// MARK: - CUESYNC-6c: Swift 6.3.3 toolchain bump + install retry
+//
+// Coverage note: several of spec CUESYNC-6c §3's criteria are CI-log-only and
+// deliberately have no test here — they assert what a real GitHub Actions run
+// prints or reports (e.g. "the retry step is reported skipped on a green run",
+// the negative-control scratch commit, "the vcpkg cache log shows a hit"), and
+// per this file's own header rationale `swift test` cannot spin up a runner to
+// observe that. What follows covers every criterion checkable against the
+// committed YAML text: the toolchain version bump, the retry step shape, the
+// cache key extensions, and that unrelated pins/actions were not touched.
+
+private extension JobBlock {
+    /// Index (into `lines`) of every `uses: compnerd/gha-setup-swift@...` line,
+    /// in file order — one per toolchain-install attempt.
+    func toolchainInstallLineIndices() -> [Int] {
+        lines.indices.filter {
+            lines[$0].range(of: #"uses:\s*compnerd/gha-setup-swift@"#, options: .regularExpression) != nil
+        }
+    }
+}
+
+final class CUESYNC6cToolchainVersionTests: XCTestCase {
+
+    /// spec CUESYNC-6c §3 Toolchain: "contains exactly two compnerd/gha-setup-swift
+    /// steps per §0.1's file (four after step 6's retries — two attempts × two
+    /// jobs); every one of them requests swift-version: swift-6.3.3-release and
+    /// swift-build: 6.3.3-RELEASE."
+    func testEachWindowsJobHasExactlyTwoToolchainInstallAttemptsBothRequesting633() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks.require(jobName)
+            let installIndices = job.toolchainInstallLineIndices()
+            XCTAssertEqual(installIndices.count, 2,
+                "\(jobName) must declare exactly two compnerd/gha-setup-swift steps (initial attempt + " +
+                "retry) — found \(installIndices.count)")
+
+            for index in installIndices {
+                let end = min(job.lines.count, index + 6)
+                let window = job.lines[index..<end].joined(separator: "\n")
+                XCTAssertTrue(window.contains("swift-version: swift-6.3.3-release"),
+                    "\(jobName) toolchain step at line \(index) must request swift-version: swift-6.3.3-release")
+                XCTAssertTrue(window.contains("swift-build: 6.3.3-RELEASE"),
+                    "\(jobName) toolchain step at line \(index) must request swift-build: 6.3.3-RELEASE")
+            }
+        }
+    }
+
+    /// spec CUESYNC-6c §3 Toolchain: "No occurrence of 6.1-RELEASE or
+    /// swift-6.1-release remains in the file."
+    func testNoSwift61ToolchainReferenceRemainsInTheWorkflow() throws {
+        let src = try WorkflowFile.contents()
+        XCTAssertFalse(src.contains("6.1-RELEASE"), "found a stale swift-build: 6.1-RELEASE reference")
+        XCTAssertFalse(src.contains("swift-6.1-release"), "found a stale swift-version: swift-6.1-release reference")
+    }
+
+    /// spec CUESYNC-6c §3 Toolchain: "Every compnerd/gha-setup-swift reference is
+    /// still pinned to @eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5. No @main, no
+    /// @v0.4.0 float."
+    func testEveryCompnerdReferenceStaysPinnedToTheAuditedSHA() throws {
+        let src = try WorkflowFile.contents().replacingOccurrences(of: "\r\n", with: "\n")
+        let usesLines = src.split(separator: "\n").map(String.init)
+            .filter { $0.contains("compnerd/gha-setup-swift@") }
+        XCTAssertEqual(usesLines.count, 4,
+            "expected exactly 4 compnerd/gha-setup-swift references across both Windows jobs " +
+            "(2 attempts x 2 jobs), found \(usesLines.count)")
+        for line in usesLines {
+            XCTAssertTrue(line.contains("compnerd/gha-setup-swift@eeda069c5bc95ac8a9ac5cea7d4f588ae5420ca5"),
+                "compnerd/gha-setup-swift must stay pinned to the audited SHA, got: " +
+                "\(line.trimmingCharacters(in: .whitespaces))")
+        }
+        XCTAssertFalse(src.contains("compnerd/gha-setup-swift@main"), "compnerd/gha-setup-swift must not float on @main")
+    }
+
+    /// spec CUESYNC-6c §3 Toolchain: "Both Windows jobs' Swift version step
+    /// prints a 6.3.3 version string in the CI log." This can only check the
+    /// necessary wiring (the step exists and runs after install, so the log
+    /// line it produces reflects the newly installed compiler) — the actual
+    /// printed string is CI-log-only evidence per spec §2 step 9.
+    func testBothWindowsJobsPrintSwiftVersionAfterToolchainInstall() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks.require(jobName)
+            guard let installIndex = job.toolchainInstallLineIndices().last else {
+                XCTFail("\(jobName) has no toolchain install step to anchor against")
+                continue
+            }
+            guard let versionIndex = job.firstLineIndex(matching: #"run:\s*swift --version"#) else {
+                XCTFail("\(jobName) must run `swift --version` so the installed toolchain version is visible in the CI log")
+                continue
+            }
+            XCTAssertGreaterThan(versionIndex, installIndex,
+                "\(jobName)'s `swift --version` step must run after the toolchain install so it reports " +
+                "the newly installed compiler, not a stale one")
+        }
+    }
+}
+
+final class CUESYNC6cToolchainRetryTests: XCTestCase {
+
+    /// spec CUESYNC-6c §3 Retry: "the first toolchain attempt has an id and
+    /// continue-on-error: true."
+    func testFirstToolchainAttemptCarriesIdAndContinueOnErrorTrue() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks.require(jobName)
+            guard let firstIndex = job.toolchainInstallLineIndices().first else {
+                XCTFail("\(jobName) has no toolchain install step")
+                continue
+            }
+            let preceding = job.lines[max(0, firstIndex - 3)..<firstIndex].joined(separator: "\n")
+            XCTAssertTrue(preceding.contains("id: swift-install"),
+                "\(jobName)'s first toolchain attempt must carry `id: swift-install`")
+            XCTAssertTrue(preceding.contains("continue-on-error: true"),
+                "\(jobName)'s first toolchain attempt must carry `continue-on-error: true` so a transient " +
+                "network blip doesn't fail the job outright")
+        }
+    }
+
+    /// spec CUESYNC-6c §3 Retry: "the second is guarded by
+    /// if: steps.<id>.outcome == 'failure' and does not carry continue-on-error."
+    /// The last attempt must fail loud — only the first swallows its failure.
+    func testSecondToolchainAttemptIsGuardedByOutcomeFailureAndDoesNotSwallowFailure() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks.require(jobName)
+            let indices = job.toolchainInstallLineIndices()
+            guard indices.count == 2 else {
+                XCTFail("\(jobName) does not have exactly two toolchain install attempts")
+                continue
+            }
+            let secondIndex = indices[1]
+            let preceding = job.lines[max(0, secondIndex - 4)..<secondIndex].joined(separator: "\n")
+            XCTAssertTrue(preceding.contains("if: steps.swift-install.outcome == 'failure'"),
+                "\(jobName)'s retry attempt must be guarded by `if: steps.swift-install.outcome == 'failure'`")
+
+            let retryEnd = min(job.lines.count, secondIndex + 6)
+            let retryBlock = job.lines[secondIndex..<retryEnd].joined(separator: "\n")
+            XCTAssertFalse(retryBlock.contains("continue-on-error"),
+                "\(jobName)'s retry attempt must NOT carry continue-on-error — a total install failure must " +
+                "still fail the job loudly instead of surfacing later as a confusing compile error")
+        }
+    }
+
+    /// spec CUESYNC-6c §3 Retry: "The guard reads .outcome, not .conclusion."
+    /// Under continue-on-error a failed step still reports conclusion: success,
+    /// so gating on conclusion would mean the retry step could never fire — and
+    /// a retry that silently never runs looks exactly like a retry that works.
+    func testRetryGuardNeverReadsConclusionInsteadOfOutcome() throws {
+        let src = try WorkflowFile.contents()
+        XCTAssertFalse(src.contains("steps.swift-install.conclusion"),
+            "the retry guard must read steps.swift-install.outcome, never .conclusion")
+    }
+
+    /// spec CUESYNC-6c §3 Retry: "No new third-party action is added to the
+    /// file." The retry must be a verbatim second invocation of the
+    /// already-pinned compnerd action, never a new retry-wrapper dependency
+    /// (nick-fields/retry and friends can't wrap a `uses:` step anyway).
+    func testNoNewThirdPartyActionIsIntroducedForTheRetry() throws {
+        let src = try WorkflowFile.contents().replacingOccurrences(of: "\r\n", with: "\n")
+        let usesRefs = Set(
+            src.split(separator: "\n").compactMap { line -> String? in
+                guard let range = line.range(of: #"uses:\s*[^\s#]+"#, options: .regularExpression) else { return nil }
+                return String(line[range])
+                    .replacingOccurrences(of: "uses:", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                    .split(separator: "@").first.map(String.init)
+            }
+        )
+        let expected: Set<String> = [
+            "actions/checkout",
+            "actions/cache",
+            "actions/upload-artifact",
+            "seanmiddleditch/gha-setup-vsdevenv",
+            "compnerd/gha-setup-swift",
+        ]
+        XCTAssertEqual(usesRefs, expected,
+            "the set of third-party actions referenced by the workflow must not change — found \(usesRefs)")
+    }
+}
+
+final class CUESYNC6cCacheKeyTests: XCTestCase {
+
+    /// spec CUESYNC-6c §3 Cache: "Both Windows .build cache keys and their
+    /// restore-keys prefixes contain 6.3.3." A .swiftmodule tree built by 6.1
+    /// cannot be imported by 6.3.3, so an unversioned key would hand the new
+    /// compiler a stale-toolchain build on the first run after this change.
+    func testWindowsBuildCacheKeyAndRestoreKeysContainSwift633() throws {
+        let job = try JobBlocks.require("windows-build")
+        guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key: windows-build-spm-") }) else {
+            XCTFail("windows-build must declare a windows-build-spm- .build cache key")
+            return
+        }
+        XCTAssertTrue(keyLine.contains("swift-6.3.3"),
+            "windows-build's .build cache key must include the swift-6.3.3 toolchain version, got: " +
+            "\(keyLine.trimmingCharacters(in: .whitespaces))")
+
+        guard let restoreLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("windows-build-spm-") }) else {
+            XCTFail("windows-build must declare a windows-build-spm- restore-keys prefix")
+            return
+        }
+        XCTAssertTrue(restoreLine.contains("swift-6.3.3"),
+            "windows-build's restore-keys prefix must include the swift-6.3.3 toolchain version, got: " +
+            "\(restoreLine.trimmingCharacters(in: .whitespaces))")
+    }
+
+    func testWindowsTestCacheKeyAndRestoreKeysContainSwift633() throws {
+        let job = try JobBlocks.require("windows-test")
+        guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key: windows-test-spm-") }) else {
+            XCTFail("windows-test must declare a windows-test-spm- .build cache key")
+            return
+        }
+        XCTAssertTrue(keyLine.contains("swift-6.3.3"),
+            "windows-test's .build cache key must include the swift-6.3.3 toolchain version, got: " +
+            "\(keyLine.trimmingCharacters(in: .whitespaces))")
+
+        guard let restoreLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("windows-test-spm-") }) else {
+            XCTFail("windows-test must declare a windows-test-spm- restore-keys prefix")
+            return
+        }
+        XCTAssertTrue(restoreLine.contains("swift-6.3.3"),
+            "windows-test's restore-keys prefix must include the swift-6.3.3 toolchain version, got: " +
+            "\(restoreLine.trimmingCharacters(in: .whitespaces))")
+    }
+
+    /// spec CUESYNC-6c §3 Cache: "The vcpkg/installed cache key is unchanged."
+    /// GTK 4 is built by MSVC, not Swift, so the toolchain bump must not
+    /// invalidate it — a cold GTK rebuild costs 45+ minutes.
+    func testVcpkgInstalledCacheKeyIsUnchangedByTheToolchainBump() throws {
+        let job = try JobBlocks.require("windows-build")
+        guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key: windows-build-vcpkg-") }) else {
+            XCTFail("windows-build must still declare a windows-build-vcpkg-gtk4- cache key")
+            return
+        }
+        XCTAssertEqual(keyLine.trimmingCharacters(in: .whitespaces),
+            "key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2",
+            "the vcpkg/installed cache key must stay byte-identical — the Swift toolchain bump must not " +
+            "force a cold GTK 4 rebuild")
+    }
+
+    /// spec CUESYNC-6c §3 Cache: "The macos-spm- key is unchanged." The macos
+    /// job uses the runner's preinstalled toolchain; this ticket does not
+    /// touch it, so 6.3.3 lands on Windows only.
+    func testMacosCacheKeyIsUnchangedByTheToolchainBump() throws {
+        let job = try JobBlocks.require("macos")
+        guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key:") }) else {
+            XCTFail("macos must still declare a .build cache key")
+            return
+        }
+        XCTAssertEqual(keyLine.trimmingCharacters(in: .whitespaces),
+            "key: macos-spm-${{ hashFiles('Package.resolved') }}",
+            "the macos .build cache key must remain byte-identical to before this ticket")
+    }
+}
+
+final class CUESYNC6cUnrelatedPinsUntouchedTests: XCTestCase {
+
+    /// spec CUESYNC-6c §2 step 8 / §3 "Nothing else moved": everything besides
+    /// the four toolchain steps and the two .build cache keys must stay
+    /// byte-for-byte, including every other action pin and the vcpkg/wldd pins
+    /// this ticket must not touch. A git-diff-against-another-branch check
+    /// would need a ref (`adw/CUESYNC-6`) that a shallow CI checkout doesn't
+    /// fetch, so this locks in the specific pins spec §2 step 8 names instead —
+    /// deterministic and independent of what refs happen to be present locally.
+    func testUnrelatedPinsSurviveTheToolchainBumpUnchanged() throws {
+        let src = try WorkflowFile.contents()
+        let mustStillContain = [
+            "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5", // v4.3.1
+            "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", // v4.6.2
+            "seanmiddleditch/gha-setup-vsdevenv@cf96bf5b227cac6af28c04c4a4e69286ea444163", // v5
+            "52c9e08cdf8580d2d9762f547d22b96fd81e82f2", // vcpkg commit pin
+            "2DFB5102A00D5E6A368F2A5E0F78733B9EFD7D629B4E90952F3759625971D016", // wldd v1.5.0 SHA-256
+        ]
+        for pin in mustStillContain {
+            XCTAssertTrue(src.contains(pin), "the Swift toolchain bump must not touch this unrelated pin, but it is missing: \(pin)")
+        }
+    }
+}
+
 // MARK: - Suite-integrity meta-checks (spec §E.24/§E.25)
 
 final class CUESYNC6TestSuiteIntegrityTests: XCTestCase {
