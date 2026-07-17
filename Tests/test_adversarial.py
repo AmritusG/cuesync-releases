@@ -25,7 +25,6 @@
 # test — never weaken it.
 # =============================================================================
 
-import os
 import re
 from pathlib import Path
 
@@ -113,15 +112,15 @@ def _repair_run_body(block_text):
     block, de-indented, for text-level attacks."""
     lines = block_text.splitlines()
     run_idx = next(
-        (k for k, l in enumerate(lines) if l.strip() in ("run: |", "run: |-")),
+        (k for k, ln in enumerate(lines) if ln.strip() in ("run: |", "run: |-")),
         None,
     )
     assert run_idx is not None, "repair step has no `run: |` body:\n" + block_text
     body = lines[run_idx + 1:]
     # Common indent = the run body's indentation (10 spaces in this file).
-    indented = [l for l in body if l.strip()]
-    common = min((len(l) - len(l.lstrip()) for l in indented), default=0)
-    return "\n".join(l[common:] if len(l) >= common else l for l in body)
+    indented = [ln for ln in body if ln.strip()]
+    common = min((len(ln) - len(ln.lstrip()) for ln in indented), default=0)
+    return "\n".join(ln[common:] if len(ln) >= common else ln for ln in body)
 
 
 def _windows_repair_bodies():
@@ -359,15 +358,15 @@ def test_repair_runs_after_resolve_and_before_build():
         seg = LINES[start:end]
 
         def line_of(pred):
-            return next((k for k, l in enumerate(seg) if pred(l)), None)
+            return next((k for k, ln in enumerate(seg) if pred(ln)), None)
 
-        resolve_i = line_of(lambda l: "swift package resolve" in l)
+        resolve_i = line_of(lambda ln: "swift package resolve" in ln)
         repair_i = line_of(
-            lambda l: STEP_NAME_RE.match(l) and REPAIR_STEP_NAME in l
+            lambda ln: STEP_NAME_RE.match(ln) and REPAIR_STEP_NAME in ln
         )
         build_i = line_of(
-            lambda l: STEP_NAME_RE.match(l)
-            and ("Build (release)" in l or l.strip() == "- name: Test")
+            lambda ln: STEP_NAME_RE.match(ln)
+            and ("Build (release)" in ln or ln.strip() == "- name: Test")
         )
         assert resolve_i is not None, job + ": no `swift package resolve` step"
         assert repair_i is not None, job + ": no repair step"
