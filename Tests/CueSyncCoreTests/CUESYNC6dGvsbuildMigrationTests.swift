@@ -50,10 +50,22 @@ final class CUESYNC6dVcpkgRemovalTests: XCTestCase {
     /// GTK." A `git clone`/`git -C ... checkout` was vcpkg's acquisition path;
     /// a pinned release-asset download replaces it entirely, so no clone of
     /// any kind belongs in either job any more.
+    ///
+    /// Retargeted per this repo's §E.24 rule (CUESYNC-6e §0.4 item 4: "retarget,
+    /// never weaken") when CUESYNC-6e's generic swift-java symlink repair
+    /// started tripping the original `git\s+-C\b` half of this pattern: that
+    /// step legitimately runs `git -C <swift-java checkout> ls-files -s` /
+    /// `cat-file blob` — read-only plumbing against a dependency checkout
+    /// SwiftPM already resolved, not an acquisition clone. `Patterns.gtkAcquisitionClone`
+    /// narrows the match to the two shapes vcpkg's acquisition actually used —
+    /// a bare `git clone`, and `git -C <dir> checkout <ref>` (its pin-to-commit
+    /// step) — neither of which appears in `ls-files`/`cat-file` plumbing, so
+    /// the original guard strength against a reintroduced source-tree clone is
+    /// unchanged.
     func testNeitherWindowsJobClonesARepositoryToAcquireGtk() throws {
         for jobName in ["windows-build", "windows-test"] {
             let job = try JobBlocks.require(jobName)
-            XCTAssertNil(job.firstLineIndex(matching: #"git\s+clone|git\s+-C\b"#, caseInsensitive: true),
+            XCTAssertNil(job.firstLineIndex(matching: Patterns.gtkAcquisitionClone, caseInsensitive: true),
                 "\(jobName) clones a repository — spec CUESYNC-6d requires GTK 4 come from a pinned " +
                 "release-asset download, not a source-tree clone")
         }
@@ -296,6 +308,16 @@ final class CUESYNC6dAdversarialChecksumOrderingTests: XCTestCase {
 }
 
 // MARK: - Helpers (deliberately self-contained — see file header)
+
+private enum Patterns {
+    /// Matches a repository-acquisition clone (vcpkg's historical GTK
+    /// acquisition path: `git clone <repo>` and/or `git -C <dir> checkout
+    /// <ref>` to pin it) without matching read-only git plumbing — e.g. the
+    /// `ls-files`/`cat-file` reads CUESYNC-6e's swift-java symlink repair
+    /// makes against a checkout SwiftPM already resolved. See the retarget
+    /// note on `testNeitherWindowsJobClonesARepositoryToAcquireGtk`.
+    static let gtkAcquisitionClone = #"git\s+clone\b|git\s+-C\s+\S+\s+checkout\b"#
+}
 
 private struct WorkflowStep {
     let name: String
