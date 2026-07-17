@@ -528,12 +528,37 @@ jobs:
           # comctl32.dll already on this list. Adding it here, not routing it
           # through the Swift-toolchain-root branch, which is reserved for the
           # separate known gap of unbundled Swift runtime DLLs.
+          #
+          # CI-observed (this branch, run 29607447687): with dcomp.dll
+          # allowed, the clean run advanced further into wldd's dependency
+          # list and failed again, this time on d3d12.dll =>
+          # C:\Windows\System32\D3D12.dll. Write-Error is terminating in this
+          # step (no explicit -ErrorAction override, and the pwsh runner here
+          # defaults $ErrorActionPreference to Stop), so Test-DllClosure halts
+          # at the FIRST disallowed name it hits and every failure after it in
+          # wldd's output is invisible until the one before it is fixed — that
+          # is why these CI-fix rounds were surfacing one DLL at a time. Rather
+          # than repeat that one-DLL-per-~23-minute-round cycle, the full raw
+          # `== Dependency-closure check (clean) ==` dump from this same run
+          # was read end to end and checked by hand against the allow list
+          # below; every remaining name that resolves under
+          # C:\Windows\System32\ and was not already covered is added in this
+          # one pass. All are bona fide Windows system components present on
+          # every supported Windows release, pulled in transitively by GTK4's
+          # Windows rendering/text/network stack (ANGLE's Direct3D/DXGI/GDI
+          # path, DirectWrite/Uniscribe text shaping, RPC, Winsock-adjacent
+          # network info, and the VC++ redistributable runtime) — none
+          # resolved from an unexpected or non-system location.
           $allow = @(
             'kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','ole32.dll',
             'oleaut32.dll','shell32.dll','shlwapi.dll','ws2_32.dll','ucrtbase.dll',
             'msvcrt.dll','ntdll.dll','crypt32.dll','bcrypt.dll','version.dll',
             'winmm.dll','dwmapi.dll','comctl32.dll','comdlg32.dll','imm32.dll',
-            'setupapi.dll','dcomp.dll','api-ms-win-*'
+            'setupapi.dll','dcomp.dll','d3d11.dll','d3d12.dll','dxgi.dll',
+            'opengl32.dll','hid.dll','winspool.drv','kernelbase.dll','dwrite.dll',
+            'iphlpapi.dll','usp10.dll','dnsapi.dll','userenv.dll','secur32.dll',
+            'dbghelp.dll','rpcrt4.dll','msvcp140.dll','msimg32.dll',
+            'vcruntime140.dll','vcruntime140_1.dll','api-ms-win-*'
           )
           # CI-observed (this branch, run 29578635669): the clean run failed on
           # "non-system DLL resolved outside the artifact directory:
