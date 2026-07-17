@@ -633,9 +633,29 @@ jobs:
           if (-not (Test-DllClosure ".build\release\CueSync.exe")) { throw "clean dependency-closure check failed" }
           Write-Host "Closure check passed: no missing or non-system DLL found outside the artifact directory."
 
-          $victimDll = (Get-ChildItem ".build\release" -File |
-            Where-Object { $_.Extension -eq '.dll' } | Select-Object -First 1).BaseName
-          if (-not $victimDll) { Write-Error "no bundled DLL found to use for the negative control"; exit 1 }
+          # CI-observed (this branch, run 29609242832): the negative control failed —
+          # "the closure check still passed with abseil_dll.dll removed". Picking the
+          # alphabetically-first .dll file in the artifact directory can land on a DLL
+          # that the "Bundle GTK 4 runtime DLLs" step copied over from gvsbuild's bin/
+          # but that CueSync.exe's own resolved import closure never references (wldd's
+          # static PE-import walk of CueSync.exe never reaches abseil_dll.dll) — removing
+          # a DLL nothing imports can never make the closure check fail, so the negative
+          # control was vacuous. The victim must instead be a name wldd's own clean-run
+          # walk actually resolved from inside the artifact directory — i.e. a real,
+          # exercised dependency — so removing it is guaranteed to break the closure.
+          $victimDll = $null
+          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+            $trimmedLine = $rawLine.Trim()
+            $separatorIndex = $trimmedLine.IndexOf(' => ')
+            if ($separatorIndex -le 0) { continue }
+            $depName = $trimmedLine.Substring(0, $separatorIndex).Trim()
+            $depPath = $trimmedLine.Substring($separatorIndex + 4).Trim()
+            if ($depPath.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+              $victimDll = [System.IO.Path]::GetFileNameWithoutExtension($depName)
+              break
+            }
+          }
+          if (-not $victimDll) { Write-Error "no bundled DLL found in CueSync.exe's resolved dependency closure to use for the negative control"; exit 1 }
 
           Write-Host "== Negative control: removing $victimDll.dll =="
           Copy-Item ".build\release\$victimDll.dll" "$env:RUNNER_TEMP\$victimDll.dll.bak" -Force
