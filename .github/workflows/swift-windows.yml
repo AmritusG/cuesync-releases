@@ -517,12 +517,23 @@ jobs:
       - name: Verify DLL closure (clean run, then negative control)
         shell: pwsh
         run: |
+          # CI-observed (this branch, run 29605824014): now that the symlink
+          # repair (CUESYNC-6e) gets the build past swift-java, the clean run
+          # reaches this check for the first time and fails on "non-system DLL
+          # resolved outside the artifact directory: dcomp.dll =>
+          # C:\Windows\System32\dcomp.dll". dcomp.dll (DirectComposition) is a
+          # bona fide Windows system component — present in System32 on every
+          # supported Windows release — pulled in transitively by GTK4's
+          # Windows GDI/ANGLE compositing path, exactly like dwmapi.dll and
+          # comctl32.dll already on this list. Adding it here, not routing it
+          # through the Swift-toolchain-root branch, which is reserved for the
+          # separate known gap of unbundled Swift runtime DLLs.
           $allow = @(
             'kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','ole32.dll',
             'oleaut32.dll','shell32.dll','shlwapi.dll','ws2_32.dll','ucrtbase.dll',
             'msvcrt.dll','ntdll.dll','crypt32.dll','bcrypt.dll','version.dll',
             'winmm.dll','dwmapi.dll','comctl32.dll','comdlg32.dll','imm32.dll',
-            'setupapi.dll','api-ms-win-*'
+            'setupapi.dll','dcomp.dll','api-ms-win-*'
           )
           # CI-observed (this branch, run 29578635669): the clean run failed on
           # "non-system DLL resolved outside the artifact directory:
