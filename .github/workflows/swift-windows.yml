@@ -143,84 +143,54 @@ jobs:
           swift-version: swift-6.3.3-release
           swift-build: 6.3.3-RELEASE
 
-      # spec CUESYNC-6 §0.4/§C.13 — GTK 4 distribution: **vcpkg**, not the
-      # spec's original gvsbuild/MSYS2 candidates (findings doc §0.4 revised
-      # this after checking swift-cross-ui's own docs/CI at the pinned
-      # revision — upstream states plainly it only supports GTK-on-Windows via
-      # vcpkg). vcpkg builds GTK 4 from source rather than shipping a
-      # downloadable prebuilt binary, so — per spec §4 — the correct pin point
-      # is the vcpkg tool's own git commit, not a SHA-256 of an asset that
-      # doesn't exist. `2026.06.24` (commit 52c9e08cdf8580d2d9762f547d22b96fd81e82f2),
-      # the newest vcpkg tag at CI-wiring time, confirmed to contain a `gtk`
-      # port (version 4.22.4) via the GitHub API before being pinned here.
-      # Caching `vcpkg/installed` separately from the SwiftPM `.build` cache
-      # below: a cold-cache GTK 4 build is 45+ minutes (findings doc §0.4), so
-      # this is the single biggest cost in the job and deserves its own key.
-      - name: Cache vcpkg GTK 4 install
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: vcpkg/installed
-          key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          restore-keys: |
-            windows-build-vcpkg-gtk4-
-
-      # CI-observed (this branch, runs 29549794499 and 29551076324): the
-      # win25-vs2026 runner image does not resolve a bare `powershell.exe` on
-      # PATH — only `pwsh.exe` (PowerShell 7) is present, even though PATH
-      # still lists the legacy WindowsPowerShell\v1.0 directory. vcpkg's
-      # bootstrap-vcpkg.bat hardcodes `powershell.exe -NoProfile
-      # -ExecutionPolicy Bypass "& {...}"` — a bare name, not a full path — so
-      # it fails with "not recognized as an internal or external command"
-      # before vcpkg ever builds, and every step after it fails in turn.
+      # spec CUESYNC-6d — GTK 4 distribution: **gvsbuild**, replacing CUESYNC-6c's
+      # from-source build. Compiling GTK 4's whole dependency tree on every cold
+      # runner cost 45+ minutes (CUESYNC-6 findings §0.4) to produce bytes
+      # wingtk/gvsbuild already publishes as a versioned, MSVC-built release
+      # asset. Swapping the source build for a pinned download turns the
+      # slowest step in the pipeline into one that costs seconds.
       #
-      # A prior fix shimmed a `powershell.exe` (a copy of pwsh.exe) onto PATH
-      # for this step's own process, on the theory that every child process
-      # this step spawns — including cmd.exe via the .bat — inherits that
-      # PATH. Run 29551076324 shows that theory is wrong in practice: the
-      # exact same "'powershell.exe' is not recognized" error recurs even
-      # with the shim built and `$env:PATH` mutated in-process immediately
-      # before the clone. Rather than keep guessing at why the shim doesn't
-      # propagate, sidestep bootstrap-vcpkg.bat entirely: fetching it at the
-      # pinned commit shows it is a two-line wrapper —
-      # `@echo off` + `powershell.exe ... "& {& \"%~dp0scripts\bootstrap.ps1\" %*}"`
-      # — around `scripts\bootstrap.ps1`, which is itself a self-contained
-      # PowerShell script (resolves its own directory via `$PSScriptRoot`,
-      # downloads `vcpkg.exe` directly from the pinned vcpkg-tool release).
-      # This step already runs under `shell: pwsh`, i.e. inside a real
-      # PowerShell process — invoking `scripts/bootstrap.ps1` directly runs
-      # the identical logic the .bat would have, with no bare `powershell.exe`
-      # lookup anywhere in the chain, and no dependency on what this runner
-      # image does or doesn't ship at the legacy WindowsPowerShell path.
-      # Install GTK 4 (vcpkg, pinned). Deliberately clones vcpkg fresh rather
-      # than using the copy windows-latest ships at C:\vcpkg (runner-images'
-      # Windows2022-Readme.md documents it, unpinned and updated on whatever
-      # schedule the image maintainers choose) — cloning and checking out an
-      # exact commit is the reproducible pin spec §4 requires. Classic
-      # (non-manifest) mode: the port set available is exactly what ships at
-      # the pinned commit, so pinning the vcpkg checkout pins the GTK 4 build
-      # recipe with it. `vcpkg install` is idempotent against an
-      # already-populated `installed/` tree (restored above on a cache hit),
-      # so this step is left unconditional rather than skipped on cache hit —
-      # a skip-on-hit would be exactly the "stale cache hides a broken
-      # install" failure mode spec §C.13 warns against.
+      # The trade (spec §4): the GTK DLLs shipped inside cuesync-windows go from
+      # "compiled on our own runner from a pinned source tree" to "prebuilt
+      # binaries produced by a third party (wingtk), identified by a hash". That
+      # is a real reduction in provenance, bought deliberately for the 45-minute
+      # saving — the SHA-256 below is the entire basis of trust for that trade,
+      # not a formality, which is why it is verified BEFORE extraction rather
+      # than after (checking a hash post-unpack checks it after untrusted bytes
+      # have already touched the filesystem).
       #
-      # The pin (52c9e08c...) is the SHA of the `2026.06.24` *tag object*, not
-      # a commit — `git checkout` correctly detaches to the tag's target
-      # commit (subject "[comms-ublox] update to 3.0.7 (#52583)"), which is
-      # why that subject looks unrelated to GTK: it's just whatever commit
-      # happened to be tip-of-branch when upstream cut that release tag.
-      # Confirmed via `git fetch --depth 1 origin 52c9e08c...` against the
-      # real microsoft/vcpkg remote before writing this comment — the object
-      # exists and resolves deterministically; GitHub's REST commits API
-      # 404s on it only because that endpoint doesn't accept tag object SHAs,
-      # not because the pin is wrong.
-      - name: Install GTK 4 (vcpkg, pinned)
+      # Pin resolved live against github.com/wingtk/gvsbuild/releases at
+      # CI-wiring time: tag `2026.6.0` ("GTK 4.22.4"), asset
+      # `GTK4_Gvsbuild_2026.6.0_x64.zip`. URL is `releases/download/<tag>/<asset>`
+      # — never `releases/latest/download/...`, which floats. SHA-256 below was
+      # computed locally from the downloaded asset (`shasum -a 256`) and
+      # independently cross-checked against the `sha256:` digest GitHub's
+      # release-assets API reports for the same blob — the two matched exactly.
+      # The asset publishes no separate checksums file of its own, so this
+      # literal gets the same treatment the dependency-closure checker's pin
+      # below already does: computed once, committed, verified every run.
+      - name: Install GTK 4 (gvsbuild, pinned)
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg
-          git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          & "./vcpkg/scripts/bootstrap.ps1"
-          ./vcpkg/vcpkg install gtk --triplet x64-windows
+          $gtkZip = "$env:RUNNER_TEMP\gtk4-gvsbuild.zip"
+          Invoke-WebRequest -Uri "https://github.com/wingtk/gvsbuild/releases/download/2026.6.0/GTK4_Gvsbuild_2026.6.0_x64.zip" -OutFile $gtkZip
+          $expectedSha256 = "01DBF613DE732A42BEDB425F034B84381970A652CEF6C0B3906E4DA1A6C18600"
+          $actualSha256 = (Get-FileHash $gtkZip -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            Write-Error "gtk4-gvsbuild.zip checksum mismatch: expected $expectedSha256, got $actualSha256"
+            exit 1
+          }
+          # gvsbuild bakes prefix=C:/gtk-build/gtk/x64/release into every shipped
+          # .pc file (confirmed by inspecting lib/pkgconfig/gtk4.pc in the asset).
+          # SwiftPM parses .pc files itself (PackageLoading/PkgConfig.swift)
+          # rather than shelling out, so `pkgconf --define-prefix` cannot rescue
+          # a relocated tree — extracting to that exact baked prefix, rather
+          # than rewriting prefix= in all 300+ shipped .pc files, is the simpler
+          # of spec §0.2 item 4's two options and the one chosen here. The zip
+          # has no wrapping folder (bin/, lib/, include/ sit at its root), so
+          # extracting straight to the prefix reproduces it exactly.
+          New-Item -ItemType Directory -Force -Path "C:\gtk-build\gtk\x64\release" | Out-Null
+          Expand-Archive -Path $gtkZip -DestinationPath "C:\gtk-build\gtk\x64\release" -Force
 
       # spec §0.3(a): SwiftPM's systemLibrary pkgConfig: resolution needs GTK's
       # .pc files reachable via PKG_CONFIG_PATH. SwiftPM parses .pc files
@@ -230,39 +200,26 @@ jobs:
       # a diagnostic rather than a hard failure if the binary is absent, but
       # providing one is cheap and removes an unknown.
       #
-      # CI-observed (this branch, runs 29551076324/29552030924): `vcpkg fetch
-      # pkgconf` (the prior approach here) errors "vcpkg does not have a
-      # definition of this tool for this platform" — confirmed against a
-      # local checkout of the pinned vcpkg commit, where `vcpkg fetch pkgconf`
-      # fails identically on every platform, because pkgconf was never a
-      # fetchable "tool" in vcpkg's registry (only cmake/ninja/nasm/etc. are).
-      # That error text lands on stdout (vcpkg --help: "Errors/failures still
-      # go to stdout"), so `Select-Object -Last 1` silently captured the error
-      # string itself into $pkgconf instead of a path, and `Split-Path` on
-      # that string (no backslash) returned "" rather than throwing — the
-      # empty string only surfaced as a failure one line later at `Join-Path`.
-      # pkgconf IS available as a normal vcpkg PORT (ports/pkgconf), installed
-      # like any other library rather than fetched as a tool; installing it
-      # (~7s, confirmed locally) places `pkgconf.exe` at the fixed path
-      # `installed/<triplet>/tools/pkgconf/`, which is what's used below.
-      - name: Configure pkg-config for vcpkg GTK 4
+      # Unlike the prior from-source build (which had no fetchable pkgconf
+      # "tool" and needed one installed and copied to pkg-config.exe), the
+      # gvsbuild asset ships bin/pkg-config.exe directly — confirmed present
+      # in the archive. No copy/rename step needed.
+      - name: Configure pkg-config for gvsbuild GTK 4
         shell: pwsh
         run: |
-          ./vcpkg/vcpkg install pkgconf --triplet x64-windows
-          $pkgconfDir = Join-Path $PWD "vcpkg\installed\x64-windows\tools\pkgconf"
-          Copy-Item (Join-Path $pkgconfDir "pkgconf.exe") (Join-Path $pkgconfDir "pkg-config.exe") -Force
-          Add-Content $env:GITHUB_PATH $pkgconfDir
-          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
+          $gtkBin = "C:\gtk-build\gtk\x64\release\bin"
+          Add-Content $env:GITHUB_PATH $gtkBin
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=C:\gtk-build\gtk\x64\release\lib\pkgconfig"
 
       # Same rationale as the macOS leg's cache step: a from-scratch compile of
       # swift-cross-ui's dependency closure is the dominant cost of this job
       # (Build (release) alone ran ~19 minutes with no cache), and Windows is
       # already the slower leg due to the toolchain/VS setup steps above.
-      # Key extended with the pinned vcpkg commit (spec §C.13): Package.resolved
-      # itself does not change for this ticket (§A.9), so hashing it alone can
-      # never invalidate this cache when the GTK version changes — the pinned
-      # commit literal is the actual GTK input and must be bumped by hand
-      # alongside the "Install GTK 4" step above whenever the pin moves.
+      # Key extended with the pinned gvsbuild tag (spec CUESYNC-6 §C.13):
+      # Package.resolved itself does not change for this ticket, so hashing it
+      # alone can never invalidate this cache when the GTK version changes —
+      # the pinned tag literal is the actual GTK input and must be bumped by
+      # hand alongside the "Install GTK 4" step above whenever the pin moves.
       # spec CUESYNC-6c §2 step 7: also extended with the Swift toolchain
       # version — .swiftmodule files are compiler-version-locked, so a 6.1-built
       # .build tree must not be handed to the 6.3.3 compiler this job now installs.
@@ -270,9 +227,9 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-build-spm-swift-6.3.3-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
+          key: windows-build-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-build-spm-swift-6.3.3-vcpkg-
+            windows-build-spm-swift-6.3.3-gvsbuild-2026.6.0-
 
       - name: Swift version
         run: swift --version
@@ -284,12 +241,13 @@ jobs:
       # glib, cairo, pango, harfbuzz, gdk-pixbuf, graphene, fribidi, libepoxy,
       # the image codecs, intl, zlib and friends) next to CueSync.exe so the
       # uploaded cuesync-windows artifact is self-contained. Copy everything
-      # vcpkg placed in the triplet's bin/ rather than hand-curating the list —
-      # the §D.18 closure check below is what tells us what's actually required.
+      # gvsbuild placed in the extracted tree's bin/ rather than hand-curating
+      # the list — the §D.18 closure check below is what tells us what's
+      # actually required.
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
-          Get-ChildItem vcpkg\installed\x64-windows\bin -File |
+          Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File |
             Where-Object { $_.Extension -eq '.dll' } |
             Copy-Item -Destination .build\release\ -Force
 
@@ -446,39 +404,32 @@ jobs:
       # the final link into a runnable test binary — there's no SwiftPM CLI
       # flag that scopes both compiling AND linking to one target's actual
       # dependency subset). So this job needs the same GTK 4 install as
-      # windows-build. Same cache key as windows-build's own "Cache vcpkg GTK
-      # 4 install" step (below) so a cache primed by either job's run warms
-      # both on the next push.
-      - name: Cache vcpkg GTK 4 install
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: vcpkg/installed
-          key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          restore-keys: |
-            windows-build-vcpkg-gtk4-
-
-      # Identical rationale/mechanism as windows-build's "Install GTK 4
-      # (vcpkg, pinned)" step — see its comments for why this calls
-      # `scripts/bootstrap.ps1` directly instead of `bootstrap-vcpkg.bat`
-      # (the .bat's bare `powershell.exe` invocation doesn't resolve on this
-      # runner image, and a PATH-shim workaround was confirmed not to fix it).
-      - name: Install GTK 4 (vcpkg, pinned)
+      # windows-build. Identical gvsbuild pin as windows-build's own "Install
+      # GTK 4 (gvsbuild, pinned)" step below — see its comments for the tag/
+      # SHA-256/prefix rationale (spec CUESYNC-6d).
+      #
+      # Identical rationale as windows-build's identically named step.
+      - name: Install GTK 4 (gvsbuild, pinned)
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg
-          git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          & "./vcpkg/scripts/bootstrap.ps1"
-          ./vcpkg/vcpkg install gtk --triplet x64-windows
+          $gtkZip = "$env:RUNNER_TEMP\gtk4-gvsbuild.zip"
+          Invoke-WebRequest -Uri "https://github.com/wingtk/gvsbuild/releases/download/2026.6.0/GTK4_Gvsbuild_2026.6.0_x64.zip" -OutFile $gtkZip
+          $expectedSha256 = "01DBF613DE732A42BEDB425F034B84381970A652CEF6C0B3906E4DA1A6C18600"
+          $actualSha256 = (Get-FileHash $gtkZip -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            Write-Error "gtk4-gvsbuild.zip checksum mismatch: expected $expectedSha256, got $actualSha256"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path "C:\gtk-build\gtk\x64\release" | Out-Null
+          Expand-Archive -Path $gtkZip -DestinationPath "C:\gtk-build\gtk\x64\release" -Force
 
       # Identical rationale as windows-build's identically named step.
-      - name: Configure pkg-config for vcpkg GTK 4
+      - name: Configure pkg-config for gvsbuild GTK 4
         shell: pwsh
         run: |
-          ./vcpkg/vcpkg install pkgconf --triplet x64-windows
-          $pkgconfDir = Join-Path $PWD "vcpkg\installed\x64-windows\tools\pkgconf"
-          Copy-Item (Join-Path $pkgconfDir "pkgconf.exe") (Join-Path $pkgconfDir "pkg-config.exe") -Force
-          Add-Content $env:GITHUB_PATH $pkgconfDir
-          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
+          $gtkBin = "C:\gtk-build\gtk\x64\release\bin"
+          Add-Content $env:GITHUB_PATH $gtkBin
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=C:\gtk-build\gtk\x64\release\lib\pkgconfig"
 
       # Keyed separately from windows-build's SwiftPM cache: even though both
       # jobs now build the same full package graph, they run on separate
@@ -490,9 +441,9 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-test-spm-swift-6.3.3-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
+          key: windows-test-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-test-spm-swift-6.3.3-vcpkg-
+            windows-test-spm-swift-6.3.3-gvsbuild-2026.6.0-
 
       - name: Swift version
         run: swift --version

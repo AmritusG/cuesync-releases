@@ -501,19 +501,24 @@ final class CUESYNC6cCacheKeyTests: XCTestCase {
             "\(restoreLine.trimmingCharacters(in: .whitespaces))")
     }
 
-    /// spec CUESYNC-6c §3 Cache: "The vcpkg/installed cache key is unchanged."
-    /// GTK 4 is built by MSVC, not Swift, so the toolchain bump must not
-    /// invalidate it — a cold GTK rebuild costs 45+ minutes.
-    func testVcpkgInstalledCacheKeyIsUnchangedByTheToolchainBump() throws {
+    /// spec CUESYNC-6d §0.4: retargeted from the vcpkg cache-key pin. That
+    /// separate GTK cache step is gone (CUESYNC-6d step 5 — a pinned prebuilt
+    /// download costs seconds and does not need a cache), so the subject this
+    /// guard protects is now the gvsbuild pin itself: the exact release URL and
+    /// its SHA-256, immediately adjacent in the "Install GTK 4 (gvsbuild,
+    /// pinned)" step. Same guard strength as the cache-key check it replaces —
+    /// an exact-literal match that must fail if the pin goes missing or floats.
+    func testGvsbuildGtkPinStaysExactAndDoesNotFloat() throws {
         let job = try JobBlocks.require("windows-build")
-        guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key: windows-build-vcpkg-") }) else {
-            XCTFail("windows-build must still declare a windows-build-vcpkg-gtk4- cache key")
+        guard let urlIndex = job.firstLineIndex(matching: #"wingtk/gvsbuild/releases/download/2026\.6\.0/GTK4_Gvsbuild_2026\.6\.0_x64\.zip"#) else {
+            XCTFail("windows-build must download the pinned gvsbuild GTK 4 release asset from the exact " +
+                    "releases/download/<tag>/<asset> URL")
             return
         }
-        XCTAssertEqual(keyLine.trimmingCharacters(in: .whitespaces),
-            "key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2",
-            "the vcpkg/installed cache key must stay byte-identical — the Swift toolchain bump must not " +
-            "force a cold GTK 4 rebuild")
+        let window = job.lines[urlIndex..<min(job.lines.count, urlIndex + 6)].joined(separator: "\n")
+        XCTAssertTrue(window.contains(#"$expectedSha256 = "01DBF613DE732A42BEDB425F034B84381970A652CEF6C0B3906E4DA1A6C18600""#),
+            "the gvsbuild GTK 4 download must be followed by its exact, byte-identical SHA-256 pin — " +
+            "spec §0.4: this guard must still fail if the pin goes missing or floats")
     }
 
     /// spec CUESYNC-6c §3 Cache: "The macos-spm- key is unchanged." The macos
@@ -547,7 +552,8 @@ final class CUESYNC6cUnrelatedPinsUntouchedTests: XCTestCase {
             "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830", // v4.3.0
             "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", // v4.6.2
             "seanmiddleditch/gha-setup-vsdevenv@cf96bf5b227cac6af28c04c4a4e69286ea444163", // v5
-            "52c9e08cdf8580d2d9762f547d22b96fd81e82f2", // vcpkg commit pin
+            "wingtk/gvsbuild/releases/download/2026.6.0/GTK4_Gvsbuild_2026.6.0_x64.zip", // spec CUESYNC-6d: gvsbuild GTK 4 pin (retargeted from the vcpkg commit pin, §0.4)
+            "01DBF613DE732A42BEDB425F034B84381970A652CEF6C0B3906E4DA1A6C18600", // gvsbuild GTK 4 asset SHA-256
             "2DFB5102A00D5E6A368F2A5E0F78733B9EFD7D629B4E90952F3759625971D016", // wldd v1.5.0 SHA-256
         ]
         for pin in mustStillContain {
