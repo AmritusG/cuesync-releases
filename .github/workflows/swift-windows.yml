@@ -299,6 +299,17 @@ jobs:
       # the patch minimal and platform-agnostic (harmless on macOS/Linux too,
       # not Windows-only). Idempotent: a second run finds no remaining
       # `UInt(...)` call at these sites and is a no-op.
+      #
+      # CI-observed (this branch, run 29577493457): both windows-latest jobs
+      # failed here — not on the UInt/gulong mismatch itself, but one step
+      # earlier — with "Set-Content: Access to the path
+      # '...\swift-cross-ui\Sources\Gtk\GObject.swift' is denied." SwiftPM
+      # checks dependency sources out read-only on Windows, specifically so
+      # nobody edits a pinned dependency by accident — which is exactly what
+      # this step intentionally does, so the read-only flag has to be
+      # cleared first. `Set-ItemProperty -Name IsReadOnly -Value $false`
+      # flips it before each file is rewritten; idempotent like the rest of
+      # this step, since clearing an already-clear flag is a no-op.
       - name: Resolve Swift package dependencies
         run: swift package resolve
 
@@ -306,6 +317,7 @@ jobs:
         shell: pwsh
         run: |
           $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
+          Set-ItemProperty -LiteralPath $gobject -Name IsReadOnly -Value $false
           (Get-Content -Raw -LiteralPath $gobject) `
             -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
             -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
@@ -313,6 +325,7 @@ jobs:
             Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
 
           $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
+          Set-ItemProperty -LiteralPath $memoryTexture -Name IsReadOnly -Value $false
           (Get-Content -Raw -LiteralPath $memoryTexture) `
             -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
             Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
@@ -556,6 +569,7 @@ jobs:
         shell: pwsh
         run: |
           $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
+          Set-ItemProperty -LiteralPath $gobject -Name IsReadOnly -Value $false
           (Get-Content -Raw -LiteralPath $gobject) `
             -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
             -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
@@ -563,6 +577,7 @@ jobs:
             Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
 
           $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
+          Set-ItemProperty -LiteralPath $memoryTexture -Name IsReadOnly -Value $false
           (Get-Content -Raw -LiteralPath $memoryTexture) `
             -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
             Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
