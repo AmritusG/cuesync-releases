@@ -268,6 +268,55 @@ jobs:
       - name: Swift version
         run: swift --version
 
+      # CI-observed (this branch, run 29576012144): swift-cross-ui v0.8.0
+      # (the exact pin in Package.swift, commit
+      # a6d206370812e3b9edba259d167e848892c5013d) fails to compile on
+      # windows-latest with "cannot convert value of type 'UInt' to expected
+      # argument type 'gulong'/'gsize'" in Sources/Gtk/GObject.swift (x3) and
+      # Sources/Gtk/MemoryTexture.swift (x1). Root cause: those 4 call sites
+      # pass a bare Swift `UInt` into GLib functions typed `gulong`/`gsize`.
+      # On macOS/Linux (LP64) `unsigned long` is 64-bit, so ClangImporter
+      # imports both `gulong` and `gsize` as `UInt` there and `UInt(...)`
+      # already matches — that's why only the Windows (LLP64) legs fail:
+      # there `unsigned long` is 32-bit, so `gulong` imports as `UInt32` and
+      # `gsize` (backed by 64-bit `size_t`) imports as `UInt64`, neither of
+      # which unifies with `UInt`.
+      #
+      # This is upstream swift-cross-ui code (github.com/moreSwift/swift-cross-ui),
+      # not ours, and the version is pinned exactly per spec CUESYNC-5 §0.1 —
+      # so the fix lives here, applied to the resolved checkout right before
+      # it's compiled, rather than as an edit to a file we don't own. `swift
+      # package resolve` (not the build step itself) is what materializes
+      # .build/checkouts/swift-cross-ui, so it has to run first.
+      #
+      # The replacement text isn't invented: Signals.swift's own
+      # `disconnectSignal(_:handlerId:)`, one function away from the first
+      # broken call site, already does this identical conversion via
+      # `.init(handlerId)` instead of `UInt(handlerId)` and compiles clean on
+      # every platform — `.init` resolves to whichever concrete type the
+      # parameter actually is. This step applies that same established idiom
+      # to the 4 sites that still spell it out as `UInt(...)`, which keeps
+      # the patch minimal and platform-agnostic (harmless on macOS/Linux too,
+      # not Windows-only). Idempotent: a second run finds no remaining
+      # `UInt(...)` call at these sites and is a no-op.
+      - name: Resolve Swift package dependencies
+        run: swift package resolve
+
+      - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
+        shell: pwsh
+        run: |
+          $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
+          (Get-Content -Raw -LiteralPath $gobject) `
+            -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
+            -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
+            -replace 'g_signal_handler_unblock\(gobjectPointer, signalID\)', 'g_signal_handler_unblock(gobjectPointer, .init(signalID))' |
+            Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
+
+          $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
+          (Get-Content -Raw -LiteralPath $memoryTexture) `
+            -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
+            Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
+
       - name: Build (release)
         run: swift build -c release
 
@@ -492,6 +541,31 @@ jobs:
 
       - name: Swift version
         run: swift --version
+
+      # Identical rationale as windows-build's identically named steps —
+      # swift-cross-ui v0.8.0's Sources/Gtk/GObject.swift and
+      # MemoryTexture.swift fail to compile on windows-latest with a
+      # UInt→gulong/gsize conversion error, and this job compiles the same
+      # full package graph (see the "swift test ... builds the WHOLE package
+      # manifest" comment on the GTK 4 install step above), so it needs the
+      # same patch applied before "Test" runs.
+      - name: Resolve Swift package dependencies
+        run: swift package resolve
+
+      - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
+        shell: pwsh
+        run: |
+          $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
+          (Get-Content -Raw -LiteralPath $gobject) `
+            -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
+            -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
+            -replace 'g_signal_handler_unblock\(gobjectPointer, signalID\)', 'g_signal_handler_unblock(gobjectPointer, .init(signalID))' |
+            Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
+
+          $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
+          (Get-Content -Raw -LiteralPath $memoryTexture) `
+            -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
+            Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
 
       # On Windows, `swift test` spawns BOTH the XCTest runner and the
       # swift-testing runner. The swift-testing runner finds 0 tests (the suite
