@@ -192,6 +192,40 @@ jobs:
           New-Item -ItemType Directory -Force -Path "C:\gtk-build\gtk\x64\release" | Out-Null
           Expand-Archive -Path $gtkZip -DestinationPath "C:\gtk-build\gtk\x64\release" -Force
 
+          # CI-observed (this branch, run 29574422622): even extracted to the
+          # exact baked prefix above, both Windows jobs still failed — "gtk/
+          # gtk.h file not found" from clang, with a SwiftPM warning right
+          # before it: "Expected a value for variable 'prefix'". Root cause,
+          # read directly from PackageLoading/PkgConfig.swift's `parse()`: it
+          # checks a line for ":" BEFORE checking for "=", so
+          # `prefix=C:/gtk-build/gtk/x64/release` — a variable assignment
+          # whose value happens to contain a Windows drive-letter colon — is
+          # misclassified as an unrecognized `key: value` line (the same shape
+          # as `Requires:`/`Libs:`) and silently dropped. Every later
+          # `${prefix}`-derived variable (includedir, libdir, ...) then fails
+          # to resolve, so every GTK 4 header/lib path SwiftPM handed to clang
+          # came back empty. This is independent of the relocation question
+          # above: the exact-baked-prefix choice does not dodge it, because
+          # the bug fires on ANY colon in a parsed "=" line, not on a
+          # relocated path.
+          #
+          # Confirmed against a known-working precedent for this exact defect
+          # (frida/luma's LumaGtk, which hits the identical GTK-on-Windows
+          # pkg-config parsing bug): rewrite each shipped .pc file's
+          # `prefix=` line to a colon-free, `${pcfiledir}`-relative form.
+          # `lib\pkgconfig` sits two directories below the extraction root, so
+          # `${pcfiledir}/../..` recomputes the identical absolute path.
+          # `pcfiledir` is supplied directly by SwiftPM itself (same `parse()`,
+          # set before the file is read — not parsed off this line), so it
+          # never goes through the buggy ":"-before-"=" check. Idempotent:
+          # re-running against an already-patched file is a no-op.
+          Get-ChildItem -Path "C:\gtk-build\gtk\x64\release\lib\pkgconfig" -File |
+            Where-Object { $_.Extension -eq '.pc' } | ForEach-Object {
+            $pcContent = Get-Content -Raw -LiteralPath $_.FullName
+            $pcPatched = $pcContent -replace '(?m)^prefix=.*', 'prefix=${pcfiledir}/../..'
+            [System.IO.File]::WriteAllText($_.FullName, $pcPatched, [System.Text.UTF8Encoding]::new($false))
+          }
+
       # spec §0.3(a): SwiftPM's systemLibrary pkgConfig: resolution needs GTK's
       # .pc files reachable via PKG_CONFIG_PATH. SwiftPM parses .pc files
       # itself (PackageLoading/PkgConfig.swift) rather than shelling out for
@@ -422,6 +456,17 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "C:\gtk-build\gtk\x64\release" | Out-Null
           Expand-Archive -Path $gtkZip -DestinationPath "C:\gtk-build\gtk\x64\release" -Force
+
+          # Identical rationale as windows-build's identically named step —
+          # see its comments for why this is required (SwiftPM's PkgConfig.swift
+          # misparses `prefix=C:/...`'s drive-letter colon as a `key: value`
+          # line and silently drops it, breaking every ${prefix}-derived path).
+          Get-ChildItem -Path "C:\gtk-build\gtk\x64\release\lib\pkgconfig" -File |
+            Where-Object { $_.Extension -eq '.pc' } | ForEach-Object {
+            $pcContent = Get-Content -Raw -LiteralPath $_.FullName
+            $pcPatched = $pcContent -replace '(?m)^prefix=.*', 'prefix=${pcfiledir}/../..'
+            [System.IO.File]::WriteAllText($_.FullName, $pcPatched, [System.Text.UTF8Encoding]::new($false))
+          }
 
       # Identical rationale as windows-build's identically named step.
       - name: Configure pkg-config for gvsbuild GTK 4
