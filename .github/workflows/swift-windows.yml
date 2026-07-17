@@ -164,35 +164,33 @@ jobs:
           restore-keys: |
             windows-build-vcpkg-gtk4-
 
-      # CI-observed (this branch and adw/CUESYNC-6, both runs): the
+      # CI-observed (this branch, runs 29549794499 and 29551076324): the
       # win25-vs2026 runner image does not resolve a bare `powershell.exe` on
       # PATH — only `pwsh.exe` (PowerShell 7) is present, even though PATH
       # still lists the legacy WindowsPowerShell\v1.0 directory. vcpkg's
-      # bootstrap-vcpkg.bat (verified at the pinned commit below) hardcodes
-      # `powershell.exe -NoProfile -ExecutionPolicy Bypass "& {...}"` — a bare
-      # name, not a full path — so it fails with "not recognized as an
-      # internal or external command" before vcpkg ever builds, and every
-      # step after it fails in turn. Shim a `powershell.exe` that forwards to
-      # the pwsh already running this job: pwsh accepts the identical
-      # -NoProfile/-ExecutionPolicy/-Command CLI surface, so the shim is a
-      # transparent substitute for what bootstrap-vcpkg.bat expects. Sourced
-      # via $PSHOME rather than `Get-Command pwsh` so the shim doesn't itself
-      # depend on the PATH resolution that's broken here.
+      # bootstrap-vcpkg.bat hardcodes `powershell.exe -NoProfile
+      # -ExecutionPolicy Bypass "& {...}"` — a bare name, not a full path — so
+      # it fails with "not recognized as an internal or external command"
+      # before vcpkg ever builds, and every step after it fails in turn.
       #
-      # CI-observed (this branch, run 29549794499): shimming via a separate
-      # step that does `Add-Content $env:GITHUB_PATH $shimDir` does NOT work
-      # here — the shim directory never appears in the next step's actual
-      # `Path` env var (confirmed by inspecting the runner's env dump), so
-      # bootstrap-vcpkg.bat still fails with the exact same "'powershell.exe'
-      # is not recognized" error. Cross-step GITHUB_PATH propagation on this
-      # image is unreliable once earlier steps (Setup VS Dev Environment,
-      # gha-setup-swift) have already mutated PATH via $GITHUB_ENV/$GITHUB_PATH
-      # themselves. Sidestep it entirely: build the shim AND mutate `$env:PATH`
-      # directly in THIS process, in the same step that uses it. A directly
-      # assigned `$env:PATH` is a real OS environment variable that every
-      # child process this step spawns (git, cmd.exe via the .bat, vcpkg.exe)
-      # inherits automatically — no dependency on the Actions runner's
-      # cross-step PATH bookkeeping at all.
+      # A prior fix shimmed a `powershell.exe` (a copy of pwsh.exe) onto PATH
+      # for this step's own process, on the theory that every child process
+      # this step spawns — including cmd.exe via the .bat — inherits that
+      # PATH. Run 29551076324 shows that theory is wrong in practice: the
+      # exact same "'powershell.exe' is not recognized" error recurs even
+      # with the shim built and `$env:PATH` mutated in-process immediately
+      # before the clone. Rather than keep guessing at why the shim doesn't
+      # propagate, sidestep bootstrap-vcpkg.bat entirely: fetching it at the
+      # pinned commit shows it is a two-line wrapper —
+      # `@echo off` + `powershell.exe ... "& {& \"%~dp0scripts\bootstrap.ps1\" %*}"`
+      # — around `scripts\bootstrap.ps1`, which is itself a self-contained
+      # PowerShell script (resolves its own directory via `$PSScriptRoot`,
+      # downloads `vcpkg.exe` directly from the pinned vcpkg-tool release).
+      # This step already runs under `shell: pwsh`, i.e. inside a real
+      # PowerShell process — invoking `scripts/bootstrap.ps1` directly runs
+      # the identical logic the .bat would have, with no bare `powershell.exe`
+      # lookup anywhere in the chain, and no dependency on what this runner
+      # image does or doesn't ship at the legacy WindowsPowerShell path.
       # Install GTK 4 (vcpkg, pinned). Deliberately clones vcpkg fresh rather
       # than using the copy windows-latest ships at C:\vcpkg (runner-images'
       # Windows2022-Readme.md documents it, unpinned and updated on whatever
@@ -219,14 +217,9 @@ jobs:
       - name: Install GTK 4 (vcpkg, pinned)
         shell: pwsh
         run: |
-          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
-          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
-          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
-          $env:PATH = "$shimDir;$env:PATH"
-
           git clone https://github.com/microsoft/vcpkg
           git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          ./vcpkg/bootstrap-vcpkg.bat
+          & "./vcpkg/scripts/bootstrap.ps1"
           ./vcpkg/vcpkg install gtk --triplet x64-windows
 
       # spec §0.3(a): SwiftPM's systemLibrary pkgConfig: resolution needs GTK's
@@ -451,21 +444,16 @@ jobs:
             windows-build-vcpkg-gtk4-
 
       # Identical rationale/mechanism as windows-build's "Install GTK 4
-      # (vcpkg, pinned)" step — see its comments for why the shim is built
-      # and PATH-prepended in-process rather than via a separate step +
-      # $env:GITHUB_PATH (that cross-step propagation was confirmed broken on
-      # this runner image).
+      # (vcpkg, pinned)" step — see its comments for why this calls
+      # `scripts/bootstrap.ps1` directly instead of `bootstrap-vcpkg.bat`
+      # (the .bat's bare `powershell.exe` invocation doesn't resolve on this
+      # runner image, and a PATH-shim workaround was confirmed not to fix it).
       - name: Install GTK 4 (vcpkg, pinned)
         shell: pwsh
         run: |
-          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
-          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
-          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
-          $env:PATH = "$shimDir;$env:PATH"
-
           git clone https://github.com/microsoft/vcpkg
           git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
-          ./vcpkg/bootstrap-vcpkg.bat
+          & "./vcpkg/scripts/bootstrap.ps1"
           ./vcpkg/vcpkg install gtk --triplet x64-windows
 
       # Identical rationale as windows-build's identically named step.

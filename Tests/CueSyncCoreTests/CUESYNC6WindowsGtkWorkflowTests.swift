@@ -90,16 +90,32 @@ final class CUESYNC6WindowsGtkInstallTests: XCTestCase {
         XCTAssertLessThan(gtkLine, buildLine, "macos job must install gtk4 BEFORE `swift build -c release` (spec §C.14)")
     }
 
-    /// spec §C.15: `windows-test` depends only on CueSyncCore/CSQLite/CZlib and
-    /// never on the CueSync executable target, so it needs no GTK — adding an
-    /// install step there would put a multi-minute install on the critical path
-    /// of the job that exists specifically to be the fast one. This locks in
-    /// today's correct shape as a regression guard, not just a §C.13/§C.14 mirror.
-    func testWindowsTestJobGetsNoGtk4InstallStep() throws {
+    /// spec §C.15 originally assumed `windows-test` (CueSyncCoreTests only
+    /// depends on CueSyncCore/CSQLite/CZlib) would never need GTK. CI-observed
+    /// (this branch, run 29549794499) that assumption is wrong on every
+    /// platform: `swift test` invoked bare always builds the WHOLE package
+    /// manifest first — including the `CueSync` executable target and its
+    /// GtkBackend/swift-cross-ui dependency closure — because there is no
+    /// SwiftPM CLI flag that scopes both compiling AND linking to one target's
+    /// actual dependency subset (`swift build --target CueSyncCoreTests` alone
+    /// compiles the test module but never performs the final link into a
+    /// runnable test binary). So `windows-test` must install GTK 4 too, same
+    /// as `windows-build`, or `swift test` itself fails to link. This locks in
+    /// that corrected shape as a regression guard.
+    func testWindowsTestJobInstallsGtk4BeforeInvokingSwiftTest() throws {
         let job = try JobBlocks.require("windows-test")
-        XCTAssertNil(job.firstLineIndex(matching: #"gtk4|gtk 4|libgtk-4|vcpkg"#, caseInsensitive: true),
-            "windows-test must not grow a GTK/vcpkg install step (spec §C.15) — CueSyncCoreTests never " +
-            "touches the CueSync executable target or GtkBackend, and this job exists to be the fast one")
+        guard let testLine = job.firstLineIndex(matching: #"swift test -c release"#) else {
+            XCTFail("windows-test must still invoke `swift test -c release`")
+            return
+        }
+        guard let gtkLine = job.firstLineIndex(matching: #"gtk4|gtk 4|libgtk-4|vcpkg"#, caseInsensitive: true) else {
+            XCTFail("windows-test has no step referencing GTK 4/vcpkg at all — `swift test` builds the whole " +
+                    "package manifest, including the GtkBackend-dependent CueSync executable target, so this " +
+                    "job needs GTK 4 installed just like windows-build")
+            return
+        }
+        XCTAssertLessThan(gtkLine, testLine,
+            "the GTK 4 install step must run BEFORE `swift test -c release` in windows-test")
     }
 
     /// spec §3/§C.16/§5: "not stubbed, not skipped, not `continue-on-error`, and
