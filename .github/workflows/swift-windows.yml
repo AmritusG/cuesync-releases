@@ -550,7 +550,7 @@ jobs:
           $swiftToolchainRoot = $null
           $swiftExe = Get-Command swift.exe -ErrorAction SilentlyContinue
           if ($swiftExe) {
-            $swiftRootMatch = [regex]::Match($swiftExe.Source, '^.*\\Swift(?=\\(Toolchains|Runtimes)\\)')
+            $swiftRootMatch = [regex]::Match($swiftExe.Source, '^.+\\Swift(?=\\(Toolchains|Runtimes)\\)')
             if ($swiftRootMatch.Success) { $swiftToolchainRoot = $swiftRootMatch.Value }
           }
 

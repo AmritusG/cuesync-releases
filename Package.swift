@@ -24,6 +24,14 @@ let package = Package(
                 .define("SQLITE_THREADSAFE", to: "1"),
                 .define("SQLITE_OMIT_LOAD_EXTENSION"),
                 .define("SQLITE_DQS", to: "0"),
+                // sqlite3.c's own #ifndef-guarded MIN/MAX collide with the
+                // same macros in Apple SDK's sys/param.h (pulled in
+                // transitively via sys/sysctl.h). The #ifndef correctly
+                // prevents a redefinition, but Clang's module system still
+                // flags every later use as ambiguous because a textual and a
+                // modular definition of the same name coexist. Harmless here
+                // since both bodies are behaviorally identical.
+                .unsafeFlags(["-Wno-ambiguous-macro"]),
             ]
         ),
         // Vendored zlib source (see Sources/CZlib/README.md). Compiling it directly
