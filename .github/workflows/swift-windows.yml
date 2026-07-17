@@ -228,15 +228,29 @@ jobs:
       # that part, but it does still probe for a literal `pkg-config`
       # executable to discover built-in search paths — that probe degrades to
       # a diagnostic rather than a hard failure if the binary is absent, but
-      # providing one is cheap and removes an unknown. vcpkg vendors pkgconf as
-      # a fetchable host tool; copy it to a `pkg-config.exe`-named copy since
-      # that is the literal name SwiftPM looks for.
+      # providing one is cheap and removes an unknown.
+      #
+      # CI-observed (this branch, runs 29551076324/29552030924): `vcpkg fetch
+      # pkgconf` (the prior approach here) errors "vcpkg does not have a
+      # definition of this tool for this platform" — confirmed against a
+      # local checkout of the pinned vcpkg commit, where `vcpkg fetch pkgconf`
+      # fails identically on every platform, because pkgconf was never a
+      # fetchable "tool" in vcpkg's registry (only cmake/ninja/nasm/etc. are).
+      # That error text lands on stdout (vcpkg --help: "Errors/failures still
+      # go to stdout"), so `Select-Object -Last 1` silently captured the error
+      # string itself into $pkgconf instead of a path, and `Split-Path` on
+      # that string (no backslash) returned "" rather than throwing — the
+      # empty string only surfaced as a failure one line later at `Join-Path`.
+      # pkgconf IS available as a normal vcpkg PORT (ports/pkgconf), installed
+      # like any other library rather than fetched as a tool; installing it
+      # (~7s, confirmed locally) places `pkgconf.exe` at the fixed path
+      # `installed/<triplet>/tools/pkgconf/`, which is what's used below.
       - name: Configure pkg-config for vcpkg GTK 4
         shell: pwsh
         run: |
-          $pkgconf = (./vcpkg/vcpkg fetch pkgconf | Select-Object -Last 1)
-          $pkgconfDir = Split-Path $pkgconf
-          Copy-Item $pkgconf (Join-Path $pkgconfDir "pkg-config.exe") -Force
+          ./vcpkg/vcpkg install pkgconf --triplet x64-windows
+          $pkgconfDir = Join-Path $PWD "vcpkg\installed\x64-windows\tools\pkgconf"
+          Copy-Item (Join-Path $pkgconfDir "pkgconf.exe") (Join-Path $pkgconfDir "pkg-config.exe") -Force
           Add-Content $env:GITHUB_PATH $pkgconfDir
           Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
 
@@ -460,9 +474,9 @@ jobs:
       - name: Configure pkg-config for vcpkg GTK 4
         shell: pwsh
         run: |
-          $pkgconf = (./vcpkg/vcpkg fetch pkgconf | Select-Object -Last 1)
-          $pkgconfDir = Split-Path $pkgconf
-          Copy-Item $pkgconf (Join-Path $pkgconfDir "pkg-config.exe") -Force
+          ./vcpkg/vcpkg install pkgconf --triplet x64-windows
+          $pkgconfDir = Join-Path $PWD "vcpkg\installed\x64-windows\tools\pkgconf"
+          Copy-Item (Join-Path $pkgconfDir "pkgconf.exe") (Join-Path $pkgconfDir "pkg-config.exe") -Force
           Add-Content $env:GITHUB_PATH $pkgconfDir
           Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
 
