@@ -178,14 +178,21 @@ jobs:
       # transparent substitute for what bootstrap-vcpkg.bat expects. Sourced
       # via $PSHOME rather than `Get-Command pwsh` so the shim doesn't itself
       # depend on the PATH resolution that's broken here.
-      - name: Shim powershell.exe for vcpkg bootstrap
-        shell: pwsh
-        run: |
-          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
-          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
-          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
-          Add-Content $env:GITHUB_PATH $shimDir
-
+      #
+      # CI-observed (this branch, run 29549794499): shimming via a separate
+      # step that does `Add-Content $env:GITHUB_PATH $shimDir` does NOT work
+      # here — the shim directory never appears in the next step's actual
+      # `Path` env var (confirmed by inspecting the runner's env dump), so
+      # bootstrap-vcpkg.bat still fails with the exact same "'powershell.exe'
+      # is not recognized" error. Cross-step GITHUB_PATH propagation on this
+      # image is unreliable once earlier steps (Setup VS Dev Environment,
+      # gha-setup-swift) have already mutated PATH via $GITHUB_ENV/$GITHUB_PATH
+      # themselves. Sidestep it entirely: build the shim AND mutate `$env:PATH`
+      # directly in THIS process, in the same step that uses it. A directly
+      # assigned `$env:PATH` is a real OS environment variable that every
+      # child process this step spawns (git, cmd.exe via the .bat, vcpkg.exe)
+      # inherits automatically — no dependency on the Actions runner's
+      # cross-step PATH bookkeeping at all.
       # Install GTK 4 (vcpkg, pinned). Deliberately clones vcpkg fresh rather
       # than using the copy windows-latest ships at C:\vcpkg (runner-images'
       # Windows2022-Readme.md documents it, unpinned and updated on whatever
@@ -212,6 +219,11 @@ jobs:
       - name: Install GTK 4 (vcpkg, pinned)
         shell: pwsh
         run: |
+          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
+          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
+          $env:PATH = "$shimDir;$env:PATH"
+
           git clone https://github.com/microsoft/vcpkg
           git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
           ./vcpkg/bootstrap-vcpkg.bat
@@ -415,19 +427,70 @@ jobs:
           swift-version: swift-6.3.3-release
           swift-build: 6.3.3-RELEASE
 
-      # Keyed separately from windows-build's cache: this job only ever builds
-      # CueSyncCoreTests' own dependency subset (CueSyncCore/CSQLite/CZlib),
-      # never the CueSync executable target or swift-cross-ui, so its .build
-      # is a different, much smaller artifact set.
-      # spec CUESYNC-6c §2 step 7: extended with the Swift toolchain version —
-      # see windows-build's identical cache comment for why.
+      # CI-observed (this branch, run 29549794499): `swift test` invoked bare
+      # builds the WHOLE package manifest first — including the `CueSync`
+      # executable target, which depends on GtkBackend/swift-cross-ui — not
+      # just CueSyncCoreTests' own dependency subset. This job used to skip
+      # installing GTK 4 on the theory that `swift test` only builds what the
+      # test target needs; that's wrong on every platform (confirmed locally
+      # on macOS too: `swift build --build-tests`/`swift test` always builds
+      # every target in the manifest, and `swift build --target
+      # CueSyncCoreTests` alone compiles the test module but never performs
+      # the final link into a runnable test binary — there's no SwiftPM CLI
+      # flag that scopes both compiling AND linking to one target's actual
+      # dependency subset). So this job needs the same GTK 4 install as
+      # windows-build. Same cache key as windows-build's own "Cache vcpkg GTK
+      # 4 install" step (below) so a cache primed by either job's run warms
+      # both on the next push.
+      - name: Cache vcpkg GTK 4 install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vcpkg/installed
+          key: windows-build-vcpkg-gtk4-52c9e08cdf8580d2d9762f547d22b96fd81e82f2
+          restore-keys: |
+            windows-build-vcpkg-gtk4-
+
+      # Identical rationale/mechanism as windows-build's "Install GTK 4
+      # (vcpkg, pinned)" step — see its comments for why the shim is built
+      # and PATH-prepended in-process rather than via a separate step +
+      # $env:GITHUB_PATH (that cross-step propagation was confirmed broken on
+      # this runner image).
+      - name: Install GTK 4 (vcpkg, pinned)
+        shell: pwsh
+        run: |
+          $shimDir = Join-Path $env:RUNNER_TEMP 'powershell-shim'
+          New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+          Copy-Item (Join-Path $PSHOME 'pwsh.exe') (Join-Path $shimDir 'powershell.exe') -Force
+          $env:PATH = "$shimDir;$env:PATH"
+
+          git clone https://github.com/microsoft/vcpkg
+          git -C vcpkg checkout 52c9e08cdf8580d2d9762f547d22b96fd81e82f2
+          ./vcpkg/bootstrap-vcpkg.bat
+          ./vcpkg/vcpkg install gtk --triplet x64-windows
+
+      # Identical rationale as windows-build's identically named step.
+      - name: Configure pkg-config for vcpkg GTK 4
+        shell: pwsh
+        run: |
+          $pkgconf = (./vcpkg/vcpkg fetch pkgconf | Select-Object -Last 1)
+          $pkgconfDir = Split-Path $pkgconf
+          Copy-Item $pkgconf (Join-Path $pkgconfDir "pkg-config.exe") -Force
+          Add-Content $env:GITHUB_PATH $pkgconfDir
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$PWD\vcpkg\installed\x64-windows\lib\pkgconfig"
+
+      # Keyed separately from windows-build's SwiftPM cache: even though both
+      # jobs now build the same full package graph, they run on separate
+      # runners with independent .build directories, so sharing one cache key
+      # between them would just thrash (each job's save would evict the
+      # other's). spec CUESYNC-6c §2 step 7: extended with the Swift toolchain
+      # version — see windows-build's identical cache comment for why.
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          key: windows-test-spm-swift-6.3.3-${{ hashFiles('Package.resolved') }}
+          key: windows-test-spm-swift-6.3.3-vcpkg-52c9e08cdf8580d2d9762f547d22b96fd81e82f2-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            windows-test-spm-swift-6.3.3-
+            windows-test-spm-swift-6.3.3-vcpkg-
 
       - name: Swift version
         run: swift --version
