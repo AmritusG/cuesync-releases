@@ -400,7 +400,25 @@ jobs:
             'winmm.dll','dwmapi.dll','comctl32.dll','comdlg32.dll','imm32.dll',
             'setupapi.dll','api-ms-win-*'
           )
-          $artifactDir = (Resolve-Path ".build\release").Path
+          # CI-observed (this branch, run 29578635669): the clean run failed on
+          # "non-system DLL resolved outside the artifact directory:
+          # pango-1.0-0.dll => ...\.build\x86_64-unknown-windows-msvc\release\
+          # pango-1.0-0.dll" — a bundled GTK DLL the "Bundle GTK 4 runtime
+          # DLLs" step above copied straight into `.build\release\`. Root
+          # cause: SwiftPM creates `.build\release` on Windows as a junction
+          # to `.build\<triple>\release`, not a real directory. Windows' own
+          # path-resolution APIs (which `wldd` uses to report each
+          # dependency's location) follow that junction to its real target,
+          # so wldd's output names the triple-qualified path — but
+          # `Resolve-Path` does not follow reparse points, so `$artifactDir`
+          # was still the untranslated junction path and never matched,
+          # failing every bundled DLL's containment check. Resolving the
+          # junction's final target first (falling back to the plain
+          # resolved path when `.build\release` isn't a reparse point at all)
+          # makes `$artifactDir` match the same canonical path wldd reports.
+          $artifactItem = Get-Item ".build\release"
+          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
 
           function Test-DllClosure {
             param([string]$exePath)
