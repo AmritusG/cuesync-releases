@@ -1759,6 +1759,248 @@ def test_stepper_field_commit_guards_isfinite_before_writing_a_hostile_value():
 
 
 # ---------------------------------------------------------------------------
+# ATTACK 37 (SUPPLY CHAIN) — the DEV script clears the read-only/write bit on
+# EXACTLY the files the patch modifies, before it applies them. spec §3 requires
+# the "read-only flag cleared first" (dependency sources check out read-only) for
+# "the established workflow-patch mechanism" — and the dev script IS that
+# mechanism run locally. ATTACK 31 (and the Swift Windows-leg test) lock this for
+# the two Windows YAML legs; NOTHING covers scripts/patch-swift-cross-ui.sh, the
+# THIRD place read-only is cleared. If the patch's target set ever changes and the
+# script's hardcoded `chmod` list is not updated in lockstep, the dev / ci-local
+# loop hits a read-only source and `git apply` dies with a misleading error — the
+# exact split ATTACK 31 exists to prevent, on the one leg it doesn't watch.
+# ---------------------------------------------------------------------------
+
+
+DEV_PATCH_SCRIPT = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
+
+
+def _dev_script_code_or_skip():
+    """Executable lines of the dev patch script, `#`-comment lines removed — the
+    header prose names the same tokens ('read-only', 'git apply') the assertions
+    search for, so only real code may count (same comment-vacuity discipline as
+    ATTACK 35 / the Swift CUESYNC8DevScriptMirrorsCIPatchStepTests)."""
+    if not DEV_PATCH_SCRIPT.is_file():
+        raise unittest.SkipTest("scripts/patch-swift-cross-ui.sh not found")
+    return "\n".join(
+        ln
+        for ln in DEV_PATCH_SCRIPT.read_text(encoding="utf-8").splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+
+
+def test_dev_script_clears_read_only_on_exactly_the_patched_files_before_apply():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    code = _dev_script_code_or_skip()
+    patched = set(_patch_target_paths())
+
+    chmod_pos = None
+    cleared = set()
+    for m in re.finditer(r"chmod\s+[^\n]*u\+w\s+([^\n]*)", code):
+        chmod_pos = m.start() if chmod_pos is None else min(chmod_pos, m.start())
+        for tok in m.group(1).split():
+            if tok.endswith(".swift"):
+                cleared.add(
+                    tok.replace("\\", "/").replace(
+                        ".build/checkouts/swift-cross-ui/", ""
+                    )
+                )
+    assert chmod_pos is not None, (
+        "scripts/patch-swift-cross-ui.sh never clears the write bit (`chmod … u+w …`) "
+        "on the dependency sources — on a read-only checkout `git apply` cannot rewrite "
+        "them and the dev/ci-local loop breaks (spec §3)"
+    )
+    assert cleared == patched, (
+        "spec §3: the dev script clears the write bit on %r but the patch modifies %r — "
+        "a stale hardcoded `chmod` list leaves the real target read-only and breaks "
+        "`git apply` locally, the sibling of the drift ATTACK 31 locks on the Windows legs"
+        % (sorted(cleared), sorted(patched))
+    )
+    apply_pos = code.find("git apply")
+    assert apply_pos != -1, "dev script contains no `git apply` at all (ATTACK 35 covers this)"
+    assert chmod_pos < apply_pos, (
+        "the `chmod … u+w` clear must run BEFORE the first `git apply` — a clear placed "
+        "after the apply cannot help the apply that already failed on a read-only source"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 38 — the macOS gesture-patch step resolves the checkout ON DEMAND. The
+# macos leg has NO separate `swift package resolve` step (ATTACK 33 orders it only
+# against the build it must precede), yet ATTACK 33 also requires the patch to run
+# BEFORE `swift build`. So the checkout does not exist when the patch step runs
+# unless the step itself resolves it — otherwise `cd .build/checkouts/swift-cross-ui`
+# fails and the patch never applies, shipping the dead-on-click UI on the one leg
+# that also builds the macOS SwiftPM artifact. This pins the on-demand resolve as
+# load-bearing, and that it is existence-guarded so a resolved checkout is a no-op.
+# ---------------------------------------------------------------------------
+
+
+def test_macos_gesture_patch_step_resolves_the_checkout_on_demand():
+    bodies = _gesture_bodies()
+    mac = bodies.get("macos")
+    assert mac is not None, "no macos gesture-patch step to inspect"
+    assert "swift package resolve" in mac, (
+        "spec §3: the macos gesture-patch step must `swift package resolve` on demand — "
+        "the macos job has no separate resolve step and the patch runs before `swift "
+        "build`, so without this the checkout it patches does not exist yet"
+    )
+    assert re.search(r"-d\s+\.build/checkouts/swift-cross-ui", mac), (
+        "the on-demand resolve must be guarded by a `[ ! -d .build/checkouts/swift-cross-ui ]` "
+        "existence check so re-running against an already-resolved checkout is a no-op "
+        "(and so it can never clobber a resolved-and-patched tree)"
+    )
+    # And it must be the ONLY resolve in the whole macos job — proving there is no
+    # separate resolve step the ordering could lean on instead (ATTACK 33's premise).
+    mac_start, mac_end = JOBS["macos"]
+    job_resolves = [
+        k
+        for k in range(mac_start, mac_end)
+        if not LINES[k].lstrip().startswith("#") and "swift package resolve" in LINES[k]
+    ]
+    assert len(job_resolves) == 1, (
+        "the macos job must contain exactly one `swift package resolve` (the on-demand "
+        "one inside the gesture-patch step); found %d — a stray separate resolve step "
+        "would change the ordering ATTACK 33 reasons about" % len(job_resolves)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 39 (§4 runtime trust boundary — LIVE FINDING) — the now-clickable export
+# Save buttons feed an UNSANITISED, untrusted preset name straight into the export
+# filename. spec §4(b): "TextTools.slugify() on any name that becomes an export
+# filename stays the sanitiser at that boundary … Values still originate from
+# untrusted files (Rekordbox XML, Serato GEOB, Engine DJ SQLite, ShowKontrol/
+# Resolume) and user text." CUESYNC-8's whole point is that Save XML / Save
+# ShowKontrol Cue now CLICK on Windows — so `state.presetName` (user-typed, or
+# loaded verbatim from an untrusted .cueproj) now flows LIVE into
+# `defaultFileName: "\(name).xml"` / `"\(name).cue"`. But `slugify` is called
+# NOWHERE in the app (grep: its only mention is its own definition + tests), so a
+# preset name of `../../evil`, `con`, or one carrying a NUL/`/` reaches the file
+# chooser's suggested name unfiltered. The NSSavePanel/GTK chooser the user then
+# confirms is a mitigation, not the §4 sanitiser — this is the documented boundary
+# guard being absent at a boundary the ticket just made reachable. Currently FAILS:
+# it reproduces the live gap (fix = route the name through slugify, or retarget
+# with a written §4 justification per repo rule §E.24 — never delete-to-green).
+# ---------------------------------------------------------------------------
+
+
+def test_now_live_export_save_buttons_sanitise_the_untrusted_preset_name():
+    export = (
+        REPO_ROOT / "CueSync" / "CueSync" / "UI" / "Sections" / "ExportSectionView.swift"
+    )
+    if not export.is_file():
+        raise unittest.SkipTest("CrossUI ExportSectionView.swift not found")
+    src = export.read_text(encoding="utf-8")
+
+    # Confirm the newly-live boundary is really here before asserting the guard: an
+    # untrusted presetName-derived value is interpolated into the save filename.
+    assert "state.presetName" in src and "defaultFileName:" in src, (
+        "ExportSectionView.swift's export shape changed — re-locate the presetName -> "
+        "defaultFileName boundary before trusting this test"
+    )
+
+    # Comment-stripped so a future "// should slugify this" note can't turn the guard
+    # green without the actual call being wired.
+    code = "\n".join(
+        (ln[: ln.index("//")] if "//" in ln else ln) for ln in src.splitlines()
+    )
+    assert "slugify" in code, (
+        "spec §4(b): the untrusted preset name that becomes the export filename must be "
+        "run through TextTools.slugify() (the named boundary sanitiser — traversal-free, "
+        "never `.`/`..`, never a bare Windows reserved device name, NUL/control stripped) "
+        "before it reaches `defaultFileName:`. It is not: `slugify` has ZERO call sites in "
+        "the app, so `state.presetName` = `../../evil` / `con` / a NUL-bearing string flows "
+        "raw into the file chooser's suggested name. CUESYNC-8 made these Save buttons "
+        "clickable on Windows, so this boundary is now LIVE — the save-panel confirm is "
+        "defence-in-depth, not the §4 sanitiser this asserts."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 40 (§4 — no hardcoded paths) — the patch and its dev applier operate on
+# the checkout path DERIVED AT RUNTIME, never a baked-in absolute path. spec §4:
+# "No hardcoded paths / separators / line endings. The patch-application script
+# and any probe operate on the resolved checkout path derived at runtime, never a
+# hardcoded /tmp or C:\…." A patch/script carrying `/Users/<someone>`, `/tmp/…`,
+# or `C:\…` would be non-reproducible across machines and CI — and a machine-
+# specific absolute path is also an information leak in a checked-in artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_and_dev_script_use_no_hardcoded_absolute_paths():
+    banned = ["/tmp/", "/Users/", "/home/", "/private/", "/var/folders", "C:\\", "C:/"]
+    subjects = []
+    if PATCH_TEXT:
+        subjects.append(("patches/" + GESTURE_PATCH_NAME, PATCH_TEXT))
+    if DEV_PATCH_SCRIPT.is_file():
+        subjects.append(
+            ("scripts/patch-swift-cross-ui.sh", _dev_script_code_or_skip())
+        )
+    assert subjects, "neither the patch nor the dev script is present to inspect"
+    for label, text in subjects:
+        for token in banned:
+            assert token not in text, (
+                "spec §4 (no hardcoded paths): %s contains the absolute path fragment "
+                "`%s` — the patch/applier must derive the checkout path at runtime "
+                "(e.g. `$ROOT/.build/checkouts/…`), never bake in a machine-specific root"
+                % (label, token)
+            )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 41 (correctness — desync guard that runs WITHOUT a checkout) — the Swift
+# property the backend ASSIGNS must be the exact one the Widget hunk DECLARES.
+# Behavioral ATTACK 24 proves the applied bytes are hit-test-transparent, but it
+# SKIPS on a bare `python3` (no resolved checkout). A rename that desynced the two
+# hunks — e.g. Widget declares `var hitTestable` for `can-target` while the backend
+# still sets `.canTarget = false` — would break `git apply`'s result at COMPILE
+# time on CI, yet sail past every no-checkout text test that only greps for the
+# string `"can-target"` / `canTarget = false` (both still literally present). This
+# extracts BOTH identifiers from the diff and asserts they match, so the desync is
+# caught structurally, offline, before CI ever compiles.
+# ---------------------------------------------------------------------------
+
+
+def test_patch_backend_can_target_assignment_matches_widget_property_name():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    sections = _patch_file_sections()
+    widget = sections.get("Sources/Gtk/Widgets/Widget.swift", "")
+    backend = sections.get("Sources/GtkBackend/GtkBackend.swift", "")
+
+    decl = re.search(
+        r'@GObjectProperty\(named:\s*"can-target"\)\s*public\s+var\s+(\w+)\s*:\s*Bool',
+        widget,
+    )
+    assert decl, (
+        "the Widget.swift hunk must declare a `Bool` @GObjectProperty bound to the GTK "
+        '`"can-target"` name (findings §2.2) — not found, so the property the fix depends '
+        "on is missing or misdeclared"
+    )
+    declared = decl.group(1)
+
+    added_backend = "\n".join(
+        ln[1:]
+        for ln in backend.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    )
+    setter = re.search(r"\.(\w+)\s*=\s*false", added_backend)
+    assert setter, (
+        "the GtkBackend.swift hunk must set `.<property> = false` on the path widget in "
+        "an ADDED line (findings §2.3) — the hit-test-transparency assignment is missing"
+    )
+    assigned = setter.group(1)
+    assert assigned == declared, (
+        "desync: the backend sets `.%s = false` but the Widget base class declares the "
+        "`can-target` property as `var %s` — these must be the SAME Swift identifier or "
+        "the patched checkout fails to compile on CI, while every offline `contains(\"can-"
+        "target\")` text test stays green and hides it" % (assigned, declared)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
 
