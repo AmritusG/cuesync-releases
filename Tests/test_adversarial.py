@@ -522,7 +522,7 @@ RESERVED_SET = set(RESERVED_DEVICE_NAMES)
 #   slugify <maxLen> <b64fallback> <b64input>  -> prints base64(slug)
 #   token   <length>                           -> prints the raw hex token
 # It must live in a file literally named main.swift for top-level statements.
-_HARNESS_MAIN = r'''
+_HARNESS_MAIN = r"""
 import Foundation
 
 func b64dec(_ s: String) -> String {
@@ -545,7 +545,7 @@ while let line = readLine(strippingNewline: true) {
         print("ERR")
     }
 }
-'''
+"""
 
 # Lazily-built, process-cached compilation of the harness.
 _HARNESS = {"built": False, "bin": None, "err": None}
@@ -679,12 +679,12 @@ def _assert_safe_component(inp, slug):
 def test_slugify_truncation_never_reemits_reserved_device_name():
     default_ml = [(r + " " + "a" * 100, 80, "untitled") for r in RESERVED_DEVICE_NAMES]
     small_ml = [
-        ("connection", 3, "untitled"),   # -> "con"
-        ("auxiliary", 3, "untitled"),    # -> "aux"
-        ("nullify", 3, "untitled"),      # -> "nul"
-        ("printer", 3, "untitled"),      # -> "prn"
-        ("com1port", 4, "untitled"),     # -> "com1"
-        ("lpt9device", 4, "untitled"),   # -> "lpt9"
+        ("connection", 3, "untitled"),  # -> "con"
+        ("auxiliary", 3, "untitled"),  # -> "aux"
+        ("nullify", 3, "untitled"),  # -> "nul"
+        ("printer", 3, "untitled"),  # -> "prn"
+        ("com1port", 4, "untitled"),  # -> "com1"
+        ("lpt9device", 4, "untitled"),  # -> "lpt9"
     ]
     items = default_ml + small_ml
     slugs = _slugify_many(items)
@@ -721,9 +721,7 @@ def test_slugify_is_idempotent_even_when_truncation_meets_reserved_name():
     inputs = [r + " " + "a" * 100 for r in RESERVED_DEVICE_NAMES]
     once = _slugify_many([(inp, 80, "untitled") for inp in inputs])
     twice = _slugify_many([(s, 80, "untitled") for s in once])
-    broken = [
-        (inp, a, b) for inp, a, b in zip(inputs, once, twice) if a != b
-    ]
+    broken = [(inp, a, b) for inp, a, b in zip(inputs, once, twice) if a != b]
     assert not broken, (
         "spec §2/§3 idempotency: slugify(slugify(x)) must equal slugify(x). "
         "The truncation-vs-reserved-name ordering bug breaks it — slugify(x) "
@@ -751,18 +749,18 @@ def test_slugify_output_is_always_a_single_traversal_free_component():
         "a/b\\c",
         "/etc/passwd",
         "C:\\Windows\\System32\\cmd.exe",
-        "\\\\server\\share\\payload",       # UNC path
-        "....//....//x",                    # doubled-dot traversal variant
+        "\\\\server\\share\\payload",  # UNC path
+        "....//....//x",  # doubled-dot traversal variant
         "./../.",
         "file:///etc/passwd",
-        "%2e%2e/passwd",                    # percent-encoded dots (must stay literal)
-        "..%00/..",                         # encoded-NUL traversal
-        "..⁄..⁄x",                # U+2044 FRACTION SLASH homoglyph
-        "．．/passwd",              # fullwidth dots
-        "con/../../nul",                    # reserved tokens joined by traversal
-        "a\x00b",                           # embedded real NUL
-        "safe\x00/../../etc/passwd",        # NUL-truncation attempt
-        "\r\n../etc",                       # CRLF prefix
+        "%2e%2e/passwd",  # percent-encoded dots (must stay literal)
+        "..%00/..",  # encoded-NUL traversal
+        "..⁄..⁄x",  # U+2044 FRACTION SLASH homoglyph
+        "．．/passwd",  # fullwidth dots
+        "con/../../nul",  # reserved tokens joined by traversal
+        "a\x00b",  # embedded real NUL
+        "safe\x00/../../etc/passwd",  # NUL-truncation attempt
+        "\r\n../etc",  # CRLF prefix
     ]
     slugs = _slugify_many([(h, 80, "untitled") for h in hostile])
     for inp, slug in zip(hostile, slugs):
@@ -809,8 +807,10 @@ def test_slugify_reserved_name_spec_examples_are_escaped():
     # Full case matrix, non-truncating: every reserved name escapes to "_name".
     matrix = [(n.upper(), 80, "untitled") for n in RESERVED_DEVICE_NAMES]
     for name, slug in zip(RESERVED_DEVICE_NAMES, _slugify_many(matrix)):
-        assert slug == "_" + name, (
-            "reserved %r must escape to %r, got %r" % (name, "_" + name, slug)
+        assert slug == "_" + name, "reserved %r must escape to %r, got %r" % (
+            name,
+            "_" + name,
+            slug,
         )
 
 
@@ -822,14 +822,19 @@ def test_slugify_reserved_name_spec_examples_are_escaped():
 
 def test_slugify_is_deterministic_across_repeated_calls():
     inputs = [
-        "Hello World", "../../etc/passwd", "CON", "café日本語",
-        "  a---b  ", "\U0001f3a7\U0001f39b️", "", "com1 " + "a" * 90,
+        "Hello World",
+        "../../etc/passwd",
+        "CON",
+        "café日本語",
+        "  a---b  ",
+        "\U0001f3a7\U0001f39b️",
+        "",
+        "com1 " + "a" * 90,
     ]
     first = _slugify_many([(s, 80, "untitled") for s in inputs])
     second = _slugify_many([(s, 80, "untitled") for s in inputs])
     assert first == second, (
-        "slugify must be deterministic; got divergent runs:\n%r\n%r"
-        % (first, second)
+        "slugify must be deterministic; got divergent runs:\n%r\n%r" % (first, second)
     )
 
 
@@ -842,8 +847,15 @@ def test_slugify_is_deterministic_across_repeated_calls():
 
 def test_slugify_default_fallback_is_itself_a_safe_single_component():
     degenerate = [
-        "", "   ", "///", "/// ...", "..", "\x00\x00\x00",
-        "\U0001f3a7\U0001f39b️", "日本語", "\t\r\n",
+        "",
+        "   ",
+        "///",
+        "/// ...",
+        "..",
+        "\x00\x00\x00",
+        "\U0001f3a7\U0001f39b️",
+        "日本語",
+        "\t\r\n",
     ]
     slugs = _slugify_many([(s, 80, "untitled") for s in degenerate])
     for inp, slug in zip(degenerate, slugs):
@@ -883,7 +895,8 @@ def test_generate_token_alphabet_is_lowercase_hex_and_fully_reachable():
     tokens = _token_batch([64] * 500)
     seen = set("".join(tokens))
     assert seen <= set("0123456789abcdef"), (
-        "token emitted characters outside [0-9a-f]: %r" % (seen - set("0123456789abcdef"))
+        "token emitted characters outside [0-9a-f]: %r"
+        % (seen - set("0123456789abcdef"))
     )
     assert seen == set("0123456789abcdef"), (
         "not every hex symbol is reachable (possible modulo bias / restricted "
@@ -944,7 +957,7 @@ def test_generate_token_batch_has_no_duplicates():
 def test_generate_token_distribution_has_no_gross_modulo_bias():
     import collections
 
-    tokens = _token_batch([64] * 1000)          # 64000 hex symbols
+    tokens = _token_batch([64] * 1000)  # 64000 hex symbols
     counts = collections.Counter("".join(tokens))
     total = sum(counts.values())
     expected = total / 16.0
