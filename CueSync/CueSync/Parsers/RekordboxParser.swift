@@ -15,6 +15,15 @@ public struct RekordboxResult {
 
 public enum RekordboxParser {
     public static func parse(xml: String) throws -> RekordboxResult {
+        guard !xml.isEmpty else {
+            throw ParseError.invalidFormat("Rekordbox XML is empty")
+        }
+        // XMLParser's Linux/Windows implementation (libxml2 via FoundationXML) does not
+        // reliably reject a raw NUL byte the way Darwin's Foundation does — it can crash
+        // instead of returning a parse error. Reject illegal XML characters up front.
+        guard xml.unicodeScalars.first(where: { $0.value == 0x00 }) == nil else {
+            throw ParseError.invalidFormat("Rekordbox XML contains an illegal NUL byte")
+        }
         guard let data = xml.data(using: .utf8) else {
             throw ParseError.invalidFormat("Could not encode XML string")
         }
