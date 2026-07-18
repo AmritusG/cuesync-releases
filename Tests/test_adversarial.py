@@ -1818,7 +1818,9 @@ def test_dev_script_clears_read_only_on_exactly_the_patched_files_before_apply()
         % (sorted(cleared), sorted(patched))
     )
     apply_pos = code.find("git apply")
-    assert apply_pos != -1, "dev script contains no `git apply` at all (ATTACK 35 covers this)"
+    assert apply_pos != -1, (
+        "dev script contains no `git apply` at all (ATTACK 35 covers this)"
+    )
     assert chmod_pos < apply_pos, (
         "the `chmod … u+w` clear must run BEFORE the first `git apply` — a clear placed "
         "after the apply cannot help the apply that already failed on a read-only source"
@@ -1888,7 +1890,12 @@ def test_macos_gesture_patch_step_resolves_the_checkout_on_demand():
 
 def test_now_live_export_save_buttons_sanitise_the_untrusted_preset_name():
     export = (
-        REPO_ROOT / "CueSync" / "CueSync" / "UI" / "Sections" / "ExportSectionView.swift"
+        REPO_ROOT
+        / "CueSync"
+        / "CueSync"
+        / "UI"
+        / "Sections"
+        / "ExportSectionView.swift"
     )
     if not export.is_file():
         raise unittest.SkipTest("CrossUI ExportSectionView.swift not found")
@@ -1935,9 +1942,7 @@ def test_gesture_patch_and_dev_script_use_no_hardcoded_absolute_paths():
     if PATCH_TEXT:
         subjects.append(("patches/" + GESTURE_PATCH_NAME, PATCH_TEXT))
     if DEV_PATCH_SCRIPT.is_file():
-        subjects.append(
-            ("scripts/patch-swift-cross-ui.sh", _dev_script_code_or_skip())
-        )
+        subjects.append(("scripts/patch-swift-cross-ui.sh", _dev_script_code_or_skip()))
     assert subjects, "neither the patch nor the dev script is present to inspect"
     for label, text in subjects:
         for token in banned:
@@ -1995,8 +2000,8 @@ def test_patch_backend_can_target_assignment_matches_widget_property_name():
     assert assigned == declared, (
         "desync: the backend sets `.%s = false` but the Widget base class declares the "
         "`can-target` property as `var %s` — these must be the SAME Swift identifier or "
-        "the patched checkout fails to compile on CI, while every offline `contains(\"can-"
-        "target\")` text test stays green and hides it" % (assigned, declared)
+        'the patched checkout fails to compile on CI, while every offline `contains("can-'
+        'target")` text test stays green and hides it' % (assigned, declared)
     )
 
 
