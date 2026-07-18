@@ -971,6 +971,749 @@ def test_generate_token_distribution_has_no_gross_modulo_bias():
         )
 
 
+# =============================================================================
+# Red-Team adversarial suite — CUESYNC-8
+#
+# Ticket CUESYNC-8 makes the already-rendered swift-cross-ui/GTK port INTERACTIVE.
+# The fix lives at the toolkit boundary, NOT in the app screens: a checked-in,
+# reviewable `git apply` patch
+# (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) is applied to the pinned
+# v0.8.0 checkout on all three GtkBackend-compiling CI legs (macos, windows-build,
+# windows-test). The patch adds GTK's `can-target = false` (the analogue of
+# SwiftUI's `.allowsHitTesting(false)`) to every decorative `Shape`-backed widget
+# so clicks fall through to the sibling that actually owns the gesture.
+#
+# spec §4 names this exactly: "The patched dependency is a supply-chain surface …
+# a checked-in, reviewable `.patch` applied by `git apply` to the exact pinned
+# commit … no network call, no new dependency, no dynamic code load." So the
+# attack surface is (a) the patch bytes themselves — do they apply, are they
+# idempotent, do they smuggle anything past review, do they touch only what they
+# claim; (b) the three workflow steps that apply them — placement, fail-loud
+# behavior, byte-drift between legs, read-only-clear ordering; and (c) the newly
+# LIVE runtime trust boundary the ticket opens (§4): value-handling guards on
+# controls that were unreachable on Windows until now actually run.
+#
+# Two kinds of test, matching the CUESYNC-6e / CUESYNC-7 blocks above:
+#   * BEHAVIORAL (run the real `git apply` against the real pinned checkout) —
+#     these bite where every text-only assertion is blind: a patch whose hunk
+#     offsets/context have gone stale passes every `contains("can-target")`
+#     check and still fails CI's actual `git apply`. They reconstruct the two
+#     patched files from the checkout's pristine HEAD into a throwaway tempdir
+#     (never mutating the real checkout) and exercise the patch there. If no git
+#     toolchain / resolved checkout at the audited commit is present they SKIP
+#     (never error), so the pure-stdlib blocks above still run on any bare
+#     `python3`; on the ticket's own CI (where the checkout is resolved) they run
+#     and bite.
+#   * REGRESSION LOCK (pure text/structure) — pins an acceptance-criterion or
+#     threat-model invariant so a later edit that reintroduces the weakness turns
+#     it red.
+# =============================================================================
+
+AUDITED_REVISION = "a6d206370812e3b9edba259d167e848892c5013d"
+GESTURE_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-interactivity.patch"
+GESTURE_STEP_NAME = "Patch swift-cross-ui GTK interactivity"
+
+REPO_ROOT = WORKFLOW_PATH.parent.parent.parent  # <root>/.github/workflows/x.yml -> <root>
+PATCH_PATH = REPO_ROOT / "patches" / GESTURE_PATCH_NAME
+PATCH_TEXT = PATCH_PATH.read_text(encoding="utf-8") if PATCH_PATH.is_file() else ""
+
+SWIFT_CROSS_UI_CHECKOUT = REPO_ROOT / ".build" / "checkouts" / "swift-cross-ui"
+# The two files findings §2.3/§2.4 name as the fix locus — the whole of the patch.
+PATCHED_FILES = [
+    "Sources/Gtk/Widgets/Widget.swift",
+    "Sources/GtkBackend/GtkBackend.swift",
+]
+
+
+# ---------------------------------------------------------------------------
+# Workflow helpers — the three "Patch swift-cross-ui GTK interactivity" steps.
+# Reuse the module-level JOBS / LINES / STEP_NAME_RE / _repair_run_body parser.
+# ---------------------------------------------------------------------------
+
+
+def _gesture_step_blocks():
+    """(job, name_line_idx, block_text) for every gesture-patch step. A block runs
+    from its `- name:` line up to (excluding) the next step or end of job."""
+    blocks = []
+    for job, (jstart, jend) in JOBS.items():
+        i = jstart
+        while i < jend:
+            m = STEP_NAME_RE.match(LINES[i])
+            if m and m.group(1).startswith(GESTURE_STEP_NAME):
+                j = i + 1
+                while j < jend and not STEP_NAME_RE.match(LINES[j]):
+                    j += 1
+                blocks.append((job, i, "\n".join(LINES[i:j])))
+                i = j
+            else:
+                i += 1
+    return blocks
+
+
+GESTURE_BLOCKS = _gesture_step_blocks()
+
+
+def _gesture_run_body(block_text):
+    """The `run: |` script body of a gesture-patch step, de-indented. Unlike the
+    CUESYNC-6e `_repair_run_body`, this stops at the end of the YAML block scalar
+    (the first non-blank line indented no more than the `run:` key) and trims
+    trailing blanks, so a trailing comment block before the next step — present on
+    the windows-test leg, absent on windows-build — is NOT folded in. Otherwise
+    two byte-identical scripts would appear to differ purely by that comment's
+    indentation, giving a false split-brain positive."""
+    lines = block_text.splitlines()
+    run_idx = next(
+        (k for k, ln in enumerate(lines) if ln.strip() in ("run: |", "run: |-")),
+        None,
+    )
+    assert run_idx is not None, "gesture step has no `run: |` body:\n" + block_text
+    run_indent = len(lines[run_idx]) - len(lines[run_idx].lstrip())
+    body = []
+    for ln in lines[run_idx + 1 :]:
+        if ln.strip() == "":
+            body.append(ln)
+            continue
+        if (len(ln) - len(ln.lstrip())) <= run_indent:
+            break  # dropped out of the block scalar (a shallower comment or key)
+        body.append(ln)
+    while body and body[-1].strip() == "":
+        body.pop()
+    indented = [ln for ln in body if ln.strip()]
+    common = min((len(ln) - len(ln.lstrip()) for ln in indented), default=0)
+    return "\n".join(ln[common:] if len(ln) >= common else ln for ln in body)
+
+
+def _gesture_bodies():
+    """job -> de-indented `run: |` script body of that job's gesture-patch step."""
+    return {job: _gesture_run_body(block) for job, _i, block in GESTURE_BLOCKS}
+
+
+def _gesture_block_with_comments(job):
+    """The gesture step's block for `job`, widened upward to include the
+    contiguous `#`-comment block immediately above it (where this workflow puts
+    the v0.8.0 pin citation), and downward to the next step."""
+    for j, i, _b in GESTURE_BLOCKS:
+        if j != job:
+            continue
+        start = i
+        k = i - 1
+        while k >= 0 and LINES[k].strip().startswith("#"):
+            start = k
+            k -= 1
+        _jstart, jend = JOBS[job]
+        end = jend
+        for t in range(i + 1, jend):
+            if STEP_NAME_RE.match(LINES[t]):
+                end = t
+                break
+        return "\n".join(LINES[start:end])
+    return None
+
+
+def _patch_target_paths():
+    """The `a/<path>` side of every `diff --git a/.. b/..` header — i.e. every
+    file the patch actually modifies."""
+    return sorted(set(re.findall(r"diff --git a/(\S+) b/\S+", PATCH_TEXT)))
+
+
+def _patch_file_sections():
+    """{b_path: section_text} — split the patch at each `diff --git` boundary."""
+    sections, cur, buf = {}, None, []
+    for line in PATCH_TEXT.splitlines():
+        m = re.match(r"diff --git a/\S+ b/(\S+)", line)
+        if m:
+            if cur is not None:
+                sections[cur] = "\n".join(buf)
+            cur, buf = m.group(1), [line]
+        elif cur is not None:
+            buf.append(line)
+    if cur is not None:
+        sections[cur] = "\n".join(buf)
+    return sections
+
+
+def _patch_added_lines():
+    """The content of every added (`+`) line, excluding the `+++` file header —
+    i.e. exactly the bytes `git apply` introduces into the dependency."""
+    return [
+        ln[1:]
+        for ln in PATCH_TEXT.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Behavioral-test plumbing: reconstruct the pristine pinned sources and run the
+# real `git apply`. Skips (never errors) when the toolchain/checkout is absent.
+# ---------------------------------------------------------------------------
+
+
+def _pinned_checkout_git_or_skip():
+    git = shutil.which("git")
+    if git is None:
+        raise unittest.SkipTest("git not on PATH — skipping behavioral patch tests")
+    if not PATCH_PATH.is_file():
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    if not SWIFT_CROSS_UI_CHECKOUT.is_dir():
+        raise unittest.SkipTest(
+            "swift-cross-ui not resolved (.build/checkouts absent) — run "
+            "`swift package resolve` to enable behavioral patch tests"
+        )
+    head = subprocess.run(
+        [git, "-C", str(SWIFT_CROSS_UI_CHECKOUT), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0:
+        raise unittest.SkipTest("swift-cross-ui checkout is not a git repo")
+    if head.stdout.strip() != AUDITED_REVISION:
+        raise unittest.SkipTest(
+            "swift-cross-ui checkout is at %s, not the audited v0.8.0 commit %s"
+            % (head.stdout.strip()[:12], AUDITED_REVISION[:12])
+        )
+    return git
+
+
+def _pristine_tree_or_skip():
+    """Materialize the two patched files from the checkout's PRISTINE HEAD into a
+    throwaway tempdir. Uses `git show HEAD:<path>` so the real checkout's
+    working-tree state (patched or not) is irrelevant and never mutated."""
+    git = _pinned_checkout_git_or_skip()
+    workdir = tempfile.mkdtemp(prefix="cuesync8_redteam_")
+    atexit.register(shutil.rmtree, workdir, True)
+    for rel in PATCHED_FILES:
+        blob = subprocess.run(
+            [git, "-C", str(SWIFT_CROSS_UI_CHECKOUT), "show", "HEAD:" + rel],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            raise unittest.SkipTest("pinned checkout has no %s at HEAD" % rel)
+        dest = Path(workdir) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob.stdout)
+    return git, workdir
+
+
+def _git_apply(git, tree, *args):
+    return subprocess.run(
+        [git, "apply", *args, str(PATCH_PATH)], cwd=tree, capture_output=True, text=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 22 (BEHAVIORAL) — the patch must actually apply to the pinned checkout.
+# Every text-only test (Swift or Python) can pass on a patch whose `@@` hunk
+# offsets or context lines have gone stale, while CI's real `git apply` fails and
+# the whole GtkBackend build dies. spec §3/§4 require the fix be a `git apply`
+# patch "applied … to the exact pinned commit". Reconstruct the pristine v0.8.0
+# sources and run `git apply --check` for real.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_applies_cleanly_to_the_pinned_v080_checkout():
+    git, tree = _pristine_tree_or_skip()
+    r = _git_apply(git, tree, "--check")
+    assert r.returncode == 0, (
+        "spec CUESYNC-8 §3/§4: %s must apply cleanly to the pinned v0.8.0 checkout "
+        "(commit %s) via `git apply`. A text-only assertion cannot catch a stale hunk "
+        "offset/context; this reconstructs the pristine HEAD sources and ran "
+        "`git apply --check`, which reported:\n%s"
+        % (GESTURE_PATCH_NAME, AUDITED_REVISION, r.stderr or r.stdout)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 23 (BEHAVIORAL) — the idempotency guard is real AND load-bearing.
+# The workflow no-ops a re-run via `git apply --reverse --check`; the dev script
+# does the same (spec §3 "idempotent … a second run is a no-op"). Prove the guard
+# actually detects the applied state, AND that it is necessary — a naive second
+# forward `git apply` (what you'd get if the guard were dropped) must fail.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_reverse_guard_is_real_and_a_second_apply_would_fail():
+    git, tree = _pristine_tree_or_skip()
+    first = _git_apply(git, tree)
+    assert first.returncode == 0, "first forward apply failed:\n" + (first.stderr or "")
+
+    reverse = _git_apply(git, tree, "--reverse", "--check")
+    assert reverse.returncode == 0, (
+        "spec §3 idempotency: on an already-patched tree `git apply --reverse --check` "
+        "(the workflow's own no-op guard) MUST report success so the step skips. It "
+        "returned %d:\n%s" % (reverse.returncode, reverse.stderr or reverse.stdout)
+    )
+
+    second = _git_apply(git, tree)
+    assert second.returncode != 0, (
+        "a SECOND unguarded forward `git apply` of the same patch must FAIL on an "
+        "already-patched tree — this is precisely why the `--reverse --check` guard is "
+        "load-bearing, not decorative. It unexpectedly succeeded, meaning the patch is a "
+        "silent no-op or duplicates content (spec §3)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 24 (BEHAVIORAL) — the fix reaches the ONE factory it must. It's not
+# enough that the patch mentions `can-target`; after applying, the widget
+# `GtkBackend.createPathWidget()` returns (the single factory every decorative
+# `Shape` funnels through — findings §2.3) must be excluded from GTK hit-testing,
+# and the Gtk `Widget` base class must have gained the `can-target` property the
+# fix depends on. Verified against the real applied bytes.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_makes_the_shape_factory_hit_test_transparent():
+    git, tree = _pristine_tree_or_skip()
+    applied = _git_apply(git, tree)
+    assert applied.returncode == 0, "forward apply failed:\n" + (applied.stderr or "")
+
+    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(encoding="utf-8")
+    widget = (Path(tree) / "Sources/Gtk/Widgets/Widget.swift").read_text(encoding="utf-8")
+
+    idx = backend.find("createPathWidget")
+    assert idx != -1, "createPathWidget vanished from GtkBackend.swift after apply"
+    # Slice the whole createPathWidget function body (up to the next `public func`)
+    # rather than a fixed char window — the fix carries a large explanatory comment
+    # between the signature and the assignment.
+    nxt = backend.find("public func ", idx + len("public func createPathWidget"))
+    factory_body = backend[idx:nxt] if nxt != -1 else backend[idx:]
+    assert "canTarget = false" in factory_body, (
+        "spec §3 (H2 fix): after applying, GtkBackend.createPathWidget() must set "
+        "`canTarget = false` on the widget it returns — that is what excludes decorative "
+        "Shapes from GTK's pick so a click falls through to the real gesture owner "
+        "(findings §2.3). The assignment is not in the factory body."
+    )
+    assert '"can-target"' in widget and "canTarget" in widget, (
+        "the Gtk Widget base class must gain the `can-target` GObject-property wrapper "
+        "the fix depends on (findings §2.2 confirms it is absent from the whole pinned "
+        "checkout before this patch)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 25 (SUPPLY CHAIN) — the patch touches EXACTLY the two audited files and
+# re-pins nothing. spec §4: the dependency is "patched at the checkout, never
+# forked or re-pinned"; the pin stays `exact: "0.8.0"`, Package.resolved
+# untouched. A future edit that widened the patch to touch Package.swift (a
+# covert re-pin) or to add a brand-new source file (a new dependency/code vector)
+# is the exact supply-chain drift this locks out.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_touches_exactly_the_two_audited_files_and_repins_nothing():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    targets = _patch_target_paths()
+    assert targets == sorted(PATCHED_FILES), (
+        "spec §4: the patch must modify EXACTLY the two audited files "
+        + repr(sorted(PATCHED_FILES))
+        + " (findings §2.3/§2.4); its `diff --git` targets are "
+        + repr(targets)
+    )
+    # No manifest re-pin, and no file creation/deletion/rename (new dependency or
+    # source vector) hiding in the diff body.
+    for banned in ("new file mode", "deleted file mode", "rename from", "rename to"):
+        assert banned not in PATCH_TEXT, (
+            "spec §4: the patch must only MODIFY the two audited files, never "
+            "create/delete/rename one — found `%s`" % banned
+        )
+    for manifest in ("Package.swift", "Package.resolved"):
+        assert not re.search(r"diff --git .*" + re.escape(manifest), PATCH_TEXT), (
+            "spec §4: the patch must not touch %s — the pin stays exact: \"0.8.0\" and "
+            "Package.resolved is untouched by this ticket" % manifest
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 26 (SUPPLY CHAIN) — the patch is pure gesture/hit-test wiring. spec §4:
+# "no network call, no new dependency, no dynamic code load." The bytes `git
+# apply` injects into a pinned, audited dependency at build time are a review
+# surface: a future edit that smuggled a URL fetch, a subprocess spawn, a
+# `dlopen`, or a fresh `import` into the added lines would be caught here.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_added_lines_are_pure_wiring_no_network_exec_or_new_import():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    added = _patch_added_lines()
+    assert added, "the patch adds no lines at all — nothing to review"
+
+    forbidden = [
+        "http://", "https://", "ftp://",                      # network fetch
+        "URLSession", "getaddrinfo", "socket(",               # network
+        "Process(", "NSTask", "posix_spawn", "system(",       # process spawn
+        "popen(", "ShellExecute", "execve", "execvp",         # process spawn
+        "/bin/sh", "cmd.exe", "Invoke-WebRequest",            # shells / fetch
+        "Invoke-Expression", "eval(",                         # dynamic eval
+        "dlopen", "dlsym", "LoadLibrary", "GetProcAddress",   # dynamic load
+    ]
+    for content in added:
+        for token in forbidden:
+            assert token not in content, (
+                "spec §4: the gesture patch must be pure gesture/hit-test wiring — no "
+                "network call, subprocess, dynamic load, or dynamic eval. An added line "
+                "contains `%s`:\n    %s" % (token, content.strip())
+            )
+        # No new dependency: the patch introduces no fresh `import`.
+        assert not content.strip().startswith("import "), (
+            "spec §4 (no new dependency): the patch must not add an `import` line — the "
+            "fix uses only GTK's own event-controller/GObject APIs already in the "
+            "checkout. Found:\n    %s" % content.strip()
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 27 (SUPPLY CHAIN / correctness) — `can-target = false` is applied ONLY
+# to the decorative `Shape` factory, never to an interactive-widget factory.
+# Over-applying it to `createButton`/`createTextField`/`createContainer`/… would
+# make a real control unclickable — the very failure this ticket fixes, but
+# worse, and structurally invisible to a "does the patch mention can-target?"
+# check. findings §2.3 hinges on "every `Shape` in this app is decorative"; this
+# guards the fix from bleeding onto anything that must receive input.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_sets_can_target_false_only_on_decorative_path_widgets():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    sections = _patch_file_sections()
+    backend = sections.get("Sources/GtkBackend/GtkBackend.swift", "")
+    widget = sections.get("Sources/Gtk/Widgets/Widget.swift", "")
+
+    assert "canTarget = false" in backend and "createPathWidget" in backend, (
+        "the `canTarget = false` assignment must live in GtkBackend.swift's "
+        "createPathWidget hunk (findings §2.3)"
+    )
+    # The Widget.swift hunk only ADDS the property wrapper; it must not itself set
+    # any widget hit-test-transparent (that belongs to the one Shape factory).
+    assert "canTarget = false" not in widget, (
+        "the Widget.swift hunk must only declare the `can-target` property, not set "
+        "canTarget = false on the base class (which would disable hit-testing for EVERY "
+        "widget, killing every control)"
+    )
+    # The assignment appears exactly once in the whole patch, and no interactive
+    # widget factory is referenced in any added line.
+    assert "\n".join(_patch_added_lines()).count("canTarget = false") == 1, (
+        "expected `canTarget = false` to be added exactly once (only in createPathWidget)"
+    )
+    interactive_factories = [
+        "createButton", "createTextField", "createToggle", "createPicker",
+        "createSlider", "createSwitch", "createContainer", "createTextView",
+        "createTable", "createScrollContainer",
+    ]
+    added_text = "\n".join(_patch_added_lines())
+    for factory in interactive_factories:
+        assert factory not in added_text, (
+            "spec §3/findings §2.3: the fix must not touch the interactive-widget factory "
+            "`%s` — setting can-target=false there would silently make a real control "
+            "unclickable (the exact bug this ticket fixes)" % factory
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 28 (SUPPLY CHAIN) — the fix is a reviewable unified diff, not an
+# unpinned text substitution. spec §4: "a checked-in, reviewable `.patch` applied
+# by `git apply` … never an unpinned `sed`/`-replace` against a moving target."
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_is_a_real_unified_diff_not_a_sed_or_replace_script():
+    if not PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % GESTURE_PATCH_NAME)
+    for rel in PATCHED_FILES:
+        assert ("diff --git a/%s b/%s" % (rel, rel)) in PATCH_TEXT, (
+            "expected a real `diff --git` unified-diff header for %s" % rel
+        )
+    assert PATCH_TEXT.count("@@ ") >= 2, (
+        "a real unified diff carries `@@ … @@` hunk headers; found fewer than the two "
+        "hunks the two-file fix needs"
+    )
+    for antipattern in ("-replace", "sed -i", "sed 's", "Set-Content -"):
+        assert antipattern not in PATCH_TEXT, (
+            "spec §4: the checked-in fix must be a real diff `git apply` consumes, not a "
+            "`%s` text-substitution against a moving target" % antipattern
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 29 — the gesture-patch step exists on ALL THREE GtkBackend-compiling
+# legs. spec §3/§6: macos + windows-build + windows-test each compile GtkBackend
+# and therefore each need the patch; a leg missing it builds the un-patched,
+# dead-on-click UI.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_step_exists_on_all_three_gtkbackend_legs():
+    jobs = sorted(job for job, _i, _b in GESTURE_BLOCKS)
+    assert jobs == ["macos", "windows-build", "windows-test"], (
+        "spec §3: the gesture-patch step must exist on all three GtkBackend-compiling "
+        "legs (macos, windows-build, windows-test); got: " + repr(jobs)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 30 — no split-brain between the two Windows legs. If windows-build and
+# windows-test apply the patch differently, the shipped artifact and the test
+# evidence come from differently-patched checkouts — the exact split CUESYNC-6d
+# suffered (§ATTACK 2 above locks the sibling swift-java step the same way). The
+# per-leg Swift tests check each leg alone; only a cross-leg diff catches drift.
+# ---------------------------------------------------------------------------
+
+
+def test_both_windows_gesture_patch_steps_are_byte_identical():
+    bodies = _gesture_bodies()
+    a, b = bodies.get("windows-build"), bodies.get("windows-test")
+    assert a is not None and b is not None, (
+        "gesture-patch step missing on a Windows leg: " + repr(sorted(bodies))
+    )
+    assert a == b, (
+        "spec §3: the windows-build and windows-test gesture-patch step bodies must not "
+        "drift — a divergence means build and test compile differently-patched checkouts "
+        "(the split-brain CUESYNC-6d suffered).\n--- windows-build ---\n" + a
+        + "\n--- windows-test ---\n" + b
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 31 — on Windows the read-only flag must be cleared BEFORE `git apply`,
+# on exactly the files the patch modifies. Dependency sources check out read-only
+# on Windows (the reason the gulong/gsize step clears it too); if the clear came
+# AFTER the apply, or named the wrong file, `git apply` would fail on a read-only
+# source with a confusing error. The Swift suite checks the paths match the patch
+# but not the ordering — a clear that runs too late is still a live break.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_gesture_patch_clears_read_only_before_apply_on_the_patched_files():
+    patched = set(_patch_target_paths())
+    for job in ("windows-build", "windows-test"):
+        body = _gesture_bodies()[job]
+        apply_idx = body.find("git apply $patch")
+        assert apply_idx != -1, job + ": no forward `git apply $patch` in the step"
+        ro_positions = [m.start() for m in re.finditer(r"IsReadOnly", body)]
+        assert ro_positions, job + ": step never clears the Windows read-only flag"
+        assert all(p < apply_idx for p in ro_positions), (
+            job + ": a `Set-ItemProperty … -Name IsReadOnly -Value $false` clear runs "
+            "AFTER `git apply` — the apply hits a read-only dependency source and fails "
+            "before the clear ever executes"
+        )
+        cleared = set()
+        for _var, path in re.findall(r'\$(\w+)\s*=\s*"([^"]+)"', body):
+            if path.endswith(".swift"):
+                cleared.add(
+                    path.replace("\\", "/").replace(
+                        ".build/checkouts/swift-cross-ui/", ""
+                    )
+                )
+        assert cleared == patched, (
+            job + ": read-only is cleared on %r but the patch modifies %r — a path typo "
+            "leaves the real target read-only and breaks `git apply` downstream"
+            % (sorted(cleared), sorted(patched))
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 32 — a failed `git apply` must fail the job LOUD, on every leg. A
+# swallowed apply failure means the build proceeds against an UN-patched checkout
+# and ships the dead-on-click UI while CI stays green — the worst outcome. macOS
+# relies on `set -euo pipefail` so the bare forward `git apply "$PATCH"` aborts;
+# the Windows legs check `$LASTEXITCODE -ne 0` and `exit 1` explicitly.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_step_fails_loud_on_a_bad_apply_on_every_leg():
+    bodies = _gesture_bodies()
+    mac = bodies["macos"]
+    assert re.search(r"set -euo?\s+pipefail|set -e\b", mac), (
+        "spec §3: the macos gesture-patch step must set fail-fast shell options "
+        "(`set -euo pipefail`) so a failed `git apply` aborts the job"
+    )
+    assert 'git apply "$PATCH"' in mac, (
+        "the macos step must contain a forward `git apply \"$PATCH\"` (not only the "
+        "`--reverse --check` guard) for set -e to fail loud on"
+    )
+    for job in ("windows-build", "windows-test"):
+        body = bodies[job]
+        assert "$LASTEXITCODE -ne 0" in body and "exit 1" in body, (
+            job + ": the gesture-patch step must fail loud on a `git apply` error "
+            "(`$LASTEXITCODE -ne 0` -> `exit 1`), never proceed against an un-patched "
+            "checkout"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 33 — placement: after resolve, before build/test, on every leg. spec §3:
+# "after `swift package resolve` … and before `swift build` / `swift test`."
+# Before resolve there is no checkout to patch; after build the patch is too late
+# to matter. (macOS has no separate resolve step — it resolves on demand inside
+# the patch step — so it is ordered only against the build it must precede.)
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_step_runs_after_resolve_and_before_build_on_every_leg():
+    specs = {
+        "windows-build": (r"swift package resolve", r"swift build -c release"),
+        "windows-test": (r"swift package resolve", r"swift test -c release"),
+        "macos": (None, r"swift build -c release"),
+    }
+    for job, (resolve_pat, build_pat) in specs.items():
+        start, end = JOBS[job]
+        seg = LINES[start:end]
+
+        def find(pat):
+            # Skip `#` comment lines — a job's prose mentions "swift build -c
+            # release" etc. in comments; only the real `run:` invocation counts.
+            return next(
+                (k for k, ln in enumerate(seg)
+                 if not ln.lstrip().startswith("#") and re.search(pat, ln)),
+                None,
+            )
+
+        patch_i = next(
+            (k for k, ln in enumerate(seg)
+             if STEP_NAME_RE.match(ln) and GESTURE_STEP_NAME in ln),
+            None,
+        )
+        assert patch_i is not None, job + ": no gesture-patch step to order"
+        build_i = find(build_pat)
+        assert build_i is not None, job + ": no build/test invocation to order against"
+        assert patch_i < build_i, (
+            job + ": gesture-patch step must run BEFORE the build/test that compiles "
+            "GtkBackend (spec §3)"
+        )
+        if resolve_pat is not None:
+            resolve_i = find(resolve_pat)
+            assert resolve_i is not None, job + ": no `swift package resolve` step"
+            assert resolve_i < patch_i, (
+                job + ": gesture-patch step must run AFTER `swift package resolve` — the "
+                "checkout it patches does not exist before that (spec §3)"
+            )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 34 — every leg is idempotency-guarded and pinned to the audited commit.
+# spec §3: "idempotent (guard with `git apply --reverse --check`)" and "pinned to
+# the v0.8.0 tag in a comment naming the audited commit." An unpinned patch step
+# is the moving-target supply-chain risk §4 forbids.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit():
+    for job in ("macos", "windows-build", "windows-test"):
+        block = _gesture_block_with_comments(job)
+        assert block is not None, job + ": no gesture-patch step found"
+        assert "git apply --reverse --check" in block, (
+            job + ": the gesture-patch step must guard idempotency with "
+            "`git apply --reverse --check` (spec §3)"
+        )
+        assert AUDITED_REVISION in block, (
+            job + ": the gesture-patch step (or its preceding comment) must pin the "
+            "audited v0.8.0 commit " + AUDITED_REVISION + " (spec §3/§4)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 35 (SUPPLY CHAIN) — one checked-in patch, no divergent copy. spec §3:
+# the dev script applies "the SAME patch locally" as CI. Two patch files that
+# both touch GtkBackend would mean "the bytes we reviewed" and "the bytes we
+# build" could drift apart — the split §4 exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
+    patch_dir = REPO_ROOT / "patches"
+    if not patch_dir.is_dir():
+        raise unittest.SkipTest("patches/ directory not found")
+    gtk_patches = sorted(
+        p.name
+        for p in patch_dir.glob("*.patch")
+        if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
+    )
+    assert gtk_patches == [GESTURE_PATCH_NAME], (
+        "spec §4: expected exactly ONE checked-in patch touching GtkBackend.swift; a "
+        "second copy is a divergent-source supply-chain risk. Found: " + repr(gtk_patches)
+    )
+    dev_script = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
+    assert dev_script.is_file(), "scripts/patch-swift-cross-ui.sh must exist (spec §3)"
+    dev_code = "\n".join(
+        ln for ln in dev_script.read_text(encoding="utf-8").splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+    assert GESTURE_PATCH_NAME in dev_code, (
+        "scripts/patch-swift-cross-ui.sh must apply the one checked-in patch in "
+        "executable code (not just a comment) — the same file CI applies (spec §3)"
+    )
+    for job, _i, block in GESTURE_BLOCKS:
+        assert GESTURE_PATCH_NAME in block, (
+            job + ": the CI gesture-patch step must apply the one checked-in "
+            + GESTURE_PATCH_NAME + ", never a separate copy"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 36 (§4 runtime trust boundary) — the newly-LIVE StepperField keeps its
+# `isFinite` guard. spec §4: "making controls live means value-handling paths
+# that were previously unreachable on Windows now actually run, so their existing
+# guards matter *more*: `StepperField.commitText()`'s `parsed.isFinite` check
+# must stay — a hand-typed `nan`/`inf` in a cue position/Y field must never reach
+# `cue.start`/`cue.yValue` and then the envelope Path/curve math … do not weaken
+# it." `Double("nan")`/`Double("inf")` parse fine and min/max do NOT sanitize
+# them, so the guard is the only thing standing between a typed `inf` and NaN
+# geometry now that the field is clickable.
+# ---------------------------------------------------------------------------
+
+
+def _stepper_field_src_or_skip():
+    p = REPO_ROOT / "CueSync" / "CueSync" / "UI" / "Controls" / "StepperField.swift"
+    if not p.is_file():
+        raise unittest.SkipTest("StepperField.swift not found")
+    return p.read_text(encoding="utf-8")
+
+
+def test_stepper_field_commit_guards_isfinite_before_writing_a_hostile_value():
+    src = _stepper_field_src_or_skip()
+    m = re.search(r"func commitText\(\)\s*\{", src)
+    assert m, "commitText() not found in StepperField.swift — control shape changed"
+    body = src[m.end():]
+    nxt = re.search(r"\n    (?:private |)func ", body)
+    if nxt:
+        body = body[: nxt.start()]
+
+    # Strip `//` comments — commitText's OWN comment prose names "isFinite" and
+    # "Double(...)"; a guard assertion that matched the comment would pass even
+    # after the real code guard was deleted (a false negative). Only code counts.
+    def _strip_comments(text):
+        return "\n".join(
+            (ln[: ln.index("//")] if "//" in ln else ln) for ln in text.splitlines()
+        )
+
+    code = _strip_comments(body)
+    assert "Double(text)" in code, (
+        "commitText() must parse the typed value via `Double(text)` — parsing shape "
+        "changed; re-verify the isFinite guard still applies"
+    )
+    fin = code.find("isFinite")
+    asg = code.find("value =")
+    assert fin != -1, (
+        "spec §4: commitText() must keep the `.isFinite` guard in CODE. Without it a "
+        "hand-typed `nan`/`inf` (both of which `Double(_:)` parses successfully, and "
+        "which min/max do not clamp away) flows into `value` -> cue.start/cue.yValue -> "
+        "the envelope Path/curve math. Now that the control is clickable on Windows this "
+        "path is LIVE."
+    )
+    assert asg != -1 and fin < asg, (
+        "spec §4: the `.isFinite` guard must sit BEFORE the assignment to `value` — a "
+        "check placed after the write cannot stop the non-finite value from landing in "
+        "cue.start/cue.yValue first"
+    )
+    # The Int variant is inherently nan/inf-proof — Int(text) rejects "nan"/"inf"
+    # outright — so it needs no isFinite guard; assert it stays Int-parsed (in code).
+    assert "Int(text)" in _strip_comments(src), (
+        "StepperIntField must parse via Int(text) (which cannot yield nan/inf); a switch "
+        "to Double parsing would open the same non-finite hole this guard closes"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
