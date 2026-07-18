@@ -334,10 +334,11 @@ final class PortComplianceTests: XCTestCase {
     /// opening with the guard (the prefix check above): the file must also *close* with
     /// `#endif`, so no declaration in it can ever compile outside the flag. Uses
     /// `.whitespacesAndNewlines` (covers CR, LF, and CRLF alike) so this holds regardless
-    /// of which line-ending convention a Windows checkout produces.
+    /// of which line-ending convention a Windows checkout produces. The file list grows as
+    /// CUESYNC-7 lands each top-level shell file (§C added HeaderView/FooterView).
     func testUIShellFilesAreFullyWrappedEndToEndInCUESYNCCROSSUIGuard() throws {
         let uiDir = Self.sourceRoot.appendingPathComponent("UI")
-        for fileName in ["CueSyncApp.swift", "ContentView.swift"] {
+        for fileName in ["CueSyncApp.swift", "ContentView.swift", "HeaderView.swift", "FooterView.swift"] {
             let url = uiDir.appendingPathComponent(fileName)
             guard let src = try? String(contentsOf: url, encoding: .utf8) else {
                 XCTFail("UI/\(fileName) does not exist (spec §B)")
@@ -349,17 +350,23 @@ final class PortComplianceTests: XCTestCase {
         }
     }
 
-    /// spec §3 Source: "`UI/` contains exactly `CueSyncApp.swift` and `ContentView.swift`" —
-    /// this ticket is step 1 of an incremental re-host and explicitly forbids porting any
-    /// screen yet (spec §B.11), so a stray extra file under `UI/` would itself be scope
-    /// creep. Mirrors the existing `Support/` exact-file-count pattern.
-    func testUIDirectoryContainsExactlyTheTwoShellFiles() throws {
-        let expected: Set<String> = ["CueSyncApp.swift", "ContentView.swift"]
+    /// spec §3 Source: originally "`UI/` contains exactly `CueSyncApp.swift` and
+    /// `ContentView.swift`" for the CUESYNC-5/6 step-1 skeleton. CUESYNC-7 is the ticket that
+    /// intentionally moves past that constraint, screen-by-screen (§C added
+    /// `HeaderView.swift`/`FooterView.swift`) — so this test's expected set grows in step
+    /// with each landed section rather than staying frozen at the step-1 snapshot. It still
+    /// catches a stray/duplicate top-level file the same way the `Support/` exact-file-count
+    /// test does; files under `UI/`'s own subdirectories (`State/`, `Theme/`, `Sections/`,
+    /// `Controls/`) are out of scope here since `contentsOfDirectory` doesn't recurse.
+    func testUIDirectoryContainsExactlyTheDocumentedTopLevelShellFiles() throws {
+        let expected: Set<String> = [
+            "CueSyncApp.swift", "ContentView.swift", "HeaderView.swift", "FooterView.swift",
+        ]
         let dir = Self.sourceRoot.appendingPathComponent("UI")
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         let swiftFiles = Set(names.filter { $0.hasSuffix(".swift") })
         XCTAssertEqual(swiftFiles, expected,
-                       "UI/ must contain exactly the two shell files this ticket adds (spec §B), got \(swiftFiles.sorted())")
+                       "UI/ must contain exactly the top-level shell files landed so far (spec §C), got \(swiftFiles.sorted())")
     }
 
     /// spec §3 Source: "No file under `UI/` imports AppKit, SwiftUI, CoreGraphics,
