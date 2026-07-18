@@ -18,6 +18,12 @@ import CueSyncCore
 // PORT: click-to-add, click-to-select, and drag-to-move are not portable at 0.8.0 (no pointer
 // location on tap, no `DragGesture`) — see spec §G.14/§L. All editing routes through the
 // toolbar and cue table instead, which is already a complete editor.
+// CUESYNC-8 §5 re-verification (specs/CUESYNC-8-findings.md §2.4): re-checked against the
+// pinned checkout after the GTK gesture/interactivity patch (patches/swift-cross-ui-0.8.0-gtk-
+// interactivity.patch) — that patch fixes *delivery* of the tap/hover events that already
+// exist, it cannot add a pointer-location parameter or a drag primitive the public
+// `SwiftCrossUI` API never exposed at 0.8.0. Gap confirmed unchanged: cannot-reproduce-
+// faithfully, not a regression from the patch.
 // PORT: `StrokeStyle` has no `dash:` parameter at 0.8.0 (established re-hosting
 // BrowseSectionView, §F) — the selection guide is a solid line, not dashed.
 struct EnvelopeCanvasView: View {

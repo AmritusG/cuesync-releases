@@ -1,0 +1,72 @@
+# swift-cross-ui v0.8.0 GtkBackend interactivity fix (CUESYNC-8)
+#
+# Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
+# *resolved checkout* at `.build/checkouts/swift-cross-ui` — the upstream dependency
+# source is never edited in place in this repo; this file is the only checked-in copy
+# of the change.
+#
+# Root cause (spec CUESYNC-8 §2, specs/CUESYNC-8-findings.md): GtkBackend's
+# `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
+# genuinely delivered) — the dead layer is that every `Shape`-backed widget
+# (RoundedRectangle/Rectangle/Circle strokes and fills, used throughout CueSync's
+# UI/ purely as decorative overlay/background/divider content — never as a tap
+# target itself) defaults to GTK's `can-target = true`. A decorative border painted
+# on top of a sibling inside the same `Gtk.Fixed` (e.g.
+# `.overlay { RoundedRectangle().stroke(...) }`) is what GTK picks for a click,
+# swallowing it before it reaches the sibling that actually owns the gesture.
+#
+# Fix: add a `canTarget` GObject-property wrapper to the Gtk `Widget` base class
+# (mirroring the existing `sensitive` property), and set it `false` on every
+# widget `GtkBackend.createPathWidget()` creates — the single, canonical creation
+# point for all `Shape` views. This is the GTK equivalent of the macOS original's
+# `.allowsHitTesting(false)` on decorative overlays (e.g. `GridOverlay`,
+# `Views/ContentView.swift:187`). No new dependency, no dynamic loading, no
+# GtkFixed/absolute-positioning API added — `Gtk.Fixed` is pre-existing framework
+# internals this patch does not touch.
+#
+# Idempotency: `.github/workflows/swift-windows.yml` guards re-application with
+# `git apply --reverse --check` before applying, so a second run against an
+# already-patched checkout is a no-op rather than a failure.
+diff --git a/Sources/Gtk/Widgets/Widget.swift b/Sources/Gtk/Widgets/Widget.swift
+index 142e3b30..206167fa 100644
+--- a/Sources/Gtk/Widgets/Widget.swift
++++ b/Sources/Gtk/Widgets/Widget.swift
+@@ -134,6 +134,12 @@ open class Widget: GObject {
+ 
+     @GObjectProperty(named: "sensitive") public var sensitive: Bool
+ 
++    /// Whether the widget can receive pointer events. Setting this to `false`
++    /// excludes the widget (and only the widget itself, not its ancestors)
++    /// from GTK's hit-test picking, so clicks/hover fall through to whatever
++    /// sits behind it — the GTK analogue of SwiftUI's `.allowsHitTesting(false)`.
++    @GObjectProperty(named: "can-target") public var canTarget: Bool
++
+     @GObjectProperty(named: "opacity") public var opacity: Double
+ 
+     @GObjectProperty(named: "margin-top") public var marginTop: Int
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index d83bbefb..01e2eab5 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -1618,7 +1618,19 @@ public final class GtkBackend:
+     // MARK: Paths
+ 
+     public func createPathWidget() -> Widget {
+-        DrawingArea()
++        // Path-backed widgets (every `Shape` — RoundedRectangle/Rectangle/Circle
++        // strokes and fills) are decorative overlay/background/divider content in
++        // every current caller, never a tap/hover target themselves. Left at GTK's
++        // default `can-target = true`, a Shape painted on top of a sibling in a
++        // shared Gtk.Fixed (e.g. an `.overlay { RoundedRectangle().stroke(...) }`
++        // border) is what GTK picks for a click, silently swallowing it before it
++        // ever reaches the sibling's own gesture controller. Excluding Shapes from
++        // picking makes clicks fall through to whatever is behind them, restoring
++        // delivery to the real target — the GTK equivalent of the macOS original's
++        // `.allowsHitTesting(false)` on decorative overlays.
++        let widget = DrawingArea()
++        widget.canTarget = false
++        return widget
+     }
+ 
+     public func createPath() -> Path {

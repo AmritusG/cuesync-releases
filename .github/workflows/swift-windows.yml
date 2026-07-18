@@ -98,6 +98,39 @@ jobs:
       - name: Install GTK 4
         run: brew install pkg-config gtk4
 
+      # spec CUESYNC-8 §3 (findings: specs/CUESYNC-8-findings.md). GtkBackend's
+      # `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
+      # genuinely delivered) — the dead layer is that every `Shape`-backed decorative
+      # widget (RoundedRectangle/Rectangle stroke or fill, used throughout CueSync's
+      # UI/ purely as borders/backgrounds/dividers, never as a tap target itself)
+      # defaults to GTK's `can-target = true`. Painted on top of a sibling inside the
+      # same Gtk.Fixed (e.g. `.overlay { RoundedRectangle().stroke(...) }`), it's what
+      # GTK picks for a click, swallowing it before it reaches the sibling that
+      # actually owns the gesture (CollapsibleSection's header row, StepperField's
+      # ▲/▼ arrows). Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) against the pinned
+      # v0.8.0 checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d)
+      # — the dependency itself is never edited in place. Needs the checkout to exist
+      # first (macOS has no earlier explicit "swift package resolve" step — `swift
+      # build` below would resolve implicitly, too late for a patch), so this step
+      # resolves on demand; runs after that and before "Build (release)".
+      # `git apply --reverse --check` guards idempotency: a second run against an
+      # already-patched checkout is a no-op rather than a failure.
+      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
+        run: |
+          set -euo pipefail
+          PATCH="$PWD/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
+          if [ ! -d .build/checkouts/swift-cross-ui ]; then
+            swift package resolve
+          fi
+          cd .build/checkouts/swift-cross-ui
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "swift-cross-ui gesture/interactivity patch already applied — skipping"
+          else
+            git apply "$PATCH"
+            echo "Applied swift-cross-ui gesture/interactivity patch"
+          fi
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -485,6 +518,48 @@ jobs:
           (Get-Content -Raw -LiteralPath $memoryTexture) `
             -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
             Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
+
+      # spec CUESYNC-8 §3 (findings: specs/CUESYNC-8-findings.md). GtkBackend's
+      # `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
+      # genuinely delivered) — the dead layer is that every `Shape`-backed decorative
+      # widget (RoundedRectangle/Rectangle stroke or fill, used throughout CueSync's
+      # UI/ purely as borders/backgrounds/dividers, never as a tap target itself)
+      # defaults to GTK's `can-target = true`. Painted on top of a sibling inside the
+      # same Gtk.Fixed (e.g. `.overlay { RoundedRectangle().stroke(...) }`), it's what
+      # GTK picks for a click, swallowing it before it reaches the sibling that
+      # actually owns the gesture (CollapsibleSection's header row, StepperField's
+      # ▲/▼ arrows). Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) against the pinned
+      # v0.8.0 checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d)
+      # — the dependency itself is never edited in place. Placed after the resolve +
+      # symlink repair above (the checkout must exist) and before "Build (release)"
+      # below. Same read-only-clearing rationale as the gulong/gsize step just above:
+      # dependency sources check out read-only on Windows. `git apply --reverse
+      # --check` guards idempotency: a second run against an already-patched checkout
+      # is a no-op rather than a failure.
+      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-gtk-interactivity.patch"
+          $widget = ".build\checkouts\swift-cross-ui\Sources\Gtk\Widgets\Widget.swift"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $widget -Name IsReadOnly -Value $false
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui gesture/interactivity patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-gtk-interactivity.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui gesture/interactivity patch"
+          }
+          Pop-Location
 
       - name: Build (release)
         run: swift build -c release
@@ -984,6 +1059,48 @@ jobs:
           (Get-Content -Raw -LiteralPath $memoryTexture) `
             -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
             Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
+
+      # spec CUESYNC-8 §3 (findings: specs/CUESYNC-8-findings.md). GtkBackend's
+      # `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
+      # genuinely delivered) — the dead layer is that every `Shape`-backed decorative
+      # widget (RoundedRectangle/Rectangle stroke or fill, used throughout CueSync's
+      # UI/ purely as borders/backgrounds/dividers, never as a tap target itself)
+      # defaults to GTK's `can-target = true`. Painted on top of a sibling inside the
+      # same Gtk.Fixed (e.g. `.overlay { RoundedRectangle().stroke(...) }`), it's what
+      # GTK picks for a click, swallowing it before it reaches the sibling that
+      # actually owns the gesture (CollapsibleSection's header row, StepperField's
+      # ▲/▼ arrows). Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) against the pinned
+      # v0.8.0 checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d)
+      # — the dependency itself is never edited in place. Placed after the resolve +
+      # symlink repair above (the checkout must exist) and before "Test" below, which
+      # builds before it runs. Same read-only-clearing rationale as the gulong/gsize
+      # step just above: dependency sources check out read-only on Windows. `git apply
+      # --reverse --check` guards idempotency: a second run against an already-patched
+      # checkout is a no-op rather than a failure.
+      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-gtk-interactivity.patch"
+          $widget = ".build\checkouts\swift-cross-ui\Sources\Gtk\Widgets\Widget.swift"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $widget -Name IsReadOnly -Value $false
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui gesture/interactivity patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-gtk-interactivity.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui gesture/interactivity patch"
+          }
+          Pop-Location
 
       # On Windows, `swift test` spawns BOTH the XCTest runner and the
       # swift-testing runner. The swift-testing runner finds 0 tests (the suite
