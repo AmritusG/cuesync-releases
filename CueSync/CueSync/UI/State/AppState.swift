@@ -77,7 +77,7 @@ final class AppState {
         ThemeColors.colors(for: theme)
     }
 
-    enum SortField: String, CaseIterable {
+    enum SortField: String, CaseIterable, CustomStringConvertible {
         case name, artist, album, bpm, duration, cues
 
         var label: String {
@@ -90,6 +90,11 @@ final class AppState {
             case .cues: return "Cue Count"
             }
         }
+
+        // swift-cross-ui's Picker(of:selection:) displays each option via
+        // `"\(option)"` (no separate label API) — see BrowseSectionView's Sort
+        // picker (spec CUESYNC-7 §F.13).
+        var description: String { label }
     }
 
     // MARK: - Computed
