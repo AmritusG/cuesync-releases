@@ -291,19 +291,25 @@ final class PortComplianceTests: XCTestCase {
                                "spec §2.C.10: cross-platform raw-DEFLATE inflate used by EngineDJParser")
     }
 
-    /// Spec §3: "Support/ contains exactly the six new files" — not five, not seven.
-    /// A stray file left behind (or a rename that silently orphans an old name) would
-    /// slip past the individual existence checks above.
-    func testSupportDirectoryContainsExactlyTheSixSpecifiedFiles() throws {
+    func testSupportLayerTextToolsExists() {
+        assertSourceFileExists("Support/TextTools.swift",
+                               "CUESYNC-7 §2.1: slugify()/generateToken() helper module")
+    }
+
+    /// Spec §3 (CUESYNC-5/6): "Support/ contains exactly the six new files" — not five,
+    /// not seven — plus `TextTools.swift`, added by CUESYNC-7 §2.1. A stray file left
+    /// behind (or a rename that silently orphans an old name) would slip past the
+    /// individual existence checks above.
+    func testSupportDirectoryContainsExactlyTheSevenSpecifiedFiles() throws {
         let expected: Set<String> = [
             "FileDialogs.swift", "Preferences.swift", "AudioDuration.swift",
-            "Hex.swift", "SQLite.swift", "Zlib.swift",
+            "Hex.swift", "SQLite.swift", "Zlib.swift", "TextTools.swift",
         ]
         let dir = Self.sourceRoot.appendingPathComponent("Support")
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         let swiftFiles = Set(names.filter { $0.hasSuffix(".swift") })
         XCTAssertEqual(swiftFiles, expected,
-                       "Support/ must contain exactly the six files the spec names (spec §3), got \(swiftFiles.sorted())")
+                       "Support/ must contain exactly the seven files the spec names (spec §3), got \(swiftFiles.sorted())")
     }
 
     // MARK: - D. swift-cross-ui app shell (spec §B, §D.18)
