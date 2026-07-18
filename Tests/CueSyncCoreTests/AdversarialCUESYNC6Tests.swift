@@ -423,6 +423,25 @@ final class AdversarialCUESYNC6SuiteIntegrityTests: XCTestCase {
             "precondition: the raw-substring counter must over-count this fixture — if it does not, " +
             "the exploit this test documents is not reproducible and this file should say so")
     }
+
+    /// CRLF regression (CUESYNC-8, found on the Windows build box): Swift's
+    /// grapheme clustering makes "\r\n" one Character that never equals "\n",
+    /// so an un-normalized stripper loses every //-comment terminator on a
+    /// CRLF checkout and eats each file after its first line comment — the
+    /// baseline guard saw 36 of 411 live methods. Counting must be identical
+    /// for any checkout line-ending convention.
+    func testLiveTestCounterIsLineEndingIndependent() {
+        let source = Fixtures.swiftSourceWithHiddenTestMethods
+        let crlf = source.replacingOccurrences(of: "\n", with: "\r\n")
+        XCTAssertEqual(SwiftSource.liveTestMethodCount(in: crlf),
+                       SwiftSource.liveTestMethodCount(in: source),
+                       "live-method counting must not depend on checkout line endings")
+
+        // The exact bug shape: live methods AFTER a line comment, CRLF file.
+        let afterComment = "// header\r\nfunc testA() {}\r\nfunc testB() {}\r\n"
+        XCTAssertEqual(SwiftSource.liveTestMethodCount(in: afterComment), 2,
+                       "a // comment in a CRLF file must end at its own line, not eat the file")
+    }
 }
 
 // MARK: - Negative controls (spec §D.19, applied to this file's own rules)
@@ -976,7 +995,14 @@ private enum SwiftSource {
     /// Counts `func test…(` in live code only: line comments, block comments and
     /// string literals (single-line, multi-line and raw) are stripped first.
     static func liveTestMethodCount(in source: String) -> Int {
-        let live = strippingCommentsAndStringLiterals(source)
+        // Normalize line endings FIRST: Swift grapheme clustering makes "\r\n"
+        // a SINGLE Character that never equals "\n", so on a CRLF checkout
+        // (Git-for-Windows core.autocrlf=true) the stripper's skip(until: "\n")
+        // for a // comment loses its terminator and swallows the rest of the
+        // file — 36 of 411 live methods counted on the CUESYNC-8 build box.
+        // Counting must not depend on checkout bytes.
+        let live = strippingCommentsAndStringLiterals(
+            source.replacingOccurrences(of: "\r\n", with: "\n"))
         return (try? NSRegularExpression(pattern: #"\bfunc\s+test[A-Za-z0-9_]*\("#)
             .numberOfMatches(in: live, range: NSRange(live.startIndex..., in: live))) ?? 0
     }
