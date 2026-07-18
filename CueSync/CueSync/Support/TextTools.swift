@@ -42,10 +42,22 @@ public enum TextTools {
         let rawSlug = slugComponents(of: input.lowercased()).joined(separator: "-")
         guard !rawSlug.isEmpty else { return fallback }
 
-        let escaped = reservedDeviceNames.contains(rawSlug) ? "_" + rawSlug : rawSlug
-        let truncated = truncatedOnSeparatorBoundary(escaped, maxLength: maxLength)
+        // Truncate BEFORE checking for a reserved name: truncating first can itself
+        // land on a bare reserved token (e.g. "con-aaa...a" cut to "con"), so the
+        // escape must run on the truncated result, not the pre-truncation slug —
+        // otherwise the escape is checked against text that's discarded a moment
+        // later and the reserved name is emitted verbatim.
+        let truncated = truncatedOnSeparatorBoundary(rawSlug, maxLength: maxLength)
         guard !truncated.isEmpty else { return fallback }
-        return truncated
+
+        let escaped = reservedDeviceNames.contains(truncated) ? "_" + truncated : truncated
+        // The "_" prefix can push `escaped` one character past maxLength (only when
+        // `truncated` already filled the whole budget); re-truncating is a no-op
+        // otherwise, since `escaped` starts with "_" it can never re-collapse into a
+        // bare reserved name.
+        let final = truncatedOnSeparatorBoundary(escaped, maxLength: maxLength)
+        guard !final.isEmpty else { return fallback }
+        return final
     }
 
     /// Splits `input` into runs of ASCII `[a-z0-9]`, dropping every other character
