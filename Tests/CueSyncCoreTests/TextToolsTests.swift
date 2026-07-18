@@ -103,6 +103,114 @@ final class SlugifyTests: XCTestCase {
             XCTAssertEqual(TextTools.slugify(first), first, "slugify must be idempotent for '\(input)'")
         }
     }
+
+    // MARK: - maxLength boundary sizes
+
+    func testMaxLengthZeroReturnsFallback() {
+        XCTAssertEqual(TextTools.slugify("hello world", maxLength: 0), "untitled")
+    }
+
+    func testMaxLengthNegativeReturnsFallback() {
+        XCTAssertEqual(TextTools.slugify("hello world", maxLength: -5), "untitled")
+    }
+
+    func testMaxLengthExactlyEqualsSlugLengthIsNotTruncated() {
+        // "hello-world" is exactly 11 characters; maxLength == count is the off-by-one
+        // boundary between "unchanged" and "truncate" — must not cut a character here.
+        let slug = TextTools.slugify("hello world", maxLength: 11)
+        XCTAssertEqual(slug, "hello-world")
+    }
+
+    func testMaxLengthOfOneHardCutsWhenNoSeparatorFitsInWindow() {
+        // Window is a single character, so there is no '-' to back up to; the
+        // implementation must fall back to a hard cut rather than returning empty.
+        XCTAssertEqual(TextTools.slugify("hello world", maxLength: 1), "h")
+    }
+
+    func testLongUnbrokenWordWithNoSeparatorHardCutsWithinWindow() {
+        let slug = TextTools.slugify(String(repeating: "a", count: 16), maxLength: 5)
+        XCTAssertEqual(slug, "aaaaa")
+        XCTAssertEqual(slug.count, 5)
+    }
+
+    // MARK: - Platform-quirk separators: CRLF and Unicode line/paragraph separators
+
+    func testCRLFAndUnicodeLineSeparatorsActAsSingleSeparatorsNotLiteralCharacters() {
+        // "\r\n" (Windows), lone "\r" / "\n", and the Unicode NEL/LS/PS/VT/FF separators
+        // a Windows- or cross-platform-authored text file may carry must each collapse to
+        // exactly one '-' — including the two-character "\r\n" pair, which must not emit
+        // a doubled "--".
+        let input = "line1\r\nline2\rline3\nline4\u{0085}line5\u{2028}line6\u{2029}line7\u{000B}line8\u{000C}line9"
+        let slug = TextTools.slugify(input)
+        XCTAssertEqual(slug, "line1-line2-line3-line4-line5-line6-line7-line8-line9")
+        XCTAssertFalse(slug.contains("--"))
+    }
+
+    // MARK: - Case-insensitive-filesystem quirk: full reserved-device-name matrix
+
+    private static func alternatingCase(_ s: String) -> String {
+        String(s.enumerated().map { index, char in
+            index % 2 == 0 ? Character(char.uppercased()) : Character(char.lowercased())
+        })
+    }
+
+    func testFullMatrixOfWindowsReservedDeviceNamesAcrossCasingAreEscapedWithUnderscorePrefix() {
+        var reservedBaseNames = ["con", "prn", "aux", "nul"]
+        for n in 1...9 {
+            reservedBaseNames.append("com\(n)")
+            reservedBaseNames.append("lpt\(n)")
+        }
+        XCTAssertEqual(reservedBaseNames.count, 22, "sanity check: 4 fixed names + COM1-9 + LPT1-9")
+
+        for name in reservedBaseNames {
+            let variants = [name, name.uppercased(), Self.alternatingCase(name)]
+            for variant in variants {
+                let slug = TextTools.slugify(variant)
+                XCTAssertEqual(slug, "_" + name,
+                                "expected reserved name '\(variant)' to be escaped to '_\(name)', got '\(slug)'")
+            }
+        }
+    }
+
+    // MARK: - Unicode edge cases beyond the basic accented/CJK/emoji sample
+
+    func testBidiOverrideZeroWidthAndUnicodeWhitespaceAreNeverEmittedLiterally() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) is the "RTLO trick" used to disguise a
+        // dangerous extension as a harmless one (e.g. rendering "gnp.exe" reversed);
+        // U+200B/U+200D are invisible zero-width characters; U+00A0/U+2003 are non-ASCII
+        // whitespace. None are in [a-z0-9], so all must be stripped, never survive verbatim.
+        let input = "evil\u{202E}gnp.exe\u{200B}\u{200D}name\u{00A0}here\u{2003}end"
+        let slug = TextTools.slugify(input)
+        let bannedScalars: [Unicode.Scalar] = ["\u{202E}", "\u{200B}", "\u{200D}", "\u{00A0}", "\u{2003}"]
+        for banned in bannedScalars {
+            XCTAssertFalse(slug.unicodeScalars.contains(banned),
+                            "slug '\(slug)' must not contain U+\(String(format: "%04X", banned.value))")
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        for scalar in slug.unicodeScalars {
+            XCTAssertTrue(allowed.contains(scalar), "unexpected character '\(scalar)' in slug '\(slug)'")
+        }
+    }
+
+    func testDecomposedAndPrecomposedAccentedInputBothProduceValidASCIIOnlySlugs() {
+        let precomposed = "café"        // é is a single scalar, U+00E9
+        let decomposed = "cafe\u{0301}" // "e" + combining acute accent, U+0301
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        for input in [precomposed, decomposed] {
+            let slug = TextTools.slugify(input)
+            XCTAssertFalse(slug.isEmpty, "slug for '\(input)' must not be empty")
+            for scalar in slug.unicodeScalars {
+                XCTAssertTrue(allowed.contains(scalar), "unexpected character in slug '\(slug)' for input '\(input)'")
+            }
+        }
+        // The implementation walks unicodeScalars without Unicode-normalizing first (by
+        // design — see spec §5), so canonically-equivalent NFC/NFD spellings of the same
+        // visible text are allowed to slugify differently: the decomposed form's
+        // combining accent is dropped as a lone separator, leaving the base "e" behind,
+        // while the precomposed "é" is dropped as a single non-ASCII unit.
+        XCTAssertEqual(TextTools.slugify(precomposed), "caf")
+        XCTAssertEqual(TextTools.slugify(decomposed), "cafe")
+    }
 }
 
 final class GenerateTokenTests: XCTestCase {
@@ -161,6 +269,15 @@ final class GenerateTokenTests: XCTestCase {
         }
         XCTAssertEqual(symbolsSeen, Set("0123456789abcdef"), "expected every hex symbol to appear across a large sample")
     }
+
+    func testVeryLargeLengthProducesExactCharacterCountWithoutCrashing() {
+        let token = TextTools.generateToken(length: 10_000)
+        XCTAssertEqual(token.count, 10_000)
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        for scalar in token.unicodeScalars {
+            XCTAssertTrue(allowed.contains(scalar))
+        }
+    }
 }
 
 final class TextToolsPortComplianceTests: XCTestCase {
@@ -174,7 +291,7 @@ final class TextToolsPortComplianceTests: XCTestCase {
 
     func testTextToolsImportsOnlyFoundation() throws {
         let source = try String(contentsOf: Self.textToolsURL, encoding: .utf8)
-        for banned in ["import AppKit", "import SwiftUI", "import Security"] {
+        for banned in ["import AppKit", "import SwiftUI", "import Security", "import Combine"] {
             XCTAssertFalse(source.contains(banned),
                             "TextTools.swift must not contain '\(banned)' — it must stay in the cross-platform core")
         }
@@ -185,9 +302,19 @@ final class TextToolsPortComplianceTests: XCTestCase {
         let source = try String(contentsOf: Self.textToolsURL, encoding: .utf8)
         XCTAssertTrue(source.contains("SystemRandomNumberGenerator"),
                       "generateToken() must be backed by SystemRandomNumberGenerator")
-        for banned in ["Date(", "timeIntervalSince", "arc4random_buf", "srand"] {
+        for banned in ["Date(", "timeIntervalSince", "arc4random_buf", "srand", "ProcessInfo", "getpid("] {
             XCTAssertFalse(source.contains(banned),
-                            "TextTools.swift must not contain '\(banned)' — tokens must not be time/sequence derived")
+                            "TextTools.swift must not contain '\(banned)' — tokens must not be time/PID/sequence derived")
+        }
+    }
+
+    func testTextToolsHasNoFilesystemSideEffects() throws {
+        // Threat model §4: "No filesystem side effects in the module." slugify() and
+        // generateToken() must return strings only — never touch disk.
+        let source = try String(contentsOf: Self.textToolsURL, encoding: .utf8)
+        for banned in ["FileManager", "contentsOf", ".write(to:", "fileURLWithPath"] {
+            XCTAssertFalse(source.contains(banned),
+                            "TextTools.swift must not contain '\(banned)' — the module must have no filesystem side effects")
         }
     }
 }
