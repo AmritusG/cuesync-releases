@@ -406,13 +406,123 @@ final class PortComplianceTests: XCTestCase {
         }
     }
 
-    /// spec §4 threat model / §B.13: "Do not make any CueSyncCore type public in this
-    /// ticket." `internal` (the implicit default) keeps the type unreachable from `UI/`
-    /// until a later ticket actually needs it; widening to `public` now would be exactly
-    /// the premature API-surface expansion the spec calls out. Scans with a word-boundary
-    /// regex (not a plain substring check) so an identifier merely containing "public"
-    /// can't produce a false positive.
-    func testNoPublicDeclarationExistsInCueSyncCoreScopedSources() throws {
+    /// spec CUESYNC-6 §B.13 froze CueSyncCore at fully-internal because CUESYNC-6 didn't
+    /// yet need to consume it from `UI/` — its own rationale said so explicitly: "widening
+    /// the surface belongs to the ticket that consumes it." CUESYNC-7 *is* that ticket:
+    /// `UI/State/AppState.swift` (spec §B.3) must call the shared parsers/exporters/models
+    /// directly, which is impossible across the `CueSyncCore` / `CueSync` SwiftPM module
+    /// boundary without `public` (internal, the default, is invisible outside its own
+    /// target — unlike the Xcode build, where App/AppState.swift compiles alongside these
+    /// files directly). So the blanket "no public" check is retired in favor of an
+    /// allowlist of the *exact* trimmed lines this ticket intentionally exposes — anything
+    /// public that isn't on the list still fails, so an accidental/unrelated widening is
+    /// still caught. Scans with the same word-boundary regex as before (not a plain
+    /// substring check) so an identifier merely containing "public" can't produce a hit.
+    func testCueSyncCorePublicSurfaceMatchesTheDocumentedAllowlist() throws {
+        let allowedByFile: [String: Set<String>] = [
+            "CuePoint.swift": [
+                "public struct CuePoint: Identifiable, Codable, Equatable {",
+                "public var id: String",
+                "public var start: Double          // Time position in seconds",
+                "public var name: String",
+                "public var color: String          // CSS color string e.g. \"rgb(255, 0, 0)\" or \"#ff0000\"",
+                "public var yValue: Double         // 0-100",
+                "public var curve: Int             // 1-23",
+                "public var enabled: Bool",
+                "public init(id: String, start: Double, name: String, color: String, yValue: Double, curve: Int, enabled: Bool) {",
+                "public func normalizedX(duration: Double) -> Double {",
+                "public var normalizedY: Double {",
+                "public func sanitized() -> CuePoint {",
+            ],
+            "ParseError.swift": [
+                "public enum ParseError: LocalizedError {",
+                "public var errorDescription: String? {",
+            ],
+            "Playlist.swift": [
+                "public struct Playlist: Identifiable, Codable, Equatable {",
+                "public var id: String",
+                "public var name: String",
+                "public var type: PlaylistType",
+                "public var trackIds: [String]",
+                "public var children: [Playlist]",
+                "public enum PlaylistType: String, Codable {",
+                "public var isFolder: Bool { type == .folder }",
+                "public func totalTrackCount() -> Int {",
+            ],
+            "Project.swift": [
+                "public struct Project: Codable {",
+                "public var version: String = \"3.0\"",
+                "public var name: String = \"Untitled Project\"",
+                "public var savedAt: String?",
+                "public var tracks: [Track] = []",
+                "public var playlists: [Playlist] = []",
+                "public var selectedTrackId: String?",
+                "public var cuePoints: [CuePoint] = []",
+                "public var trackDuration: Double = 60.0",
+                "public var presetName: String = \"New Envelope\"",
+                "public init(",
+                "public init(from decoder: Decoder) throws {",
+            ],
+            "Track.swift": [
+                "public struct Track: Identifiable, Codable, Equatable {",
+                "public var id: String",
+                "public var name: String",
+                "public var artist: String",
+                "public var album: String",
+                "public var genre: String",
+                "public var totalTime: Int             // Duration in seconds",
+                "public var bpm: Double",
+                "public var tonality: String",
+                "public var location: String           // File path",
+                "public var cuePoints: [CuePoint]",
+                "public var formattedDuration: String {",
+                "public var cueCount: Int { cuePoints.count }",
+            ],
+            "EngineDJParser.swift": [
+                "public enum EngineDJParser {",
+            ],
+            "RekordboxParser.swift": [
+                "public struct RekordboxResult {",
+                "public let tracks: [Track]",
+                "public let playlists: [Playlist]",
+                "public enum RekordboxParser {",
+            ],
+            "ResolumeParser.swift": [
+                "public struct ResolumePoint {",
+                "public struct ResolumeParseResult {",
+                "public let presetName: String",
+                "public let points: [ResolumePoint]",
+                "public enum ResolumeParser {",
+            ],
+            "SeratoParser.swift": [
+                "public struct SeratoResult {",
+                "public let tracks: [Track]",
+                "public enum SeratoParser {",
+            ],
+            "ShowKontrolParser.swift": [
+                "public struct ShowKontrolResult {",
+                "public let cuePoints: [CuePoint]",
+                "public let suggestedDurationMs: Double?",
+                "public let durationFromCues: Bool  // true if duration was derived from cue timing data",
+                "public enum ShowKontrolParser {",
+            ],
+            "ResolumeExporter.swift": [
+                "public enum ResolumeExporter {",
+            ],
+            "ShowKontrolExporter.swift": [
+                "public enum ShowKontrolExporter {",
+            ],
+            "Hex.swift": [
+                "public enum Hex {",
+            ],
+        ]
+        // Every allowlisted line above also carries its own `public static func`/`public
+        // static var` sibling (e.g. `public static func parse(...)`) that this narrower
+        // regex — deliberately unchanged from the original check — doesn't match, because
+        // "static" sits between "public" and the keyword list. Those are exactly the entry
+        // points spec §B.3 requires (`RekordboxParser.parse`, `CuePoint.makeDefault`,
+        // `ResolumeParser.convertToCuePoints`, `ResolumeExporter.generate`,
+        // `ShowKontrolExporter.generate`, `Hex.parseCSSColor`, `EngineDJParser.parse`, …).
         let dirs = ["Models", "Parsers", "Exporters", "Support"]
         let pattern = #"(^|[^A-Za-z0-9_])public\s+(class|struct|enum|protocol|func|var|let|init|extension|typealias)\b"#
         var checked = 0
@@ -422,9 +532,14 @@ final class PortComplianceTests: XCTestCase {
             for file in files {
                 let src = try String(contentsOf: file, encoding: .utf8)
                 checked += 1
-                let hit = src.range(of: pattern, options: .regularExpression) != nil
-                XCTAssertFalse(hit, "\(file.lastPathComponent) declares a public API — CueSyncCore must stay internal-only " +
-                               "in this ticket (spec §B.13); widening the surface belongs to the ticket that consumes it")
+                let allowed = allowedByFile[file.lastPathComponent] ?? []
+                for line in src.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.range(of: pattern, options: .regularExpression) != nil else { continue }
+                    XCTAssertTrue(allowed.contains(trimmed),
+                                  "\(file.lastPathComponent) declares a public API not on the CUESYNC-7 §B.3 allowlist: " +
+                                  "'\(trimmed)' — either it's an unintended widening, or the allowlist needs updating")
+                }
             }
         }
         XCTAssertGreaterThan(checked, 0, "expected to scan at least the Models/Parsers/Exporters/Support sources")

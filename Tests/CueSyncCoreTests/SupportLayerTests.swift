@@ -84,6 +84,39 @@ final class HexColorTests: XCTestCase {
     func testParseCSSColorHandlesEmptyStringWithoutCrashing() {
         _ = Hex.parseCSSColor("")
     }
+
+    // The exact vectors named by spec CUESYNC-7 §B.5/§3 acceptance criteria for the
+    // `UI/Theme/ColorParsing.swift` re-host of `Color(cssString:)` — the `Color` wrapper
+    // itself lives in the `CueSync` (swift-cross-ui) target and isn't testable from here,
+    // but it's a one-line pass-through to `Hex.parseCSSColor`, so pinning these vectors at
+    // the pure-logic layer covers it.
+    func testParseCSSColorAccentGreenHex() {
+        let c = Hex.parseCSSColor("#1ed760")
+        assertApproxEqual(c.r, 0x1e.toDoubleOver255, tolerance: 0.0001)
+        assertApproxEqual(c.g, 0xd7.toDoubleOver255, tolerance: 0.0001)
+        assertApproxEqual(c.b, 0x60.toDoubleOver255, tolerance: 0.0001)
+    }
+
+    func testParseCSSColorThreeDigitShorthand() {
+        let c = Hex.parseCSSColor("#abc")
+        assertApproxEqual(c.r, 0xaa.toDoubleOver255, tolerance: 0.0001)
+        assertApproxEqual(c.g, 0xbb.toDoubleOver255, tolerance: 0.0001)
+        assertApproxEqual(c.b, 0xcc.toDoubleOver255, tolerance: 0.0001)
+    }
+
+    func testParseCSSColorRGBFunctionVector() {
+        let c = Hex.parseCSSColor("rgb(30, 215, 96)")
+        assertApproxEqual(c.r, 30.0 / 255.0, tolerance: 0.0001)
+        assertApproxEqual(c.g, 215.0 / 255.0, tolerance: 0.0001)
+        assertApproxEqual(c.b, 96.0 / 255.0, tolerance: 0.0001)
+    }
+
+    func testParseCSSColorMalformedStringFallsBackToAccentGreen() {
+        let c = Hex.parseCSSColor("definitely not a color")
+        assertApproxEqual(c.r, 30.0 / 255.0, tolerance: 0.0001)
+        assertApproxEqual(c.g, 215.0 / 255.0, tolerance: 0.0001)
+        assertApproxEqual(c.b, 96.0 / 255.0, tolerance: 0.0001)
+    }
 }
 
 private extension Int {

@@ -6,13 +6,15 @@ import Foundation
 import FoundationXML
 #endif
 
-struct RekordboxResult {
-    let tracks: [Track]
-    let playlists: [Playlist]
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// parser via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public struct RekordboxResult {
+    public let tracks: [Track]
+    public let playlists: [Playlist]
 }
 
-enum RekordboxParser {
-    static func parse(xml: String) throws -> RekordboxResult {
+public enum RekordboxParser {
+    public static func parse(xml: String) throws -> RekordboxResult {
         guard let data = xml.data(using: .utf8) else {
             throw ParseError.invalidFormat("Could not encode XML string")
         }

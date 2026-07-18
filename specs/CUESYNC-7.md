@@ -72,8 +72,32 @@ each yourself in one pass; the plan below depends on the corrected facts, not th
    linking the exe for the Windows GUI subsystem — a `Package.swift` linker setting, **not** a
    workflow change. `Package.swift` is not an AppKit-gated file and is in scope to edit.
 
+6. **Correction found while implementing §B (not one of premises 1–3, but the same category —
+   a plan-level assumption that's false on this branch): `CueSyncCore`'s Models/Parsers/
+   Exporters/Support types are all `internal` (Swift's default), not `public`.** SwiftPM module
+   boundaries mean `internal` is invisible outside its own target — unlike the Xcode build,
+   where `App/AppState.swift` compiles directly alongside these files in one module. A plain
+   `import CueSyncCore` from the `CueSync` (swift-cross-ui) executable target therefore cannot
+   see `Track`, `CuePoint`, `Project`, `RekordboxParser`, etc. at all — confirmed empirically:
+   `UI/State/AppState.swift` failed to compile with "cannot find 'Track' in scope" etc. until
+   the exact symbols §B.3 requires (`Track`, `Playlist`, `CuePoint` + its memberwise `init`,
+   `Project` + a hand-written public memberwise `init` alongside its existing `init(from:)`,
+   `ParseError` — already `internal`-shimmed for the same cross-target reason, just not yet
+   `public` — `RekordboxParser`/`ShowKontrolParser`/`SeratoParser`/`EngineDJParser`/
+   `ResolumeParser` + `ResolumeExporter`/`ShowKontrolExporter`, and `Hex.parseCSSColor`) were
+   marked `public`. This **replaces** §3's "`CueSyncCore/Support/` (parser only)" scope note —
+   the actual footprint is `Models/`, `Parsers/`, `Exporters/`, and `Support/Hex.swift`, every
+   edit additive (`internal` → `public`, plus one hand-written `Project` init; no behavior
+   changed). It also **replaces** the pre-existing `PortComplianceTests
+   .testNoPublicDeclarationExistsInCueSyncCoreScopedSources` (added by CUESYNC-6 §B.13, whose
+   own failure message said "widening the surface belongs to the ticket that consumes it" —
+   this ticket) with `testCueSyncCorePublicSurfaceMatchesTheDocumentedAllowlist`, an explicit
+   allowlist of the exact lines this ticket exposes, so an *unintended* future widening still
+   fails the build.
+
 If any of premises 1–3 is false on your branch, stop and report — the plan assumes the
-corrected facts.
+corrected facts. (Premises 1–3 all held; §0.6 above documents a 4th correction found once
+implementation started.)
 
 ---
 
@@ -372,8 +396,10 @@ Amrit's GTE punch-list, not a silent reduction.
   executable target under `.when(platforms: [.windows])`, and no other manifest change (no pin,
   exclude, or `CueSyncCore` edit).
 - No AppKit-gated file (`App/`, `Views/`, `Theme/`, `Utilities/`) is modified — `git diff`
-  touches only files under `UI/`, `Package.swift`, `CueSyncCore/Support/` (parser only), the spec,
-  and (optionally) the workflow guard step.
+  touches only files under `UI/`, `Package.swift`, `CueSyncCore`'s `Models/`, `Parsers/`,
+  `Exporters/`, and `Support/Hex.swift` (widening `internal` → `public` only — see §0.6 — plus
+  `PortComplianceTests.swift`'s allowlist update for the same reason), the spec, and
+  (optionally) the workflow guard step.
 - The GTK4 DLL bundling step and the `wldd` closure check + its negative control still pass on
   `windows-build`.
 - No swift-cross-ui `fatalError` path is invoked (e.g. only `Picker` `.menu` is used; no `Table`

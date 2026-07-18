@@ -1,13 +1,15 @@
 import Foundation
 
-struct ShowKontrolResult {
-    let cuePoints: [CuePoint]
-    let suggestedDurationMs: Double?
-    let durationFromCues: Bool  // true if duration was derived from cue timing data
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// parser via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public struct ShowKontrolResult {
+    public let cuePoints: [CuePoint]
+    public let suggestedDurationMs: Double?
+    public let durationFromCues: Bool  // true if duration was derived from cue timing data
 }
 
-enum ShowKontrolParser {
-    static func parse(content: String) throws -> ShowKontrolResult {
+public enum ShowKontrolParser {
+    public static func parse(content: String) throws -> ShowKontrolResult {
         // ShowKontrol uses \r line endings; also handle \n and \r\n
         let normalized = content.replacingOccurrences(of: "\r\n", with: "\n")
                                 .replacingOccurrences(of: "\r", with: "\n")

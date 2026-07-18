@@ -6,19 +6,23 @@ import Foundation
 import FoundationXML
 #endif
 
-struct ResolumePoint {
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// parser via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+// `ResolumePoint`'s fields stay internal: the UI target only ever passes the opaque
+// array straight through to `convertToCuePoints`, never reads `x`/`y`/`curve` directly.
+public struct ResolumePoint {
     let x: Double
     let y: Double
     let curve: Int
 }
 
-struct ResolumeParseResult {
-    let presetName: String
-    let points: [ResolumePoint]
+public struct ResolumeParseResult {
+    public let presetName: String
+    public let points: [ResolumePoint]
 }
 
-enum ResolumeParser {
-    static func parse(xml: String) throws -> ResolumeParseResult {
+public enum ResolumeParser {
+    public static func parse(xml: String) throws -> ResolumeParseResult {
         guard let data = xml.data(using: .utf8) else {
             throw ParseError.invalidFormat("Could not encode XML string")
         }
@@ -37,7 +41,7 @@ enum ResolumeParser {
         )
     }
 
-    static func convertToCuePoints(points: [ResolumePoint], duration: Double) -> [CuePoint] {
+    public static func convertToCuePoints(points: [ResolumePoint], duration: Double) -> [CuePoint] {
         // In Resolume XML, point[i].curve = "from point[i] to point[i+1]".
         // In our model, cue[i].curve = "from previous to point[i]" (arrival curve).
         // So our cue[i].curve = xml_points[i-1].curve. First point gets Linear.

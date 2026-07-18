@@ -5,18 +5,20 @@ import SQLite3
 import CSQLite
 #endif
 
-enum EngineDJParser {
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// parser via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public enum EngineDJParser {
 
     // MARK: - Public
 
     /// Default database location: ~/Music/Engine Library/Database2/m.db
-    static var defaultDatabaseURL: URL {
+    public static var defaultDatabaseURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Music/Engine Library/Database2/m.db")
     }
 
     /// Parse an Engine DJ SQLite database and return all tracks with their cue points.
-    static func parse(databaseURL: URL) throws -> [Track] {
+    public static func parse(databaseURL: URL) throws -> [Track] {
         guard FileManager.default.fileExists(atPath: databaseURL.path) else {
             throw ParseError.invalidFormat("Engine DJ database not found at \(databaseURL.path)")
         }

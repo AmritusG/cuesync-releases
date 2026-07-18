@@ -1,15 +1,29 @@
 import Foundation
 
-struct CuePoint: Identifiable, Codable, Equatable {
-    var id: String
-    var start: Double          // Time position in seconds
-    var name: String
-    var color: String          // CSS color string e.g. "rgb(255, 0, 0)" or "#ff0000"
-    var yValue: Double         // 0-100
-    var curve: Int             // 1-23
-    var enabled: Bool
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// model via a plain `import CueSyncCore` — SwiftPM module boundaries mean `internal`
+// (the default) is invisible outside this target, unlike the Xcode build where
+// App/AppState.swift compiles directly alongside this file (spec CUESYNC-7 §B.3).
+public struct CuePoint: Identifiable, Codable, Equatable {
+    public var id: String
+    public var start: Double          // Time position in seconds
+    public var name: String
+    public var color: String          // CSS color string e.g. "rgb(255, 0, 0)" or "#ff0000"
+    public var yValue: Double         // 0-100
+    public var curve: Int             // 1-23
+    public var enabled: Bool
 
-    static func makeDefault(at time: Double = 0, name: String = "") -> CuePoint {
+    public init(id: String, start: Double, name: String, color: String, yValue: Double, curve: Int, enabled: Bool) {
+        self.id = id
+        self.start = start
+        self.name = name
+        self.color = color
+        self.yValue = yValue
+        self.curve = curve
+        self.enabled = enabled
+    }
+
+    public static func makeDefault(at time: Double = 0, name: String = "") -> CuePoint {
         CuePoint(
             id: UUID().uuidString,
             start: time,
@@ -22,13 +36,13 @@ struct CuePoint: Identifiable, Codable, Equatable {
     }
 
     /// Normalized X for Resolume (0-1)
-    func normalizedX(duration: Double) -> Double {
+    public func normalizedX(duration: Double) -> Double {
         guard duration > 0, start.isFinite else { return 0 }
         return min(max(start / duration, 0), 1)
     }
 
     /// Normalized Y for Resolume (0-1)
-    var normalizedY: Double {
+    public var normalizedY: Double {
         guard yValue.isFinite else { return 0 }
         return min(max(yValue / 100.0, 0), 1)
     }
@@ -38,7 +52,7 @@ struct CuePoint: Identifiable, Codable, Equatable {
     /// Every parser and project load runs untrusted data through this, so a corrupt or
     /// hostile file can never produce a NaN/Inf/out-of-range value that would later crash
     /// the envelope canvas (`Int(NaN)`) or the exporters (timecode overflow, `nan` in XML).
-    func sanitized() -> CuePoint {
+    public func sanitized() -> CuePoint {
         var c = self
         c.start = c.start.isFinite ? max(c.start, 0) : 0
         c.yValue = c.yValue.isFinite ? min(max(c.yValue, 0), 100) : 0

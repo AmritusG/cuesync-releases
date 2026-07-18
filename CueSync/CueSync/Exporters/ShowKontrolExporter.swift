@@ -1,7 +1,9 @@
 import Foundation
 
-enum ShowKontrolExporter {
-    static func generate(cuePoints: [CuePoint]) -> String? {
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// exporter via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public enum ShowKontrolExporter {
+    public static func generate(cuePoints: [CuePoint]) -> String? {
         let enabled = cuePoints.filter { $0.enabled }
         guard !enabled.isEmpty else { return nil }
 

@@ -75,7 +75,17 @@ let package = Package(
             path: "CueSync/CueSync",
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters", "Support"],
             sources: ["UI"],
-            swiftSettings: [.define("CUESYNC_CROSSUI")]
+            swiftSettings: [.define("CUESYNC_CROSSUI")],
+            // Links the exe for the Windows GUI subsystem so no console window opens
+            // beside the app (spec CUESYNC-7 §A). /ENTRY:mainCRTStartup keeps Swift's
+            // C-runtime entry point — without it, /SUBSYSTEM:WINDOWS makes link.exe
+            // look for WinMain and fail. Windows-only; macOS/Linux linking is unaffected.
+            linkerSettings: [
+                .unsafeFlags(
+                    ["-Xlinker", "/SUBSYSTEM:WINDOWS", "-Xlinker", "/ENTRY:mainCRTStartup"],
+                    .when(platforms: [.windows])
+                )
+            ]
         ),
         // Ports CueSync/Tests/CueSyncTests.swift (custom-runner suite) into XCTest so
         // `swift test` exercises Models/Parsers/Exporters on windows-latest + macos-latest

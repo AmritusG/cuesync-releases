@@ -1,20 +1,24 @@
 import Foundation
 
-struct Playlist: Identifiable, Codable, Equatable {
-    var id: String
-    var name: String
-    var type: PlaylistType
-    var trackIds: [String]
-    var children: [Playlist]
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// model via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see CuePoint.swift.
+// No custom initializer is added: only the parsers (same module) construct `Playlist` values; the UI
+// target only ever reads them.
+public struct Playlist: Identifiable, Codable, Equatable {
+    public var id: String
+    public var name: String
+    public var type: PlaylistType
+    public var trackIds: [String]
+    public var children: [Playlist]
 
-    enum PlaylistType: String, Codable {
+    public enum PlaylistType: String, Codable {
         case folder
         case playlist
     }
 
-    var isFolder: Bool { type == .folder }
+    public var isFolder: Bool { type == .folder }
 
-    func totalTrackCount() -> Int {
+    public func totalTrackCount() -> Int {
         if type == .playlist {
             return trackIds.count
         }

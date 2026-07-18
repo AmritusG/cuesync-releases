@@ -1,23 +1,27 @@
 import Foundation
 
-struct Track: Identifiable, Codable, Equatable {
-    var id: String
-    var name: String
-    var artist: String
-    var album: String
-    var genre: String
-    var totalTime: Int             // Duration in seconds
-    var bpm: Double
-    var tonality: String
-    var location: String           // File path
-    var cuePoints: [CuePoint]
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// model via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see CuePoint.swift.
+// No custom initializer is added: only the parsers (same module) construct `Track` values; the UI
+// target only ever reads them.
+public struct Track: Identifiable, Codable, Equatable {
+    public var id: String
+    public var name: String
+    public var artist: String
+    public var album: String
+    public var genre: String
+    public var totalTime: Int             // Duration in seconds
+    public var bpm: Double
+    public var tonality: String
+    public var location: String           // File path
+    public var cuePoints: [CuePoint]
 
-    var formattedDuration: String {
+    public var formattedDuration: String {
         let safe = max(totalTime, 0)
         let m = safe / 60
         let s = safe % 60
         return String(format: "%d:%02d", m, s)
     }
 
-    var cueCount: Int { cuePoints.count }
+    public var cueCount: Int { cuePoints.count }
 }

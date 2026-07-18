@@ -2,8 +2,10 @@ import Foundation
 
 // MARK: - Result Types
 
-struct SeratoResult {
-    let tracks: [Track]
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// parser via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public struct SeratoResult {
+    public let tracks: [Track]
 }
 
 // MARK: - Serato Default Colors
@@ -33,7 +35,7 @@ enum SeratoColor {
 
 // MARK: - Serato Parser
 
-enum SeratoParser {
+public enum SeratoParser {
 
     /// Supported audio file extensions for Serato parsing (P1).
     static let supportedExtensions: Set<String> = ["mp3", "aif", "aiff", "wav"]
@@ -97,7 +99,7 @@ enum SeratoParser {
     }
 
     /// Parse multiple audio files from a directory or file list.
-    static func parseFiles(at urls: [URL]) -> SeratoResult {
+    public static func parseFiles(at urls: [URL]) -> SeratoResult {
         var tracks: [Track] = []
         for url in urls {
             guard let track = try? parseFile(at: url) else { continue }

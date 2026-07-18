@@ -1,7 +1,9 @@
 import Foundation
 
-enum ResolumeExporter {
-    static func generate(cuePoints: [CuePoint], trackDuration: Double, presetName: String) -> String? {
+// `public` so the CueSync (swift-cross-ui) executable target can consume this shared
+// exporter via a plain `import CueSyncCore` (spec CUESYNC-7 §B.3) — see Models/CuePoint.swift.
+public enum ResolumeExporter {
+    public static func generate(cuePoints: [CuePoint], trackDuration: Double, presetName: String) -> String? {
         guard trackDuration > 0 else { return nil }
 
         var envPoints = cuePoints

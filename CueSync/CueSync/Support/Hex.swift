@@ -4,7 +4,7 @@ import Foundation
 /// runs identically on every platform. Mirrors `ThemeColors`' `NSColor.fromCSSString`
 /// parsing rules; the UI layer will re-host that extension on top of this once the
 /// presentation layer moves to swift-cross-ui.
-enum Hex {
+public enum Hex {
     /// Clamps a parsed component to a finite value in the valid 0...1 range.
     /// `Double("nan")`, `Double("inf")`, and overflowing literals like `1e400`
     /// all parse successfully in Swift, so any component derived from untrusted
@@ -46,8 +46,9 @@ enum Hex {
     /// Parses any CSS color string CueSync uses (`#rgb`, `#rrggbb`, `rgb(r,g,b)`),
     /// falling back to the app's accent green when the string is unrecognized —
     /// matches the existing `NSColor.fromCSSString` fallback behavior. The returned
-    /// components are always finite.
-    static func parseCSSColor(_ string: String) -> (r: Double, g: Double, b: Double) {
+    /// components are always finite. `public`: this is the function the swift-cross-ui
+    /// `Color(cssString:)` re-host (`UI/Theme/ColorParsing.swift`) calls (CUESYNC-7 §B.5).
+    public static func parseCSSColor(_ string: String) -> (r: Double, g: Double, b: Double) {
         if let rgb = parseRGBFunction(string) { return rgb }
         if let hex = parseHexColor(string) { return hex }
         return (30.0 / 255.0, 215.0 / 255.0, 96.0 / 255.0)
