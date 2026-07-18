@@ -150,6 +150,72 @@ final class PortComplianceTests: XCTestCase {
         XCTAssertTrue(revision.allSatisfy(\.isHexDigit), "swift-cross-ui revision must be hex: \(revision)")
     }
 
+    // MARK: - A2. Windows GUI subsystem linker flags (spec CUESYNC-7 §A) — no coverage existed yet
+
+    /// spec CUESYNC-7 §3: "Package.swift carries /SUBSYSTEM:WINDOWS + /ENTRY:mainCRTStartup
+    /// on the CueSync executable target ... and no other manifest change." Scoped to the
+    /// CueSync target block (not a whole-manifest substring search) so a comment elsewhere
+    /// mentioning the flags can't satisfy this by accident — same pattern as the existing
+    /// GtkBackend/DefaultBackend check above.
+    func testCueSyncTargetLinksWindowsGUISubsystemAndCRTEntryPointScopedToWindows() throws {
+        let manifest = try readPackageSwift()
+        guard let cueSyncBlock = targetBlock(named: "CueSync", in: manifest) else {
+            XCTFail("could not locate the CueSync target block in Package.swift")
+            return
+        }
+        let collapsed = cueSyncBlock.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        XCTAssertTrue(
+            collapsed.contains(#"["-Xlinker", "/SUBSYSTEM:WINDOWS", "-Xlinker", "/ENTRY:mainCRTStartup"]"#),
+            "CueSync executable target must link /SUBSYSTEM:WINDOWS (suppresses the console window) and " +
+            "/ENTRY:mainCRTStartup (keeps Swift's C-runtime entry point) — spec §A.1"
+        )
+        XCTAssertTrue(
+            collapsed.contains(
+                #"["-Xlinker", "/SUBSYSTEM:WINDOWS", "-Xlinker", "/ENTRY:mainCRTStartup"], .when(platforms: [.windows])"#
+            ),
+            "the Windows GUI-subsystem linker flags must be scoped via .when(platforms: [.windows]) so the " +
+            "MSVC-specific /SUBSYSTEM//ENTRY syntax never reaches the macOS/Linux linker (spec §A.1)"
+        )
+    }
+
+    /// spec §3: "no other manifest change (no pin, exclude, or CueSyncCore edit)." Pins the
+    /// exact CueSyncCore/CueSync `exclude:`/`sources:` arrays this ticket must leave
+    /// untouched, so an accidental widening of either target's source footprint — e.g. a
+    /// stray edit that lets CueSyncCore start compiling `UI/`, or lists new files
+    /// individually instead of relying on the `UI` directory glob (spec §2: "no
+    /// Package.swift file listing is needed for new UI files") — fails loudly instead of
+    /// silently changing what each SwiftPM target builds.
+    func testTargetExcludeAndSourceListsAreUnchangedByThisTicket() throws {
+        let manifest = try readPackageSwift()
+        guard let coreBlock = targetBlock(named: "CueSyncCore", in: manifest) else {
+            XCTFail("could not locate the CueSyncCore target block in Package.swift")
+            return
+        }
+        XCTAssertTrue(coreBlock.contains(#"exclude: ["App", "Views", "Theme", "Utilities", "Resources", "UI"]"#),
+                      "CueSyncCore's exclude list must stay exactly as it was before CUESYNC-7 (spec §3)")
+        XCTAssertTrue(coreBlock.contains(#"sources: ["Models", "Parsers", "Exporters", "Support"]"#),
+                      "CueSyncCore's sources list must stay exactly as it was before CUESYNC-7 (spec §3)")
+
+        guard let cueSyncBlock = targetBlock(named: "CueSync", in: manifest) else {
+            XCTFail("could not locate the CueSync target block in Package.swift")
+            return
+        }
+        XCTAssertTrue(cueSyncBlock.contains(
+            #"exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters", "Support"]"#),
+                      "CueSync's exclude list must stay exactly as it was before CUESYNC-7 (spec §3)")
+        XCTAssertTrue(cueSyncBlock.contains(#"sources: ["UI"]"#),
+                      "CueSync's sources list must stay exactly [\"UI\"] — every new screen lives under UI/ and " +
+                      "is picked up by the existing directory glob, no per-file Package.swift listing (spec §2)")
+    }
+
+    /// spec §3: "no other manifest change (no pin ...)" — the swift-cross-ui pin must stay
+    /// exactly 0.8.0, not bumped as an incidental side effect of this ticket's edits.
+    func testSwiftCrossUIPinIsStillExactlyVersion0_8_0() throws {
+        let manifest = try readPackageSwift()
+        XCTAssertTrue(manifest.contains(#".package(url: "https://github.com/moreSwift/swift-cross-ui", exact: "0.8.0")"#),
+                      "swift-cross-ui must stay pinned to exact: \"0.8.0\" — CUESYNC-7 §3 forbids a pin change")
+    }
+
     // MARK: - B. Cross-platform logic layer: the 2 Apple-only APIs must be #if-guarded (spec §2.B)
 
     func testEngineDJParserGuardsSQLite3Import() throws {
@@ -305,7 +371,11 @@ final class PortComplianceTests: XCTestCase {
     /// CRLF to LF before scanning so a Windows checkout with `core.autocrlf` doesn't dodge
     /// the check by leaving a trailing `\r` on every line.
     func testNoFileUnderUIImportsBannedAppleFrameworksEvenIfGuarded() throws {
-        let banned = ["AppKit", "SwiftUI", "CoreGraphics", "UniformTypeIdentifiers", "AVFoundation", "Compression"]
+        // Combine added by CUESYNC-7 §B.3: not Apple-exclusive in principle, but unavailable
+        // on the Windows Swift toolchain and explicitly called out as forbidden to carry
+        // over from App/AppState.swift's `import Combine` when re-hosting onto
+        // SwiftCrossUI.ObservableObject.
+        let banned = ["AppKit", "SwiftUI", "CoreGraphics", "UniformTypeIdentifiers", "AVFoundation", "Compression", "Combine"]
         let uiDir = Self.sourceRoot.appendingPathComponent("UI")
         guard let files = swiftFiles(under: uiDir), !files.isEmpty else {
             XCTFail("expected to find .swift files under UI/")
