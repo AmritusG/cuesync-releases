@@ -57,7 +57,7 @@ enum EngineDJFixtures {
         }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, trackId)
-        blob.withUnsafeBufferPointer { buf in
+        _ = blob.withUnsafeBufferPointer { buf in
             sqlite3_bind_blob(stmt, 2, buf.baseAddress, Int32(buf.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         }
         guard sqlite3_step(stmt) == SQLITE_DONE else { XCTFail("insertPerformanceBlob step failed"); return }
