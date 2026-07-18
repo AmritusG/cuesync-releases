@@ -595,6 +595,16 @@ final class PortComplianceTests: XCTestCase {
             "Hex.swift": [
                 "public enum Hex {",
             ],
+            "CurveType.swift": [
+                "public struct CurveType: Identifiable, Equatable, CustomStringConvertible, Sendable {",
+                "public let id: Int",
+                "public let name: String",
+                "public let category: String",
+                "public var description: String { name }",
+            ],
+            "AudioDuration.swift": [
+                "public enum AudioDuration {",
+            ],
         ]
         // Every allowlisted line above also carries its own `public static func`/`public
         // static var` sibling (e.g. `public static func parse(...)`) that this narrower

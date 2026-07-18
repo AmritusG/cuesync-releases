@@ -1,11 +1,21 @@
 import Foundation
 
-struct CurveType: Identifiable {
-    let id: Int
-    let name: String
-    let category: String
+// `public` (id/name/category/all/name(for:)/evaluate(_:t:)) so the CueSync (swift-cross-ui)
+// executable target can drive the envelope canvas and the cue table's Interpolation picker
+// via a plain `import CueSyncCore` (spec CUESYNC-7 §0.6/§G — the same cross-module-boundary
+// reason CuePoint/Track/etc. were widened). `Equatable`/`CustomStringConvertible` let
+// swift-cross-ui's `Picker(of:selection:)` (which displays each option via `"\(option)"`,
+// see UI/State/AppState.swift's `SortField`) drive the curve dropdown directly. `Sendable`
+// (all-value-type members, trivially safe) is required for the Swift 6 compiler to accept
+// `public static let all` as a concurrency-safe global.
+public struct CurveType: Identifiable, Equatable, CustomStringConvertible, Sendable {
+    public let id: Int
+    public let name: String
+    public let category: String
 
-    static let all: [CurveType] = [
+    public var description: String { name }
+
+    public static let all: [CurveType] = [
         CurveType(id: 1,  name: "Linear",             category: "Basic"),
         CurveType(id: 2,  name: "Quadratic In",       category: "Quadratic"),
         CurveType(id: 3,  name: "Quadratic Out",      category: "Quadratic"),
@@ -40,12 +50,12 @@ struct CurveType: Identifiable {
         }
     }
 
-    static func name(for id: Int) -> String {
+    public static func name(for id: Int) -> String {
         all.first(where: { $0.id == id })?.name ?? "Linear"
     }
 
     /// Evaluate the easing function at parameter t (0-1)
-    static func evaluate(_ curveId: Int, t: Double) -> Double {
+    public static func evaluate(_ curveId: Int, t: Double) -> Double {
         // Clamp to 0...1; a non-finite t (NaN/Inf) collapses to 0 so the result is always finite.
         let t = t.isFinite ? min(max(t, 0), 1) : 0
         switch curveId {

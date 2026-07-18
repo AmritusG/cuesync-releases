@@ -7,8 +7,10 @@ import AVFoundation
 /// (WAV, AIFF) so duration detection works on every platform. On Apple, other
 /// extensions (mp3, m4a, ...) still resolve via `AVAudioFile`; elsewhere they
 /// return `nil` and the UI falls back to the manual duration modal.
-enum AudioDuration {
-    static func duration(of url: URL) -> Double? {
+/// `public` (the enum + `duration(of:)`) so the CueSync (swift-cross-ui) executable target's
+/// Configure section can use this in place of `AVAudioFile` (spec CUESYNC-7 §G.17).
+public enum AudioDuration {
+    public static func duration(of url: URL) -> Double? {
         switch url.pathExtension.lowercased() {
         case "wav": return wavDuration(url: url)
         case "aiff", "aif": return aiffDuration(url: url)
