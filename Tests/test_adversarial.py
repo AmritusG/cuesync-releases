@@ -2103,6 +2103,246 @@ def test_every_default_file_name_call_site_in_ui_has_a_slugify_call_in_its_file(
 
 
 # ---------------------------------------------------------------------------
+# ATTACK 44 (SUPPLY CHAIN — the pin is only as strong as `git apply`'s strictness)
+# The entire "audited bytes == built bytes" guarantee (spec §4: "so 'the code we
+# audited' and 'the code we build' stay identical") rests on ONE property of the
+# apply mechanism: `git apply` is strict by default — exact context match, no
+# fuzz, no whitespace coercion. It refuses to apply a patch whose surrounding
+# context has drifted from the pinned commit. Weaken that — `--ignore-whitespace`
+# (a very plausible "fix" someone reaches for when CRLF/read-only churn on the
+# Windows legs makes an apply complain), `--whitespace=fix`, `-C<n>` fuzz,
+# `--unidiff-zero`, `--3way`, or `--reject` (which applies what it can and drops
+# the rest into .rej, shipping a HALF-patched dependency while the step's exit
+# code can still read success) — and the patch would silently apply to code that
+# no longer matches the audited v0.8.0 bytes, defeating the pin §4 leans on. The
+# forward apply must stay bare on every leg AND in the dev applier. NOTHING pins
+# this today: ATTACK 22 proves the patch applies to the CURRENT pinned checkout,
+# ATTACK 32 proves a *failed* apply is loud — neither notices a lenient flag that
+# makes a *drifted* apply succeed. Currently PASSES (all invocations are bare) —
+# a durable lock: adding any leniency flag turns it red.
+# ---------------------------------------------------------------------------
+
+
+def _all_forward_git_apply_lines():
+    """(where, command_line) for every `git apply` invocation across the three
+    gesture-patch step bodies and the dev applier, comment-stripped so only real
+    commands count. Includes the `--reverse --check` guard lines too — the
+    strictness assertion below must hold for THOSE as well (a fuzzed reverse
+    check would wrongly report 'already applied' and skip a needed apply)."""
+    out = []
+    for job, body in _gesture_bodies().items():
+        for ln in body.splitlines():
+            code = ln.split("#", 1)[0]
+            if "git apply" in code:
+                out.append(("workflow:" + job, code.strip()))
+    if DEV_PATCH_SCRIPT.is_file():
+        for ln in _dev_script_code_or_skip().splitlines():
+            if "git apply" in ln:
+                out.append(("scripts/patch-swift-cross-ui.sh", ln.strip()))
+    return out
+
+
+def test_every_git_apply_of_the_gesture_patch_is_strict_not_fuzzy_or_whitespace_lenient():
+    invocations = _all_forward_git_apply_lines()
+    if not invocations:
+        raise unittest.SkipTest("no `git apply` invocation found to inspect")
+    # Named leniency/partial-apply flags that break the strict-context guarantee.
+    banned_substrings = [
+        "--ignore-whitespace",
+        "--whitespace",  # any value: =fix mutates, =nowarn/=error still signal intent to coerce
+        "--unidiff-zero",
+        "--3way",
+        "--reject",
+        "--inaccurate-eof",
+    ]
+    # `-C<n>` reduces the required context-line count (fuzz); match it without
+    # tripping on the legitimate `--check` (no bare `-C<digit>` there).
+    fuzz_re = re.compile(r"(?:^|\s)-C\d")
+    for where, cmd in invocations:
+        tail = cmd[cmd.index("git apply") + len("git apply") :]
+        for flag in banned_substrings:
+            assert flag not in tail, (
+                "spec §4 (audited==built): the `git apply` in %s carries `%s`, a "
+                "leniency/partial-apply flag. `git apply` is strict by default; that "
+                "strictness is the ONLY thing forcing the patch to match the audited "
+                "v0.8.0 bytes exactly. With `%s` a patch applies to DRIFTED context "
+                "(a bumped pin, a tampered checkout) — silently defeating the pin. "
+                "Invocation: %r" % (where, flag, flag, cmd)
+            )
+        assert not fuzz_re.search(tail), (
+            "spec §4: the `git apply` in %s carries a `-C<n>` fuzz flag that relaxes "
+            "context matching, letting the patch land on code that has drifted from "
+            "the audited commit. Keep the apply strict (bare). Invocation: %r"
+            % (where, cmd)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 45 (PLACEMENT — the one ordering constraint ATTACK 33 does NOT cover)
+# spec §3 requires the gesture patch be "placed after `swift package resolve` /
+# the swift-java symlink repair and before `swift build` / `swift test`." ATTACK
+# 33 pins after-resolve/before-build, but is SILENT on the symlink-repair half.
+# The repair (CUESYNC-6e) re-materializes every git symlink in the resolved
+# dependency checkouts as NTFS junctions/hardlinks — on Windows the checkouts are
+# not usable until it runs. A gesture-patch step ordered BEFORE it would `cd`
+# into a swift-cross-ui tree whose symlinked layers are still broken reparse
+# points, and the repair's own index-driven re-materialization could later
+# clobber or race the just-applied hunk. This pins repair-before-gesture on both
+# Windows legs (macOS has no repair step — ATTACK 30 asserts its absence — so it
+# is excluded here). Currently PASSES; a reorder turns it red.
+# ---------------------------------------------------------------------------
+
+
+def test_gesture_patch_runs_after_the_swift_java_symlink_repair_on_windows_legs():
+    for job in ("windows-build", "windows-test"):
+        assert job in JOBS, "missing job " + job
+        start, end = JOBS[job]
+        repair_idx = None
+        gesture_idx = None
+        for k in range(start, end):
+            m = STEP_NAME_RE.match(LINES[k])
+            if not m:
+                continue
+            name = m.group(1)
+            if name.startswith(REPAIR_STEP_NAME):
+                repair_idx = k  # last one wins if ever duplicated
+            if GESTURE_STEP_NAME in name:
+                gesture_idx = k
+        assert repair_idx is not None, (
+            job + ": the `%s` step is missing — spec §3 requires the gesture patch "
+            "to run AFTER it, so its absence breaks the ordering premise entirely"
+            % REPAIR_STEP_NAME
+        )
+        assert gesture_idx is not None, job + ": no gesture-patch step to order"
+        assert repair_idx < gesture_idx, (
+            job + ": the gesture-patch step (line %d) runs BEFORE the swift-java "
+            "symlink repair (line %d). spec §3: the patch must be placed after the "
+            "repair — a swift-cross-ui checkout whose symlinked layers are still "
+            "broken reparse points cannot be `cd`'d into and patched, and a repair "
+            "run afterward can clobber the applied hunk" % (gesture_idx, repair_idx)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 46 (SUPPLY CHAIN — the dev applier's OWN idempotency, untested until now)
+# spec §3: the dev script must be idempotent "so the build agent can iterate
+# without GitHub CI." ATTACK 23 proves the PATCH is reverse-appliable (a property
+# of the diff); ATTACK 34 proves the three WORKFLOW steps carry the
+# `git apply --reverse --check` guard. NOTHING asserts scripts/patch-swift-cross-ui.sh
+# — the third applier, the one the dev / ci-local loop actually runs every
+# iteration — guards its forward apply the same way. Strip the guard and the
+# script degrades to a bare `git apply`: the FIRST run works, the SECOND
+# (inevitable in an edit-build-edit loop against a persisted `.build/checkouts`)
+# dies with "patch does not apply", exactly the non-idempotent break the guard
+# exists to prevent, on the one applier no test watches.
+# ---------------------------------------------------------------------------
+
+
+def test_dev_patch_script_guards_its_forward_apply_for_idempotency():
+    code = _dev_script_code_or_skip()
+    lines = code.splitlines()
+    reverse_idx = next(
+        (i for i, ln in enumerate(lines) if "git apply --reverse --check" in ln),
+        None,
+    )
+    forward_idx = next(
+        (
+            i
+            for i, ln in enumerate(lines)
+            if "git apply" in ln and "--reverse" not in ln
+        ),
+        None,
+    )
+    assert reverse_idx is not None, (
+        "spec §3 idempotency: scripts/patch-swift-cross-ui.sh must guard its apply "
+        "with `git apply --reverse --check` so a re-run against an already-patched "
+        "checkout is a no-op. The guard is absent — a second dev-loop iteration would "
+        "hit `patch does not apply` and break local iteration."
+    )
+    assert forward_idx is not None, (
+        "scripts/patch-swift-cross-ui.sh performs no forward `git apply` at all — it "
+        "cannot apply the fix locally (spec §3)"
+    )
+    assert reverse_idx < forward_idx, (
+        "spec §3: the `git apply --reverse --check` idempotency guard (line ~%d of the "
+        "code-only view) must run BEFORE the forward `git apply` (line ~%d). A guard "
+        "placed after the apply cannot stop the second forward apply from failing on "
+        "an already-patched tree." % (reverse_idx, forward_idx)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 47 (FIX BLAST RADIUS — the load-bearing assumption the fix bets the whole
+# app on). The patch makes EVERY `Shape`-backed widget (every widget
+# `createPathWidget()` returns) `can-target = false`. That is safe for exactly one
+# reason, asserted in findings §2.3: "none [of the app's `.onTapGesture`/`.onHover`
+# call sites] is ever attached directly to a `Shape` — they land on
+# `HStack`/`VStack`/`Text` rows only." If ANY control under UI/ is (re)written to
+# hang its gesture directly on a `Shape` — `Circle().onTapGesture { … }`,
+# `Rectangle().fill(…).onHover { … }` — the fix silently makes THAT control
+# dead-on-click on GTK: the exact "renders but doesn't respond" bug CUESYNC-8
+# exists to kill, reintroduced by the fix's own blast radius, invisibly (it still
+# renders; it just stops receiving events). ATTACK 27 guards the PATCH text
+# against touching interactive factories; nothing guards the APP against depending
+# on a decorative factory being interactive. Coarse per-construct proxy (same
+# discipline as ATTACK 43): it scans each `Shape` constructor's fluent modifier
+# chain for a gesture. Currently PASSES (no Shape owns a gesture); a future
+# Shape-as-control turns it red before the dead UI ever ships.
+# ---------------------------------------------------------------------------
+
+
+def test_no_decorative_shape_under_ui_is_wired_as_a_tap_or_hover_target():
+    ui_dir = REPO_ROOT / "CueSync" / "CueSync" / "UI"
+    if not ui_dir.is_dir():
+        raise unittest.SkipTest("CrossUI UI/ directory not found")
+    shape_ctor = re.compile(r"\b(RoundedRectangle|Rectangle|Circle|Capsule|Ellipse)\s*\(")
+    gesture_re = re.compile(r"\.(onTapGesture|onHover|gesture)\b")
+    offenders = []
+    scanned_shapes = 0
+    for path in sorted(ui_dir.rglob("*.swift")):
+        raw = path.read_text(encoding="utf-8").splitlines()
+        # Strip `//` line comments so a comment mentioning `.onTapGesture` near a
+        # decorative Shape can't produce a false hit.
+        code = [ln[: ln.index("//")] if "//" in ln else ln for ln in raw]
+        for i, ln in enumerate(code):
+            if not shape_ctor.search(ln):
+                continue
+            scanned_shapes += 1
+            # Collect the Shape's fluent chain: this line plus every following
+            # line whose first non-space char is `.` (a chained modifier). In
+            # Swift's fluent style those are exactly this Shape's own modifiers;
+            # the chain ends at the first non-`.`-leading line (`}`, a sibling
+            # view, a new statement), so a gesture on a LATER sibling view — or on
+            # the outer container an `.overlay { Shape }` belongs to — is not
+            # misattributed to the Shape.
+            chain = [ln]
+            j = i + 1
+            while j < len(code) and code[j].lstrip().startswith("."):
+                chain.append(code[j])
+                j += 1
+            blob = "\n".join(chain)
+            if gesture_re.search(blob):
+                offenders.append(
+                    "%s:%d\n%s" % (path.relative_to(REPO_ROOT).as_posix(), i + 1, blob)
+                )
+    assert scanned_shapes > 0, (
+        "expected at least one Shape (RoundedRectangle/Rectangle/…) under UI/ — if the "
+        "decorative-Shape idiom changed shape, re-verify the fix's `can-target=false` "
+        "blast radius before trusting this scan"
+    )
+    assert not offenders, (
+        "findings §2.3 / spec §3: the gesture patch sets `can-target = false` on EVERY "
+        "Shape-backed widget, which is only safe because no Shape is ever a tap/hover "
+        "target. The following Shape(s) under UI/ have a gesture in their own modifier "
+        "chain — the fix makes them dead-on-click on GTK, silently reintroducing the "
+        "'renders but does not respond' bug this ticket fixes. Move the gesture onto a "
+        "container/Text row (never a Shape), or retarget with a written §2.3 "
+        "justification per repo rule §E.24 — never delete-to-green:\n\n%s"
+        % "\n\n".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
 
