@@ -416,36 +416,53 @@ final class PortComplianceTests: XCTestCase {
                       "UI/CueSyncApp.swift must set the minimum size to 1200x700 (spec §B.10)")
     }
 
-    /// spec §1/§B: this ticket is step 1 of an incremental re-host — "No CUE SYNC screen is
-    /// ported in this ticket ... the menu commands are later tickets." A `.commands` scene
-    /// modifier (the swift-cross-ui/SwiftUI equivalent of `App/CueSyncApp.swift`'s
-    /// `CommandGroup`/`CommandMenu` block) would be exactly that kind of premature port.
-    func testUICueSyncAppDeclaresNoMenuCommandsYet() throws {
+    /// spec CUESYNC-7 §K: the CUESYNC-6-era guard this replaces asserted `.commands` must
+    /// NOT appear in `UI/CueSyncApp.swift` — true for CUESYNC-6 (step 1 of the incremental
+    /// re-host), false for CUESYNC-7, whose §K explicitly adds menu commands
+    /// (New/Undo/Redo). Retired in favor of a positive check, the same way §0.6 retired
+    /// `testNoPublicDeclarationExistsInCueSyncCoreScopedSources` once its ticket landed —
+    /// so a *regression* back to no menu commands still fails the build instead of the test
+    /// simply going stale. Also asserts `.keyboardShortcut` is absent: no such API exists in
+    /// the pinned swift-cross-ui checkout (verified empirically re-hosting §K), so any
+    /// future accidental use of it would be a compile error CI already catches — this test
+    /// documents *why* no shortcut binding is expected instead.
+    func testUICueSyncAppWiresAppStateAndDeclaresMenuCommands() throws {
         let url = Self.sourceRoot.appendingPathComponent("UI/CueSyncApp.swift")
         let src = try String(contentsOf: url, encoding: .utf8)
-        for forbidden in [".commands", "CommandGroup", "CommandMenu"] {
-            XCTAssertFalse(src.contains(forbidden),
-                           "UI/CueSyncApp.swift must not declare menu commands yet (\(forbidden) found) — spec §1/§B")
+        XCTAssertTrue(src.contains("AppState()"),
+                      "UI/CueSyncApp.swift must construct the re-hosted AppState (spec §K)")
+        XCTAssertTrue(src.contains(".environment(state)"),
+                      "UI/CueSyncApp.swift must inject AppState via .environment (spec §K)")
+        XCTAssertTrue(src.contains("loadPreferences()"),
+                      "UI/CueSyncApp.swift must call loadPreferences() at launch (spec §K)")
+        for required in [".commands", "CommandMenu"] {
+            XCTAssertTrue(src.contains(required),
+                          "UI/CueSyncApp.swift must declare menu commands (\(required) missing) — spec §K")
         }
+        XCTAssertFalse(src.contains(".keyboardShortcut"),
+                       "UI/CueSyncApp.swift must not call .keyboardShortcut — no such API exists at the pinned swift-cross-ui revision")
     }
 
-    /// spec §3 Source: "No screen, section, collapsible wrapper, grid overlay, menu
-    /// command, or envelope code ported. ContentView is empty by design." Scans for every
-    /// concrete section/screen type name that exists in the SwiftUI presentation
-    /// (`Views/Sections/*.swift`, `Views/CollapsibleSection.swift`, etc.) to catch a
-    /// premature port of any of them into the swift-cross-ui shell.
-    func testUIContentViewPortsNoScreenSectionOrChrome() throws {
-        let forbidden = [
+    /// spec CUESYNC-7 §D.9: the CUESYNC-6-era guard this replaces asserted `UI/ContentView.swift`
+    /// must NOT reference any section/chrome type — true while ContentView was still the
+    /// step-1 placeholder, false once §D.9 assembles the real
+    /// `HeaderView -> ScrollView { sections } -> FooterView` tree. Retired in favor of a
+    /// positive check for the same reason as the sibling menu-commands test above: a
+    /// *regression* back to the placeholder must still fail the build, not silently pass
+    /// because the old "must not reference" assertions no longer apply to a finished screen.
+    func testUIContentViewWiresAllFourSectionsHeaderAndFooter() throws {
+        let required = [
             "ProjectSectionView", "BrowseSectionView", "ConfigureSectionView", "ExportSectionView",
-            "CollapsibleSection", "EnvelopeCanvasView", "CuePointsTableView", "DurationInputView",
-            "DurationInputModal", "StepperField", "HeaderView", "FooterView", "HoverButton", "BrandIcons",
+            "CollapsibleSection", "HeaderView", "FooterView",
         ]
         let url = Self.sourceRoot.appendingPathComponent("UI/ContentView.swift")
         let src = try String(contentsOf: url, encoding: .utf8)
-        for name in forbidden {
-            XCTAssertFalse(src.contains(name),
-                           "UI/ContentView.swift must not reference \(name) yet — this ticket's ContentView is empty by design (spec §B.11)")
+        for name in required {
+            XCTAssertTrue(src.contains(name),
+                          "UI/ContentView.swift must reference \(name) (spec §D.9)")
         }
+        XCTAssertFalse(src.contains(#"Text("CUE SYNC")"#),
+                       "UI/ContentView.swift must no longer be the bare CUESYNC-5/6 placeholder body (spec §D.9)")
     }
 
     /// spec CUESYNC-6 §B.10/§E.22: `UI/CueSyncApp.swift` must import GtkBackend and must
@@ -467,22 +484,24 @@ final class PortComplianceTests: XCTestCase {
                        "UI/CueSyncApp.swift must no longer import DefaultBackend (spec CUESYNC-6 §B.10)")
     }
 
-    /// spec CUESYNC-6 §B.11/§E.23: `UI/ContentView.swift` is explicitly left byte-for-byte
-    /// alone by this ticket — it still declares the empty placeholder `View` and imports no
-    /// backend module (only `SwiftCrossUI`, which is backend-agnostic).
-    func testUIContentViewUnmodifiedAndImportsNoBackendModule() throws {
+    /// spec CUESYNC-7 §D.9: `UI/ContentView.swift` now declares the real section tree (see
+    /// `testUIContentViewWiresAllFourSectionsHeaderAndFooter` above), but must still import
+    /// no backend module directly — only `SwiftCrossUI`, which is backend-agnostic; the
+    /// backend choice stays isolated to `UI/CueSyncApp.swift`'s `typealias Backend`. This
+    /// portion of the CUESYNC-6 `testUIContentViewUnmodifiedAndImportsNoBackendModule` guard
+    /// still holds after §D.9, so it's kept rather than retired — only the
+    /// "still the placeholder" half of that test (now false) was replaced.
+    func testUIContentViewImportsNoBackendModule() throws {
         let url = Self.sourceRoot.appendingPathComponent("UI/ContentView.swift")
         let src = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(src.contains("struct ContentView: View"),
-                      "UI/ContentView.swift must still declare struct ContentView: View (spec CUESYNC-6 §B.11)")
-        XCTAssertTrue(src.contains(#"Text("CUE SYNC")"#),
-                      "UI/ContentView.swift must still hold only the placeholder body (spec CUESYNC-6 §B.11)")
+                      "UI/ContentView.swift must declare struct ContentView: View")
         let lines = src.replacingOccurrences(of: "\r\n", with: "\n")
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
         for backend in ["GtkBackend", "DefaultBackend", "WinUIBackend", "AppKitBackend", "Gtk3Backend"] {
             XCTAssertFalse(lines.contains("import \(backend)"),
-                           "UI/ContentView.swift must import no backend module, found import \(backend) (spec CUESYNC-6 §B.11)")
+                           "UI/ContentView.swift must import no backend module, found import \(backend)")
         }
     }
 
