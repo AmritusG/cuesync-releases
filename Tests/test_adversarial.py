@@ -25,7 +25,14 @@
 # test — never weaken it.
 # =============================================================================
 
+import atexit
+import base64
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import unittest
 from pathlib import Path
 
 
@@ -456,6 +463,501 @@ def test_enumeration_is_generic_not_a_hardcoded_plugin_list():
         )
 
 
+# =============================================================================
+# Red-Team adversarial suite — CUESYNC-7
+#
+# Ticket CUESYNC-7 adds `CueSync/CueSync/Support/TextTools.swift`: a shared,
+# dependency-free helper with `slugify()` (turn untrusted text — preset names,
+# parsed track titles from Rekordbox/Serato/Engine DJ/ShowKontrol/Resolume — into
+# a safe, single, traversal-free filename *component*) and `generateToken()`
+# (mint an unguessable, collision-resistant id from a CSPRNG). Spec §4 names the
+# exact trust boundary: every string reaching `slugify()` may originate from an
+# untrusted external file, and when it becomes an export filename an unsanitised
+# value enables `../` traversal, absolute-path escape, NUL truncation, and — on
+# the newly-supported Windows targets — reserved-device-name collisions.
+#
+# These tests attack the *real, shipped Swift implementation*. They compile the
+# actual `TextTools.swift` (not a Python re-implementation) once, with a tiny
+# stdin→stdout CLI driver, and push adversarial inputs through the compiled
+# `TextTools.slugify` / `TextTools.generateToken`. Inputs and slug outputs are
+# base64-framed so NUL bytes, control characters, and arbitrary Unicode survive
+# the shell/pipe round-trip intact.
+#
+# Two kinds of test live here, matching the convention of the CUESYNC-6e block
+# above:
+#   * LIVE FINDING (currently FAILS) — reproduces an un-mitigated defect in the
+#     shipped code. A future fix turns it green.
+#   * REGRESSION LOCK (currently PASSES) — pins an acceptance criterion / threat-
+#     model invariant against the actual binary so a later edit that reintroduces
+#     the weakness turns it red.
+#
+# If no Swift toolchain is present the Swift-execution tests skip (they never
+# error), so the pure-stdlib CUESYNC-6e block above still runs on any bare
+# `python3`. On the ticket's own CI (macos-latest / windows-latest, where
+# `swift` is installed) they run and bite.
+# =============================================================================
+
+
+def _find_text_tools():
+    """Locate the Swift source under test by walking up from this file."""
+    here = Path(__file__).resolve()
+    for base in [here.parent] + list(here.parents):
+        candidate = base / "CueSync" / "CueSync" / "Support" / "TextTools.swift"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+TEXTTOOLS_SRC = _find_text_tools()
+
+RESERVED_DEVICE_NAMES = (
+    ["con", "prn", "aux", "nul"]
+    + ["com%d" % n for n in range(1, 10)]
+    + ["lpt%d" % n for n in range(1, 10)]
+)
+RESERVED_SET = set(RESERVED_DEVICE_NAMES)
+
+# Batched CLI driver, compiled against the real TextTools.swift. Reads one
+# command per line and prints one result line each:
+#   slugify <maxLen> <b64fallback> <b64input>  -> prints base64(slug)
+#   token   <length>                           -> prints the raw hex token
+# It must live in a file literally named main.swift for top-level statements.
+_HARNESS_MAIN = r'''
+import Foundation
+
+func b64dec(_ s: String) -> String {
+    guard let d = Data(base64Encoded: s) else { return "" }
+    return String(decoding: d, as: UTF8.self)
+}
+func b64enc(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    switch f[0] {
+    case "slugify":
+        let maxLen = Int(f[1]) ?? 80
+        let fb = b64dec(f[2])
+        let input = b64dec(f[3])
+        print(b64enc(TextTools.slugify(input, maxLength: maxLen, fallback: fb)))
+    case "token":
+        print(TextTools.generateToken(length: Int(f[1]) ?? 32))
+    default:
+        print("ERR")
+    }
+}
+'''
+
+# Lazily-built, process-cached compilation of the harness.
+_HARNESS = {"built": False, "bin": None, "err": None}
+
+
+def _harness_binary():
+    """Compile the real TextTools.swift + driver once; return the binary path.
+
+    Raises unittest.SkipTest (never a hard error) when no usable Swift toolchain
+    or source is available, so the pure-Python suite is unaffected.
+    """
+    st = _HARNESS
+    if st["built"]:
+        if st["bin"] is None:
+            raise unittest.SkipTest(st["err"])
+        return st["bin"]
+    st["built"] = True
+    if TEXTTOOLS_SRC is None:
+        st["err"] = "TextTools.swift not found — cannot exercise the real module"
+        raise unittest.SkipTest(st["err"])
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        st["err"] = "swiftc not on PATH — skipping Swift-execution red-team tests"
+        raise unittest.SkipTest(st["err"])
+    workdir = tempfile.mkdtemp(prefix="cuesync7_redteam_")
+    atexit.register(shutil.rmtree, workdir, True)
+    main_swift = os.path.join(workdir, "main.swift")
+    with open(main_swift, "w", encoding="utf-8") as fh:
+        fh.write(_HARNESS_MAIN)
+    binpath = os.path.join(workdir, "harness")
+    proc = subprocess.run(
+        [swiftc, str(TEXTTOOLS_SRC), main_swift, "-o", binpath],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not os.path.exists(binpath):
+        st["err"] = "harness build failed:\n" + proc.stderr
+        raise unittest.SkipTest(st["err"])
+    st["bin"] = binpath
+    return binpath
+
+
+def _run_batch(commands):
+    """Feed driver commands via stdin; return exactly one output line each."""
+    binpath = _harness_binary()
+    proc = subprocess.run(
+        [binpath],
+        input="\n".join(commands) + "\n",
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, "harness runtime error:\n" + proc.stderr
+    lines = proc.stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]  # drop only the trailing-newline artifact
+    assert len(lines) == len(commands), (
+        "harness returned %d lines for %d commands (framing broke)"
+        % (len(lines), len(commands))
+    )
+    return lines
+
+
+def _b64(s):
+    return base64.b64encode(s.encode("utf-8")).decode("ascii")
+
+
+def _slugify_many(items):
+    """items: iterable of (input, maxLength, fallback) -> list of slug strings."""
+    cmds = [
+        "slugify %d %s %s" % (max_len, _b64(fallback), _b64(inp))
+        for (inp, max_len, fallback) in items
+    ]
+    return [base64.b64decode(o).decode("utf-8") for o in _run_batch(cmds)]
+
+
+def _slugify(inp, max_length=80, fallback="untitled"):
+    return _slugify_many([(inp, max_length, fallback)])[0]
+
+
+def _token_batch(lengths):
+    return _run_batch(["token %d" % n for n in lengths])
+
+
+_ALPHANUM_HYPHEN = re.compile(r"[a-z0-9-]+")
+
+
+def _assert_safe_component(inp, slug):
+    """Every guarantee slugify() promises about a single output, in one place."""
+    assert "/" not in slug, "slug %r for %r contains '/'" % (slug, inp)
+    assert "\\" not in slug, "slug %r for %r contains backslash" % (slug, inp)
+    assert ".." not in slug, "slug %r for %r contains '..'" % (slug, inp)
+    assert slug not in (".", ".."), "slug for %r is '.'/'..'" % (inp,)
+    assert slug != "", "slug for %r is empty (fallback must apply)" % (inp,)
+    assert "\x00" not in slug, "slug for %r contains a NUL" % (inp,)
+    assert _ALPHANUM_HYPHEN.fullmatch(slug), (
+        "slug %r for %r has characters outside [a-z0-9-]" % (slug, inp)
+    )
+    assert not slug.startswith("-") and not slug.endswith("-"), (
+        "slug %r for %r has a leading/trailing '-'" % (slug, inp)
+    )
+    assert "--" not in slug, "slug %r for %r has an uncollapsed '--'" % (slug, inp)
+    for ch in slug:
+        assert ord(ch) >= 0x20, "control char survived in slug %r" % (slug,)
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 11 (LIVE FINDING — expected to FAIL until hardened)
+#
+# Reserved-device-name escape is defeated by truncation ordering. slugify()
+# checks the reserved-name set BEFORE it truncates to maxLength
+# (TextTools.swift: `escaped = reservedDeviceNames.contains(rawSlug) ? ...`
+# then `truncatedOnSeparatorBoundary(escaped, ...)`). So a title of the form
+# "<reserved> <long-unbroken-run>" is first seen as a NON-reserved compound
+# ("con-aaaa…") and left un-escaped, then truncated on the sole separator back
+# down to the *bare reserved token* ("con").
+#
+# This lands at the DEFAULT maxLength=80 — no unusual caller argument needed:
+#   slugify("con " + "a"*100) == "con"
+# and reaches every one of the 22 reserved names, plus any small caller-chosen
+# maxLength (slugify("connection", maxLength: 3) == "con").
+#
+# spec §2 step 2 ("prefix … so it is never emitted verbatim"), the doc comment
+# on slugify() ("never a bare Windows reserved device name"), and §3 acceptance
+# ("return a value that is not equal (case-insensitively) to a reserved device
+# name") are all violated: CueSync writes an export file literally named `con`
+# on Windows, which collides with the console device. Fix: escape/veto the
+# reserved set AFTER truncation, not before.
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_truncation_never_reemits_reserved_device_name():
+    default_ml = [(r + " " + "a" * 100, 80, "untitled") for r in RESERVED_DEVICE_NAMES]
+    small_ml = [
+        ("connection", 3, "untitled"),   # -> "con"
+        ("auxiliary", 3, "untitled"),    # -> "aux"
+        ("nullify", 3, "untitled"),      # -> "nul"
+        ("printer", 3, "untitled"),      # -> "prn"
+        ("com1port", 4, "untitled"),     # -> "com1"
+        ("lpt9device", 4, "untitled"),   # -> "lpt9"
+    ]
+    items = default_ml + small_ml
+    slugs = _slugify_many(items)
+    leaks = [
+        (inp, ml, slug)
+        for (inp, ml, _fb), slug in zip(items, slugs)
+        if slug.lower() in RESERVED_SET
+    ]
+    assert not leaks, (
+        "spec §2/§3: slugify() escapes Windows reserved device names BEFORE it "
+        "truncates, so truncation re-creates a bare reserved name that is then "
+        "emitted verbatim. These inputs each produced a reserved device name "
+        "(a real Windows filename collision):\n"
+        + "\n".join(
+            "  slugify(%r, maxLength=%d) -> %r" % (inp, ml, slug)
+            for inp, ml, slug in leaks
+        )
+        + "\nFix: apply the reserved-name escape AFTER truncation."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 12 (LIVE FINDING — expected to FAIL until hardened)
+#
+# The same ordering bug breaks the idempotency guarantee (spec §2 "Be a pure
+# function: deterministic and idempotent" / §3 "slugify(slugify(x)) ==
+# slugify(x)"). Because slugify("con " + "a"*100) == "con" but slugify("con")
+# == "_con", feeding a slug back through slugify() changes it — the function is
+# not idempotent for any input whose truncation lands on a reserved name.
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_is_idempotent_even_when_truncation_meets_reserved_name():
+    inputs = [r + " " + "a" * 100 for r in RESERVED_DEVICE_NAMES]
+    once = _slugify_many([(inp, 80, "untitled") for inp in inputs])
+    twice = _slugify_many([(s, 80, "untitled") for s in once])
+    broken = [
+        (inp, a, b) for inp, a, b in zip(inputs, once, twice) if a != b
+    ]
+    assert not broken, (
+        "spec §2/§3 idempotency: slugify(slugify(x)) must equal slugify(x). "
+        "The truncation-vs-reserved-name ordering bug breaks it — slugify(x) "
+        "emits a bare reserved name, and a second pass escapes it:\n"
+        + "\n".join(
+            "  slugify(%r)=%r  but  slugify(%r)=%r" % (inp, a, a, b)
+            for inp, a, b in broken
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 13 (REGRESSION LOCK — PASSES today) — the core sanitiser property.
+# Push a broad path-traversal / absolute-path / UNC / NUL / CRLF battery through
+# the real slugify() and demand each output is a single traversal-free component
+# drawn only from [a-z0-9-]. spec §3 ("Path traversal is impossible") + §4
+# ("emits a single path component and never a path").
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_output_is_always_a_single_traversal_free_component():
+    hostile = [
+        "../../etc/passwd",
+        "..\\..\\win.ini",
+        "a/b\\c",
+        "/etc/passwd",
+        "C:\\Windows\\System32\\cmd.exe",
+        "\\\\server\\share\\payload",       # UNC path
+        "....//....//x",                    # doubled-dot traversal variant
+        "./../.",
+        "file:///etc/passwd",
+        "%2e%2e/passwd",                    # percent-encoded dots (must stay literal)
+        "..%00/..",                         # encoded-NUL traversal
+        "..⁄..⁄x",                # U+2044 FRACTION SLASH homoglyph
+        "．．/passwd",              # fullwidth dots
+        "con/../../nul",                    # reserved tokens joined by traversal
+        "a\x00b",                           # embedded real NUL
+        "safe\x00/../../etc/passwd",        # NUL-truncation attempt
+        "\r\n../etc",                       # CRLF prefix
+    ]
+    slugs = _slugify_many([(h, 80, "untitled") for h in hostile])
+    for inp, slug in zip(hostile, slugs):
+        _assert_safe_component(inp, slug)
+        assert len(slug) <= 80
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 14 (REGRESSION LOCK) — NUL and control characters are dropped, and an
+# embedded NUL never truncates the string (the classic poison-NUL bypass).
+# spec §2/§3 ("NUL and control characters are dropped").
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_strips_nul_and_control_characters_including_embedded_nul():
+    cases = {
+        "a\x00b\tc": "a-b-c",
+        "safe\x00/../../etc/passwd": "safe-etc-passwd",  # tail survives, sanitised
+        "\x00\x00\x00": "untitled",
+        "a\x01b\x1fc": "a-b-c",
+    }
+    slugs = _slugify_many([(inp, 80, "untitled") for inp in cases])
+    for (inp, expected), slug in zip(cases.items(), slugs):
+        assert "\x00" not in slug, "NUL survived for %r -> %r" % (inp, slug)
+        for ch in slug:
+            assert ord(ch) >= 0x20, "control char survived for %r -> %r" % (inp, slug)
+        assert slug == expected, "slugify(%r) = %r, expected %r" % (inp, slug, expected)
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 15 (REGRESSION LOCK) — the spec §3 reserved-name examples that DO work
+# today (default maxLength) stay escaped. Guards the working escape path from a
+# regression that drops it entirely.
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_reserved_name_spec_examples_are_escaped():
+    examples = ["CON", "con", "COM1", "LPT9", "NUL.txt"]
+    slugs = _slugify_many([(inp, 80, "untitled") for inp in examples])
+    for inp, slug in zip(examples, slugs):
+        assert slug.lower() not in RESERVED_SET, (
+            "spec §3: slugify(%r) = %r equals a reserved device name" % (inp, slug)
+        )
+    # Full case matrix, non-truncating: every reserved name escapes to "_name".
+    matrix = [(n.upper(), 80, "untitled") for n in RESERVED_DEVICE_NAMES]
+    for name, slug in zip(RESERVED_DEVICE_NAMES, _slugify_many(matrix)):
+        assert slug == "_" + name, (
+            "reserved %r must escape to %r, got %r" % (name, "_" + name, slug)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 16 (REGRESSION LOCK) — determinism (spec §2/§3). The same input always
+# yields the same output; no hidden state / time dependence in slugify().
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_is_deterministic_across_repeated_calls():
+    inputs = [
+        "Hello World", "../../etc/passwd", "CON", "café日本語",
+        "  a---b  ", "\U0001f3a7\U0001f39b️", "", "com1 " + "a" * 90,
+    ]
+    first = _slugify_many([(s, 80, "untitled") for s in inputs])
+    second = _slugify_many([(s, 80, "untitled") for s in inputs])
+    assert first == second, (
+        "slugify must be deterministic; got divergent runs:\n%r\n%r"
+        % (first, second)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 17 (REGRESSION LOCK) — degenerate input yields the non-empty fallback,
+# and the shipped default fallback is itself a safe single component (spec §2/§3
+# "return fallback … which is itself a valid, non-empty slug").
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_default_fallback_is_itself_a_safe_single_component():
+    degenerate = [
+        "", "   ", "///", "/// ...", "..", "\x00\x00\x00",
+        "\U0001f3a7\U0001f39b️", "日本語", "\t\r\n",
+    ]
+    slugs = _slugify_many([(s, 80, "untitled") for s in degenerate])
+    for inp, slug in zip(degenerate, slugs):
+        assert slug == "untitled", "slugify(%r) = %r, expected fallback" % (inp, slug)
+    _assert_safe_component("<default-fallback>", "untitled")
+    assert "untitled" not in RESERVED_SET
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 18 (REGRESSION LOCK) — generateToken() length contract, including the
+# zero/negative/odd edges (spec §3). length<=0 -> ""; odd length emits exactly
+# that many hex chars.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_token_length_contract_including_zero_negative_and_odd():
+    lengths = [0, -1, -5, 1, 2, 3, 5, 7, 15, 16, 31, 32, 33, 64, 255]
+    tokens = _token_batch(lengths)
+    for n, tok in zip(lengths, tokens):
+        expected = n if n > 0 else 0
+        assert len(tok) == expected, (
+            "generateToken(length=%d) returned %d chars: %r" % (n, len(tok), tok)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 19 (REGRESSION LOCK) — every emitted character is lowercase hex; no
+# modulo bias leaves a symbol unreachable (spec §3 "Every character is in
+# [0-9a-f]" + "all 16 hex symbols appear").
+# ---------------------------------------------------------------------------
+
+
+def test_generate_token_alphabet_is_lowercase_hex_and_fully_reachable():
+    # 500 x 64-char tokens = 32000 symbols; a fully-reachable uniform alphabet
+    # makes a missing symbol astronomically unlikely, but a modulo-bias or
+    # restricted-alphabet regression would leave gaps.
+    tokens = _token_batch([64] * 500)
+    seen = set("".join(tokens))
+    assert seen <= set("0123456789abcdef"), (
+        "token emitted characters outside [0-9a-f]: %r" % (seen - set("0123456789abcdef"))
+    )
+    assert seen == set("0123456789abcdef"), (
+        "not every hex symbol is reachable (possible modulo bias / restricted "
+        "alphabet); missing: %r" % (set("0123456789abcdef") - seen)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 20 (REGRESSION LOCK — the security core of generateToken).
+# Tokens must be CSPRNG-derived, NOT time/counter/PID derived (spec §3/§4 — this
+# is the anti-pattern the token replaces: `Int(Date().timeIntervalSince1970 *
+# 1000)`). A Date/counter regression shows up as monotonic values, a long shared
+# prefix, or duplicates. Run the real binary and demand none of those.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_token_is_not_time_or_counter_derived():
+    tokens = _token_batch([32] * 256)
+    # Not monotonically increasing (a timestamp/counter would be).
+    increasing = all(a < b for a, b in zip(tokens, tokens[1:]))
+    assert not increasing, (
+        "tokens are monotonically increasing — smells like a Date/counter source"
+    )
+
+    def common_prefix(a, b):
+        i = 0
+        while i < len(a) and i < len(b) and a[i] == b[i]:
+            i += 1
+        return i
+
+    worst = max(common_prefix(tokens[0], t) for t in tokens[1:])
+    assert worst < 8, (
+        "tokens share a %d-char common prefix with the first token — a "
+        "time/counter-seeded source would (the low-entropy high bits barely "
+        "change between calls)" % worst
+    )
+
+
+def test_generate_token_batch_has_no_duplicates():
+    # 5000 default (32-hex = 128-bit) tokens; a correct CSPRNG collides with
+    # negligible probability, a counter/time source or a too-short-entropy
+    # regression collides readily.
+    tokens = _token_batch([32] * 5000)
+    assert len(set(tokens)) == len(tokens), (
+        "expected 5000 unique tokens, got %d — entropy/uniqueness regression"
+        % len(set(tokens))
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 21 (REGRESSION LOCK) — distribution sanity: no gross modulo bias. Over
+# a large sample every hex symbol appears at least half its expected count; a
+# `% 16`-on-a-biased-range regression would starve some symbols (spec §3
+# "Distribution has no obvious modulo bias").
+# ---------------------------------------------------------------------------
+
+
+def test_generate_token_distribution_has_no_gross_modulo_bias():
+    import collections
+
+    tokens = _token_batch([64] * 1000)          # 64000 hex symbols
+    counts = collections.Counter("".join(tokens))
+    total = sum(counts.values())
+    expected = total / 16.0
+    # Very loose band (0.5x..1.5x). For a uniform CSPRNG the observed spread is
+    # ~1% (never trips); a real modulo bias skews well past this.
+    for symbol in "0123456789abcdef":
+        c = counts.get(symbol, 0)
+        assert 0.5 * expected <= c <= 1.5 * expected, (
+            "hex symbol %r appeared %d times (expected ~%d) — distribution skew "
+            "suggests modulo bias" % (symbol, c, int(expected))
+        )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
@@ -468,12 +970,15 @@ if __name__ == "__main__":
         for name, obj in globals().items()
         if name.startswith("test_") and callable(obj)
     )
-    passed = failed = 0
+    passed = failed = skipped = 0
     for name, fn in tests:
         try:
             fn()
             print("PASS", name)
             passed += 1
+        except unittest.SkipTest as e:
+            print("SKIP", name, "--", str(e).splitlines()[0] if str(e) else "")
+            skipped += 1
         except AssertionError as e:
             print("FAIL", name)
             print("     " + str(e).replace("\n", "\n     "))
@@ -482,5 +987,8 @@ if __name__ == "__main__":
             print("ERROR", name)
             traceback.print_exc()
             failed += 1
-    print("\n%d passed, %d failed, %d total" % (passed, failed, len(tests)))
+    print(
+        "\n%d passed, %d failed, %d skipped, %d total"
+        % (passed, failed, skipped, len(tests))
+    )
     raise SystemExit(1 if failed else 0)
