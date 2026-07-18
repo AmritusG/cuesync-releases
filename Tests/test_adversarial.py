@@ -2006,6 +2006,103 @@ def test_patch_backend_can_target_assignment_matches_widget_property_name():
 
 
 # ---------------------------------------------------------------------------
+# ATTACK 42 (§4 runtime trust boundary — LIVE FINDING, same class as ATTACK 39) —
+# the now-clickable "Save Project" button has the IDENTICAL unsanitised-filename
+# gap as ATTACK 39's export buttons, in a different file. spec §4(b) names
+# TextTools.slugify() as the sanitiser for "any name that becomes an export
+# filename" — a saved `.cueproj` is exactly that. ProjectSectionView.swift binds
+# `state.projectName` to a free-text `TextField` ("Project Name") and, in
+# `saveProject()`, interpolates it straight into `defaultFileName:
+# "\(name).cueproj"` with no `slugify` call anywhere in the file. CUESYNC-8 is
+# what makes this Save button clickable on Windows, so — exactly like ATTACK 39
+# — a project name of `../../evil`, `con`, or one carrying a NUL/`/` now reaches
+# the file chooser's suggested name unfiltered. Currently FAILS: it reproduces
+# the live gap (fix = route the name through slugify, or retarget with a written
+# §4 justification per repo rule §E.24 — never delete-to-green).
+# ---------------------------------------------------------------------------
+
+
+def test_now_live_save_project_button_sanitises_the_untrusted_project_name():
+    project_section = (
+        REPO_ROOT
+        / "CueSync"
+        / "CueSync"
+        / "UI"
+        / "Sections"
+        / "ProjectSectionView.swift"
+    )
+    if not project_section.is_file():
+        raise unittest.SkipTest("CrossUI ProjectSectionView.swift not found")
+    src = project_section.read_text(encoding="utf-8")
+
+    # Confirm the newly-live boundary is really here before asserting the guard: an
+    # untrusted projectName-derived value is interpolated into the save filename.
+    assert "state.projectName" in src and "defaultFileName:" in src, (
+        "ProjectSectionView.swift's save-project shape changed — re-locate the "
+        "projectName -> defaultFileName boundary before trusting this test"
+    )
+
+    # Comment-stripped so a future "// should slugify this" note can't turn the guard
+    # green without the actual call being wired.
+    code = "\n".join(
+        (ln[: ln.index("//")] if "//" in ln else ln) for ln in src.splitlines()
+    )
+    assert "slugify" in code, (
+        "spec §4(b): the untrusted project name that becomes the saved .cueproj filename "
+        "must be run through TextTools.slugify() (the named boundary sanitiser — "
+        "traversal-free, never `.`/`..`, never a bare Windows reserved device name, "
+        "NUL/control stripped) before it reaches `defaultFileName:`. It is not: `slugify` "
+        "has ZERO call sites in the app, so `state.projectName` = `../../evil` / `con` / a "
+        "NUL-bearing string flows raw into the file chooser's suggested name. CUESYNC-8 "
+        "made the Save Project button clickable on Windows, so this boundary is now LIVE — "
+        "the save-panel confirm is defence-in-depth, not the §4 sanitiser this asserts."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 43 (§4 runtime trust boundary — forward-looking sweep) — ATTACK 39 and
+# ATTACK 42 found the SAME bug class (an untrusted `@State`-bound name reaching
+# `defaultFileName:` unsanitised) in two different files by hand. A third
+# `defaultFileName:` call site added later — another export format, another save
+# flow — would silently reintroduce the identical gap unless every call site in
+# UI/ is swept, not just the two found so far. This scans every `.swift` file
+# under UI/ and requires each one that interpolates a name into `defaultFileName:`
+# to also call `slugify` somewhere in that same file — a coarse per-file proxy
+# (mirrors ATTACK 39/42's own method) but one that catches a NEW unsanitised call
+# site automatically instead of waiting for the next hand-written ATTACK.
+# ---------------------------------------------------------------------------
+
+
+def test_every_default_file_name_call_site_in_ui_has_a_slugify_call_in_its_file():
+    ui_dir = REPO_ROOT / "CueSync" / "CueSync" / "UI"
+    if not ui_dir.is_dir():
+        raise unittest.SkipTest("CrossUI UI/ directory not found")
+    offenders = []
+    checked = 0
+    for path in sorted(ui_dir.rglob("*.swift")):
+        src = path.read_text(encoding="utf-8")
+        code = "\n".join(
+            (ln[: ln.index("//")] if "//" in ln else ln) for ln in src.splitlines()
+        )
+        if "defaultFileName:" not in code:
+            continue
+        checked += 1
+        if "slugify" not in code:
+            offenders.append(path.relative_to(REPO_ROOT).as_posix())
+    assert checked > 0, (
+        "expected at least one defaultFileName: call site under CueSync/CueSync/UI — "
+        "if the save-destination API changed shape, re-locate it before trusting this sweep"
+    )
+    assert not offenders, (
+        "spec §4(b): every file under UI/ that interpolates a name into "
+        "`defaultFileName:` must also call TextTools.slugify() on that name before use. "
+        "The following file(s) build a defaultFileName: with no slugify call anywhere in "
+        "the file, so whatever untrusted/user text feeds the name reaches the file "
+        "chooser's suggested filename unsanitised: %s" % ", ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
 
