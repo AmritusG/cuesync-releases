@@ -2295,7 +2295,9 @@ def test_no_decorative_shape_under_ui_is_wired_as_a_tap_or_hover_target():
     ui_dir = REPO_ROOT / "CueSync" / "CueSync" / "UI"
     if not ui_dir.is_dir():
         raise unittest.SkipTest("CrossUI UI/ directory not found")
-    shape_ctor = re.compile(r"\b(RoundedRectangle|Rectangle|Circle|Capsule|Ellipse)\s*\(")
+    shape_ctor = re.compile(
+        r"\b(RoundedRectangle|Rectangle|Circle|Capsule|Ellipse)\s*\("
+    )
     gesture_re = re.compile(r"\.(onTapGesture|onHover|gesture)\b")
     offenders = []
     scanned_shapes = 0
