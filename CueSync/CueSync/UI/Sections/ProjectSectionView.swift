@@ -1,6 +1,7 @@
 #if CUESYNC_CROSSUI
 import SwiftCrossUI
 import Foundation
+import CueSyncCore
 
 // Re-host of Views/Sections/ProjectSectionView.swift onto swift-cross-ui (spec
 // CUESYNC-7 §E). Import/open/save actions delegate to the re-hosted `AppState`
@@ -298,7 +299,7 @@ struct ProjectSectionView: View {
             }
         } else {
             Task {
-                let name = state.projectName.isEmpty ? "Untitled" : state.projectName
+                let name = TextTools.slugify(state.projectName, fallback: "untitled")
                 guard let url = await chooseFileSaveDestination(
                     title: "Save Project",
                     defaultFileName: "\(name).cueproj"

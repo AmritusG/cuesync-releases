@@ -81,7 +81,7 @@ struct ExportSectionView: View {
             errorMessage = "No envelope data to export. Add cue points first."
             return
         }
-        let name = state.presetName.isEmpty ? "envelope" : state.presetName
+        let name = TextTools.slugify(state.presetName, fallback: "envelope")
         Task {
             guard let url = await chooseFileSaveDestination(
                 title: "Export Resolume XML",
@@ -100,7 +100,7 @@ struct ExportSectionView: View {
             errorMessage = "No cue points to export."
             return
         }
-        let name = state.presetName.isEmpty ? "cues" : state.presetName
+        let name = TextTools.slugify(state.presetName, fallback: "cues")
         Task {
             guard let url = await chooseFileSaveDestination(
                 title: "Export ShowKontrol Cue",
