@@ -435,6 +435,10 @@ jobs:
               Write-Error "could not read symlink target for $relPath"; exit 1
             }
             $targetAbs = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($linkDir, $target))
+            $repoAbs = [System.IO.Path]::GetFullPath($repo)
+            if (-not $targetAbs.StartsWith($repoAbs, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Write-Error "symlink $relPath -> $targetAbs : target escapes checkout root $repoAbs"; exit 1
+            }
             if (-not (Test-Path -LiteralPath $targetAbs)) {
               Write-Error "symlink $relPath -> $targetAbs : target does not exist on disk"; exit 1
             }
@@ -930,6 +934,10 @@ jobs:
               Write-Error "could not read symlink target for $relPath"; exit 1
             }
             $targetAbs = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($linkDir, $target))
+            $repoAbs = [System.IO.Path]::GetFullPath($repo)
+            if (-not $targetAbs.StartsWith($repoAbs, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Write-Error "symlink $relPath -> $targetAbs : target escapes checkout root $repoAbs"; exit 1
+            }
             if (-not (Test-Path -LiteralPath $targetAbs)) {
               Write-Error "symlink $relPath -> $targetAbs : target does not exist on disk"; exit 1
             }
