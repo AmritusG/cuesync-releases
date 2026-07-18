@@ -131,6 +131,35 @@ jobs:
             echo "Applied swift-cross-ui gesture/interactivity patch"
           fi
 
+      # spec CUESYNC-9 §3/§4 (findings: specs/CUESYNC-9-findings.md). The clean-PC GTE
+      # reported the whole window inert — including scrollbars and TextFields — even
+      # after CUESYNC-8's blanket can-target fix changed nothing observable (Fork W, a
+      # defect below the widget tree). GtkBackend's `mainRunLoopTicklingLoop` ticks
+      # Foundation's `RunLoop.main` on Windows too (needed so `@MainActor`/
+      # `DispatchQueue.main` work under GtkBackend at all — upstream PR #141), but
+      # swift-corelibs-foundation unconditionally binds `RunLoop.main` to this thread's
+      # Win32 message queue on Windows (`_CFRunLoopSetWindowsMessageQueueMask(_,
+      # QS_ALLINPUT, ...)`) — the same queue GDK's own win32 backend drains for
+      # mouse/keyboard/close-button input via this same GLib main loop, so the two
+      # race for ownership of it. Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-input.patch) against the pinned v0.8.0
+      # checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Kept separate from, and applied
+      # after, the CUESYNC-8 interactivity patch above; runs before "Build (release)"
+      # below. `git apply --reverse --check` guards idempotency: a second run against
+      # an already-patched checkout is a no-op rather than a failure.
+      - name: Patch swift-cross-ui Windows input dispatch (pinned v0.8.0, CUESYNC-9)
+        run: |
+          set -euo pipefail
+          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-input.patch"
+          cd .build/checkouts/swift-cross-ui
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "swift-cross-ui Windows input patch already applied — skipping"
+          else
+            git apply "$PATCH"
+            echo "Applied swift-cross-ui Windows input patch"
+          fi
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -558,6 +587,47 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui gesture/interactivity patch"
+          }
+          Pop-Location
+
+      # spec CUESYNC-9 §3/§4 (findings: specs/CUESYNC-9-findings.md). The clean-PC GTE
+      # reported the whole window inert — including scrollbars and TextFields — even
+      # after CUESYNC-8's blanket can-target fix changed nothing observable (Fork W, a
+      # defect below the widget tree). GtkBackend's `mainRunLoopTicklingLoop` ticks
+      # Foundation's `RunLoop.main` on Windows too (needed so `@MainActor`/
+      # `DispatchQueue.main` work under GtkBackend at all — upstream PR #141), but
+      # swift-corelibs-foundation unconditionally binds `RunLoop.main` to this thread's
+      # Win32 message queue on Windows (`_CFRunLoopSetWindowsMessageQueueMask(_,
+      # QS_ALLINPUT, ...)`) — the same queue GDK's own win32 backend drains for
+      # mouse/keyboard/close-button input via this same GLib main loop, so the two race
+      # for ownership of it. Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-input.patch) against the pinned v0.8.0
+      # checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Placed after the CUESYNC-8
+      # interactivity patch above (applied to the same checkout) and before "Build
+      # (release)" below. Same read-only-clearing rationale as the gulong/gsize step:
+      # dependency sources check out read-only on Windows. `git apply --reverse
+      # --check` guards idempotency: a second run against an already-patched checkout
+      # is a no-op rather than a failure.
+      - name: Patch swift-cross-ui Windows input dispatch (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-input.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows input patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-input.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows input patch"
           }
           Pop-Location
 
@@ -1099,6 +1169,47 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui gesture/interactivity patch"
+          }
+          Pop-Location
+
+      # spec CUESYNC-9 §3/§4 (findings: specs/CUESYNC-9-findings.md). The clean-PC GTE
+      # reported the whole window inert — including scrollbars and TextFields — even
+      # after CUESYNC-8's blanket can-target fix changed nothing observable (Fork W, a
+      # defect below the widget tree). GtkBackend's `mainRunLoopTicklingLoop` ticks
+      # Foundation's `RunLoop.main` on Windows too (needed so `@MainActor`/
+      # `DispatchQueue.main` work under GtkBackend at all — upstream PR #141), but
+      # swift-corelibs-foundation unconditionally binds `RunLoop.main` to this thread's
+      # Win32 message queue on Windows (`_CFRunLoopSetWindowsMessageQueueMask(_,
+      # QS_ALLINPUT, ...)`) — the same queue GDK's own win32 backend drains for
+      # mouse/keyboard/close-button input via this same GLib main loop, so the two race
+      # for ownership of it. Fixed by a checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-input.patch) against the pinned v0.8.0
+      # checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Placed after the CUESYNC-8
+      # interactivity patch above (applied to the same checkout) and before "Test"
+      # below, which builds before it runs. Same read-only-clearing rationale as the
+      # gulong/gsize step: dependency sources check out read-only on Windows. `git
+      # apply --reverse --check` guards idempotency: a second run against an
+      # already-patched checkout is a no-op rather than a failure.
+      - name: Patch swift-cross-ui Windows input dispatch (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-input.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows input patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-input.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows input patch"
           }
           Pop-Location
 
