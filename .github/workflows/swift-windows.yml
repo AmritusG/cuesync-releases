@@ -19,6 +19,48 @@ on:
   workflow_dispatch:
 
 jobs:
+  # -------- Guard: UI/ must stay AppKit-free (spec CUESYNC-7 §M.28) --------
+  # A machine-checkable proxy for "all Windows UI is CUESYNC_CROSSUI and
+  # toolkit-correct": no file under CueSync/CueSync/UI/ may import an
+  # AppKit-only framework or reference an NS-prefixed AppKit symbol in real
+  # code. Runs on ubuntu-latest (plain text scan, no toolchain needed) so it
+  # fails in seconds instead of waiting on the ~20-minute Windows legs.
+  # Comment lines (trimmed line starts with "//") are excluded from the
+  # NS-prefixed check — several files legitimately mention the macOS
+  # original's AppKit types (NSOpenPanel, NSImage, NSColor, ...) in `// PORT:`
+  # notes explaining what was re-hosted; only actual code usage must fail.
+  guard-crossui-appkit-free:
+    name: guard · UI/ is AppKit-free
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Grep guard — no AppKit/SwiftUI/UniformTypeIdentifiers/AVFoundation/Combine, no NS-prefixed symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' file; do
+            if grep -nE '^\s*import[[:space:]]+(AppKit|SwiftUI|UniformTypeIdentifiers|AVFoundation|Combine)([[:space:]]|$)' "$file"; then
+              echo "::error file=$file::forbidden import under CUESYNC_CROSSUI UI/ (spec §M.28)"
+              fail=1
+            fi
+            while IFS=: read -r lineno content; do
+              [ -z "${lineno:-}" ] && continue
+              trimmed="$(printf '%s' "$content" | sed -E 's/^[[:space:]]*//')"
+              case "$trimmed" in
+                //*) continue ;;
+              esac
+              echo "::error file=$file,line=$lineno::NS-prefixed AppKit symbol referenced under CUESYNC_CROSSUI UI/ (spec §M.28): $content"
+              fail=1
+            done < <(grep -nE '\bNS[A-Z][A-Za-z]*\b' "$file" || true)
+          done < <(find CueSync/CueSync/UI -name '*.swift' -print0)
+          if [ "$fail" -ne 0 ]; then
+            echo "Guard failed: UI/ must not import AppKit-only frameworks or use NS-prefixed symbols outside comments."
+            exit 1
+          fi
+          echo "Guard passed: no AppKit/SwiftUI/UniformTypeIdentifiers/AVFoundation/Combine imports and no NS-prefixed symbol usage found under UI/."
+
   # -------- macOS: use the preinstalled toolchain, no setup action --------
   macos:
     name: swift · macos-latest
