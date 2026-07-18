@@ -620,6 +620,14 @@ final class PortComplianceTests: XCTestCase {
             "Hex.swift": [
                 "public enum Hex {",
             ],
+            // CUESYNC-7 (this ticket) adds the TextTools slugify()/generateToken()
+            // helpers to the shared core. Its two entry points are `public static
+            // func`s, which the narrower regex below intentionally doesn't match
+            // (see the note at the `dirs`/`pattern` declaration) — the enum
+            // namespace is the only line to allowlist here.
+            "TextTools.swift": [
+                "public enum TextTools {",
+            ],
             "CurveType.swift": [
                 "public struct CurveType: Identifiable, Equatable, CustomStringConvertible, Sendable {",
                 "public let id: Int",
