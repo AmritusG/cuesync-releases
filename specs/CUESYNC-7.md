@@ -95,9 +95,35 @@ each yourself in one pass; the plan below depends on the corrected facts, not th
    allowlist of the exact lines this ticket exposes, so an *unintended* future widening still
    fails the build.
 
+7. **Ticket-body scope item — "Add a `text_tools` module with `slugify()` and a secure
+   `generate_token()` helper" — REJECTED as out of scope for this faithful port; do not build
+   it.** Recorded here (rather than silently dropped) so the decision is explicit and auditable:
+   - **Language / idiom mismatch.** `text_tools` / `slugify` / `generate_token` are Python-shaped
+     names; this is a Swift app and the strategy is *faithful-native* — "a Swift app stays Swift;
+     do not rewrite in another language." There is no Python target to add a module to, and
+     inventing a Swift module to satisfy the phrasing would be building to the wording, not the need.
+   - **Not required by the platform.** The faithful-port mandate is "only change what the target
+     platform requires; keep all non-UI code intact." Windows needs the UI re-host (§A–§M) and
+     nothing else; a slug/token helper is new, unrequested behavior, i.e. gold-plating.
+   - **No caller.** The app constructs no filenames from untrusted names — exports go to a
+     user-chosen path via the save dialog (§H, §J.23) — and already mints identifiers with `UUID()`
+     where *uniqueness*, not unpredictability, is the requirement. `slugify()`/`generate_token()`
+     would be dead code with no call site anywhere in the macOS reference or the port.
+   - **Contradicts the reasoned security stance.** §4 deliberately concludes **no cryptographically
+     secure primitive is required or introduced** by this ticket, and warns a "secure token" must
+     not be presented as a security control here. Adding a `generate_token()` "secure helper" would
+     manufacture exactly the false security signal §4 rules out.
+   - **If a real need surfaces later** (e.g. a Windows-safe *default* export filename derived from
+     the preset name — a legitimate cross-platform concern, since `< > : " / \\ | ? *`, trailing
+     dots/spaces, and reserved device names like `CON`/`NUL`/`COM1` are illegal on Windows), it
+     belongs in its own ticket with a stated use case, implemented in Swift under
+     `CueSyncCore/Support/` (`Foundation`/`pathlib`-equivalent APIs, never a hardcoded separator),
+     using `SystemRandomNumberGenerator` (Swift's cross-platform CSPRNG) **only** where
+     unpredictability is genuinely required — not merged into this UI-port ticket.
+
 If any of premises 1–3 is false on your branch, stop and report — the plan assumes the
-corrected facts. (Premises 1–3 all held; §0.6 above documents a 4th correction found once
-implementation started.)
+corrected facts. (Premises 1–3 all held; §0.6 documents a 4th correction found once implementation
+started; §0.7 records a ticket-body scope item deliberately rejected as out of scope.)
 
 ---
 
@@ -441,7 +467,11 @@ save path.
 `AppState` mints cue-point IDs with `UUID()` (Foundation) — these are **local identifiers, not
 security tokens**; uniqueness, not unpredictability, is the requirement, so no CSPRNG is needed
 and none must be presented as a security control. No nonces, hashes, or randomness are added by
-this ticket. (The existing `wldd` download's SHA-256 gate in CI is unrelated and untouched.)
+this ticket. (The existing `wldd` download's SHA-256 gate in CI is unrelated and untouched.) This
+is also why the ticket-body "secure `generate_token()` helper" was rejected in §0.7: introducing a
+"secure token" with no unpredictability requirement and no caller would fabricate a security signal
+this app does not have. Should a future ticket genuinely need unpredictability, use Swift's
+cross-platform CSPRNG (`SystemRandomNumberGenerator`), not a timestamp or `Int.random` seed.
 
 **Portability:** no `/tmp`, path separator, or line-ending literal is hardcoded in new code —
 paths come from swift-cross-ui's file dialogs as `URL`s and are handled with Foundation `URL`/
