@@ -19,9 +19,18 @@ public struct Playlist: Identifiable, Codable, Equatable {
     public var isFolder: Bool { type == .folder }
 
     public func totalTrackCount() -> Int {
-        if type == .playlist {
-            return trackIds.count
+        // Iterative (explicit stack) rather than recursive: untrusted Rekordbox XML can
+        // nest playlist folders thousands deep, and a call-stack-per-level recursion
+        // overflows the smaller default thread stack on Windows well before macOS.
+        var total = 0
+        var stack: [Playlist] = [self]
+        while let node = stack.popLast() {
+            if node.type == .playlist {
+                total += node.trackIds.count
+            } else {
+                stack.append(contentsOf: node.children)
+            }
         }
-        return children.reduce(0) { $0 + $1.totalTrackCount() }
+        return total
     }
 }
