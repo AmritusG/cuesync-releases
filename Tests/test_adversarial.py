@@ -1013,7 +1013,9 @@ AUDITED_REVISION = "a6d206370812e3b9edba259d167e848892c5013d"
 GESTURE_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-interactivity.patch"
 GESTURE_STEP_NAME = "Patch swift-cross-ui GTK interactivity"
 
-REPO_ROOT = WORKFLOW_PATH.parent.parent.parent  # <root>/.github/workflows/x.yml -> <root>
+REPO_ROOT = (
+    WORKFLOW_PATH.parent.parent.parent
+)  # <root>/.github/workflows/x.yml -> <root>
 PATCH_PATH = REPO_ROOT / "patches" / GESTURE_PATCH_NAME
 PATCH_TEXT = PATCH_PATH.read_text(encoding="utf-8") if PATCH_PATH.is_file() else ""
 
@@ -1161,7 +1163,8 @@ def _pinned_checkout_git_or_skip():
         )
     head = subprocess.run(
         [git, "-C", str(SWIFT_CROSS_UI_CHECKOUT), "rev-parse", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if head.returncode != 0:
         raise unittest.SkipTest("swift-cross-ui checkout is not a git repo")
@@ -1266,8 +1269,12 @@ def test_gesture_patch_makes_the_shape_factory_hit_test_transparent():
     applied = _git_apply(git, tree)
     assert applied.returncode == 0, "forward apply failed:\n" + (applied.stderr or "")
 
-    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(encoding="utf-8")
-    widget = (Path(tree) / "Sources/Gtk/Widgets/Widget.swift").read_text(encoding="utf-8")
+    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
+        encoding="utf-8"
+    )
+    widget = (Path(tree) / "Sources/Gtk/Widgets/Widget.swift").read_text(
+        encoding="utf-8"
+    )
 
     idx = backend.find("createPathWidget")
     assert idx != -1, "createPathWidget vanished from GtkBackend.swift after apply"
@@ -1318,7 +1325,7 @@ def test_gesture_patch_touches_exactly_the_two_audited_files_and_repins_nothing(
         )
     for manifest in ("Package.swift", "Package.resolved"):
         assert not re.search(r"diff --git .*" + re.escape(manifest), PATCH_TEXT), (
-            "spec §4: the patch must not touch %s — the pin stays exact: \"0.8.0\" and "
+            'spec §4: the patch must not touch %s — the pin stays exact: "0.8.0" and '
             "Package.resolved is untouched by this ticket" % manifest
         )
 
@@ -1339,13 +1346,29 @@ def test_gesture_patch_added_lines_are_pure_wiring_no_network_exec_or_new_import
     assert added, "the patch adds no lines at all — nothing to review"
 
     forbidden = [
-        "http://", "https://", "ftp://",                      # network fetch
-        "URLSession", "getaddrinfo", "socket(",               # network
-        "Process(", "NSTask", "posix_spawn", "system(",       # process spawn
-        "popen(", "ShellExecute", "execve", "execvp",         # process spawn
-        "/bin/sh", "cmd.exe", "Invoke-WebRequest",            # shells / fetch
-        "Invoke-Expression", "eval(",                         # dynamic eval
-        "dlopen", "dlsym", "LoadLibrary", "GetProcAddress",   # dynamic load
+        "http://",
+        "https://",
+        "ftp://",  # network fetch
+        "URLSession",
+        "getaddrinfo",
+        "socket(",  # network
+        "Process(",
+        "NSTask",
+        "posix_spawn",
+        "system(",  # process spawn
+        "popen(",
+        "ShellExecute",
+        "execve",
+        "execvp",  # process spawn
+        "/bin/sh",
+        "cmd.exe",
+        "Invoke-WebRequest",  # shells / fetch
+        "Invoke-Expression",
+        "eval(",  # dynamic eval
+        "dlopen",
+        "dlsym",
+        "LoadLibrary",
+        "GetProcAddress",  # dynamic load
     ]
     for content in added:
         for token in forbidden:
@@ -1397,9 +1420,16 @@ def test_gesture_patch_sets_can_target_false_only_on_decorative_path_widgets():
         "expected `canTarget = false` to be added exactly once (only in createPathWidget)"
     )
     interactive_factories = [
-        "createButton", "createTextField", "createToggle", "createPicker",
-        "createSlider", "createSwitch", "createContainer", "createTextView",
-        "createTable", "createScrollContainer",
+        "createButton",
+        "createTextField",
+        "createToggle",
+        "createPicker",
+        "createSlider",
+        "createSwitch",
+        "createContainer",
+        "createTextView",
+        "createTable",
+        "createScrollContainer",
     ]
     added_text = "\n".join(_patch_added_lines())
     for factory in interactive_factories:
@@ -1469,8 +1499,10 @@ def test_both_windows_gesture_patch_steps_are_byte_identical():
     assert a == b, (
         "spec §3: the windows-build and windows-test gesture-patch step bodies must not "
         "drift — a divergence means build and test compile differently-patched checkouts "
-        "(the split-brain CUESYNC-6d suffered).\n--- windows-build ---\n" + a
-        + "\n--- windows-test ---\n" + b
+        "(the split-brain CUESYNC-6d suffered).\n--- windows-build ---\n"
+        + a
+        + "\n--- windows-test ---\n"
+        + b
     )
 
 
@@ -1506,7 +1538,8 @@ def test_windows_gesture_patch_clears_read_only_before_apply_on_the_patched_file
                     )
                 )
         assert cleared == patched, (
-            job + ": read-only is cleared on %r but the patch modifies %r — a path typo "
+            job
+            + ": read-only is cleared on %r but the patch modifies %r — a path typo "
             "leaves the real target read-only and breaks `git apply` downstream"
             % (sorted(cleared), sorted(patched))
         )
@@ -1529,7 +1562,7 @@ def test_gesture_patch_step_fails_loud_on_a_bad_apply_on_every_leg():
         "(`set -euo pipefail`) so a failed `git apply` aborts the job"
     )
     assert 'git apply "$PATCH"' in mac, (
-        "the macos step must contain a forward `git apply \"$PATCH\"` (not only the "
+        'the macos step must contain a forward `git apply "$PATCH"` (not only the '
         "`--reverse --check` guard) for set -e to fail loud on"
     )
     for job in ("windows-build", "windows-test"):
@@ -1564,14 +1597,20 @@ def test_gesture_patch_step_runs_after_resolve_and_before_build_on_every_leg():
             # Skip `#` comment lines — a job's prose mentions "swift build -c
             # release" etc. in comments; only the real `run:` invocation counts.
             return next(
-                (k for k, ln in enumerate(seg)
-                 if not ln.lstrip().startswith("#") and re.search(pat, ln)),
+                (
+                    k
+                    for k, ln in enumerate(seg)
+                    if not ln.lstrip().startswith("#") and re.search(pat, ln)
+                ),
                 None,
             )
 
         patch_i = next(
-            (k for k, ln in enumerate(seg)
-             if STEP_NAME_RE.match(ln) and GESTURE_STEP_NAME in ln),
+            (
+                k
+                for k, ln in enumerate(seg)
+                if STEP_NAME_RE.match(ln) and GESTURE_STEP_NAME in ln
+            ),
             None,
         )
         assert patch_i is not None, job + ": no gesture-patch step to order"
@@ -1585,7 +1624,8 @@ def test_gesture_patch_step_runs_after_resolve_and_before_build_on_every_leg():
             resolve_i = find(resolve_pat)
             assert resolve_i is not None, job + ": no `swift package resolve` step"
             assert resolve_i < patch_i, (
-                job + ": gesture-patch step must run AFTER `swift package resolve` — the "
+                job
+                + ": gesture-patch step must run AFTER `swift package resolve` — the "
                 "checkout it patches does not exist before that (spec §3)"
             )
 
@@ -1631,12 +1671,14 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
     )
     assert gtk_patches == [GESTURE_PATCH_NAME], (
         "spec §4: expected exactly ONE checked-in patch touching GtkBackend.swift; a "
-        "second copy is a divergent-source supply-chain risk. Found: " + repr(gtk_patches)
+        "second copy is a divergent-source supply-chain risk. Found: "
+        + repr(gtk_patches)
     )
     dev_script = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
     assert dev_script.is_file(), "scripts/patch-swift-cross-ui.sh must exist (spec §3)"
     dev_code = "\n".join(
-        ln for ln in dev_script.read_text(encoding="utf-8").splitlines()
+        ln
+        for ln in dev_script.read_text(encoding="utf-8").splitlines()
         if not ln.lstrip().startswith("#")
     )
     assert GESTURE_PATCH_NAME in dev_code, (
@@ -1645,8 +1687,10 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
     )
     for job, _i, block in GESTURE_BLOCKS:
         assert GESTURE_PATCH_NAME in block, (
-            job + ": the CI gesture-patch step must apply the one checked-in "
-            + GESTURE_PATCH_NAME + ", never a separate copy"
+            job
+            + ": the CI gesture-patch step must apply the one checked-in "
+            + GESTURE_PATCH_NAME
+            + ", never a separate copy"
         )
 
 
@@ -1674,7 +1718,7 @@ def test_stepper_field_commit_guards_isfinite_before_writing_a_hostile_value():
     src = _stepper_field_src_or_skip()
     m = re.search(r"func commitText\(\)\s*\{", src)
     assert m, "commitText() not found in StepperField.swift — control shape changed"
-    body = src[m.end():]
+    body = src[m.end() :]
     nxt = re.search(r"\n    (?:private |)func ", body)
     if nxt:
         body = body[: nxt.start()]
