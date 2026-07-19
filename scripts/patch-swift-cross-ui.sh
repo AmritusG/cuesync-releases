@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Applies patches/swift-cross-ui-0.8.0-gtk-interactivity.patch (CUESYNC-8) and
-# patches/swift-cross-ui-0.8.0-windows-input.patch (CUESYNC-9) to the resolved
-# swift-cross-ui checkout, in that order, so the dev / ci-local loop can iterate
-# without GitHub CI. Mirrors the `git apply` steps these same patches get in
+# Applies patches/swift-cross-ui-0.8.0-gtk-interactivity.patch (CUESYNC-8),
+# patches/swift-cross-ui-0.8.0-windows-input.patch (CUESYNC-9 rounds 1-2), and
+# patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch (CUESYNC-9 round 4) to the
+# resolved swift-cross-ui checkout, in that order, so the dev / ci-local loop can
+# iterate without GitHub CI. Mirrors the `git apply` steps these same patches get in
 # .github/workflows/swift-windows.yml — see that file for the CI-side version.
 #
 # The dependency source itself is never edited in this repo; this script only ever
@@ -16,8 +17,9 @@ CHECKOUT="$ROOT/.build/checkouts/swift-cross-ui"
 
 INTERACTIVITY_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 WINDOWS_INPUT_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-input.patch"
+GSK_RENDERER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
 
-for patch in "$INTERACTIVITY_PATCH" "$WINDOWS_INPUT_PATCH"; do
+for patch in "$INTERACTIVITY_PATCH" "$WINDOWS_INPUT_PATCH" "$GSK_RENDERER_PATCH"; do
     if [ ! -f "$patch" ]; then
         echo "patch-swift-cross-ui.sh: missing $patch" >&2
         exit 1
@@ -53,4 +55,11 @@ if git apply --reverse --check "$WINDOWS_INPUT_PATCH" 2>/dev/null; then
 else
     echo "==> Applying swift-cross-ui Windows input patch"
     git apply "$WINDOWS_INPUT_PATCH"
+fi
+
+if git apply --reverse --check "$GSK_RENDERER_PATCH" 2>/dev/null; then
+    echo "==> swift-cross-ui Windows GSK-renderer patch already applied — skipping"
+else
+    echo "==> Applying swift-cross-ui Windows GSK-renderer patch"
+    git apply "$GSK_RENDERER_PATCH"
 fi

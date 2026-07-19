@@ -1,5 +1,68 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.3 — ROUND 4 (2026-07-19, this session): the window never paints because GTK's GL renderer can't run over the remote desktop
+
+> This is the fourth CUESYNC-9 round. It KEEPS round 3's decisive machine-read — the current
+> `.factory/probe/before.png`/`after.png` (md5 `262857fe294219dbc12d475a49979484`, byte-identical,
+> captured 14:44 AFTER round 3's DLL-bundling commit `a29d490`) are STILL a `C:\WINDOWS\SYSTEM32\cmd.exe`
+> launcher console with **no CueSync window anywhere on screen** — but it CORRECTS round 3's mechanism.
+> Classification is unchanged: **Fork W** (window-level: no window ⇒ close-click can't kill, centre click
+> can't change pixels). This is the spec step-4 **CONTINGENCY** path (a GTK-runtime/init **config** defect —
+> "an env the launch must set" — fixed with the framework's own API, NOT an upstream source bug), applied
+> as the checked-in `patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch`.
+
+**Why round 3's "missing Swift runtime DLLs" mechanism is not (or no longer) the whole story.** Round 3
+read the same cmd.exe-only probe and blamed the Windows loader failing to start `CueSync.exe` because the
+Swift runtime DLLs weren't bundled. But the `windows-build` job **already bundles the GTK 4 runtime DLLs**
+("Bundle GTK 4 runtime DLLs next to CueSync.exe", pre-existing) **and** round 3 added the Swift runtime DLL
+bundling, with a `wldd` closure check + negative control asserting the artifact is self-contained. Yet the
+**post-round-3** probe is byte-for-byte the same failure. Two readings survive, and the decisive tell is in
+the pixels: a clean-PC exe that fails to *load* a missing DLL raises a hard Windows **error dialog**
+("The code execution cannot proceed because X.dll was not found") — there is **no such dialog** in
+`after.png`, only the launcher console. That points away from a load-time DLL failure and toward the exe
+**loading and running but never presenting a window** — a GTK **runtime** failure, not a packaging one.
+
+**Root cause (the remote-desktop tell).** The clean-PC probe box is driven over **remote desktop** — its
+own desktop in `.factory/probe/after.png` shows a **RustDesk** shortcut (and TeamViewer, Configure USB
+Network Gate: this is a remote-controlled machine). GTK 4's default GSK renderer on Windows is the
+**GPU/OpenGL-backed `ngl`/`gl` renderer**, which must create an OpenGL context on the window's surface.
+Over an RDP / RustDesk / headless remote session the GL surface the remote host exposes **cannot back a
+`GskGLRenderer`**: context creation fails, no `GskRenderer` realizes for the surface, and the window never
+paints or presents. The process stays alive (so a close-click on the launcher doesn't end "the app"),
+`gtk_window_present` is a no-op paint-wise, and the probe sees only the launcher console — the exact
+three-symptom signature the gate reports. This is a **config** defect (`GtkBackend.runMainLoop`,
+`Sources/GtkBackend/GtkBackend.swift:118` at pinned commit `a6d206370812e3b9edba259d167e848892c5013d`, right
+before `gtkApp.run`), not a swift-cross-ui source bug and not a hit-testing bug.
+
+**Fix.** Force GTK's pure-software **Cairo** renderer by setting `GSK_RENDERER=cairo` via GLib's own
+`g_setenv` at the top of `runMainLoop`, before `gtkApp.run` (`g_application_run` → activate → window
+realize → first `GskRenderer`). Cairo needs no GPU/GL context and always succeeds, so the window reliably
+appears in a remote session. `#if os(Windows)`-guarded; Linux/macOS keep their working default renderers,
+and CueSync's macOS build uses the native AppKit/SwiftUI app (not GtkBackend) so the shipping mac app is
+untouched. **Compile/link verified on macOS**: `swift build -c release` links CueSync with the hunk
+temporarily un-guarded — `g_setenv` resolves via `CGtk` (already imported by GtkBackend), so the
+symbol/signature are sound. This is the compile-safety gap the round-3 findings flagged for the deferred
+round 4; using GLib's `g_setenv` (not the Windows-only `ucrt` `_putenv_s`) closes it, because `g_setenv`
+compiles on every platform.
+
+**One-suspect discipline (spec step 5).** GSK-renderer failure is round 4's single suspect. The round-2
+input patch and round-3 DLL bundling are **retained** (they are different, independently-correct concerns:
+main-loop hygiene, and a self-contained artifact) and kept in **separate** patches/steps so any non-mover
+can be reverted alone. Round 4 changes exactly one file in the dependency (`GtkBackend.swift`,
+`runMainLoop`) via one new patch; it does not touch the other two patches, adds no dependency/network/
+dynamic-load, and introduces no GtkFixed/absolute positioning.
+
+**What this round can and cannot prove from macOS.** It proves the fix compiles/links and that all three
+patches apply cleanly in sequence and idempotently. It **cannot** prove the window now appears on the remote
+box — that needs the on-box probe re-capture (a CueSync-titled window replacing the cmd.exe console) or the
+GTE clicking on the box. **If round 4 still shows only the launcher console**, the remaining discriminators,
+in order: (a) the probe is not running the CI artifact at all (then the whole packaging+renderer chain is
+moot and the harness launch path is the real blocker — hand the runner owner the launch/`-NoProfile`
+fix); (b) the exe genuinely fails to load a DLL (then a Windows error dialog should be visible — look for
+it, and widen the bundle); (c) a non-render window-presentation failure. The single missing datum remains
+**CueSync.exe's own stderr on the box** (still detached by `/SUBSYSTEM:WINDOWS`); the lowest-risk round 5,
+iff needed, is the app-shell `freopen` stderr→log deferred since round 2.
+
 ## §0.2 — ROUND 3 (2026-07-19, this session): the probe was clicking the LAUNCHER, not CueSync
 
 > This is the third CUESYNC-9 fix round, and it OVERTURNS the shared premise of rounds 1–2 (and of

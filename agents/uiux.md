@@ -151,3 +151,31 @@ The through-line with the `can-target` and main-loop lessons above: **classify t
 right layer before fixing it.** Widget hit-testing, main-loop/event-source integration, and
 "the exe never loaded" are three different layers; a screenshot alone cannot tell them apart, but
 the window title and the DLL-closure log can.
+
+## A self-contained GTK4 exe that shows no window over remote desktop is a GL-renderer failure (CUESYNC-9, round 4)
+
+Once the artifact is self-contained (GTK **and** Swift runtime DLLs bundled, closure check green) and the
+probe *still* shows only the launcher console, stop blaming packaging and **read the box's environment in
+the screenshot.** On CUESYNC-9 the clean PC's own desktop carried a **RustDesk** shortcut (plus TeamViewer):
+it is a **remote-controlled** machine, and the app is launched into an RDP/remote session. That single fact
+reclassifies the failure:
+
+- GTK 4's default GSK renderer on Windows is the **GPU/OpenGL-backed `ngl`/`gl` renderer**. It must create
+  an OpenGL context on the window's surface. Over RDP / RustDesk / headless remote, the exposed GL surface
+  **cannot back a `GskGLRenderer`** — context creation fails, no `GskRenderer` realizes, and the window
+  **never paints or presents** even though the process is alive and `gtk_window_present` was called.
+- The discriminating tell vs. a missing-DLL loader failure: a load failure raises a hard Windows
+  **error dialog**; a GL-renderer failure shows **no dialog**, just no window. No dialog ⇒ the exe loaded
+  and ran ⇒ suspect the renderer, not the closure.
+- The fix is a **launch-env config**, not a source bug: force GTK's software renderer with
+  `GSK_RENDERER=cairo` (Cairo needs no GPU/GL and always succeeds), set via **GLib's own `g_setenv`** before
+  `gtkApp.run` (`GtkBackend.runMainLoop`). Prefer `g_setenv` over the Windows-only `ucrt` `_putenv_s`: it is
+  in scope wherever `CGtk` is imported, so it **compiles on macOS too** — you can machine-verify the symbol
+  without a Windows box, instead of shipping an un-compile-checked `#if os(Windows)` hunk. CUESYNC-9 §0.3,
+  `patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch`.
+
+Generalized: **when a GTK app runs but never shows a window, and the host is remote/virtual/headless, force
+the software renderer before touching anything else.** GL-over-remote is the single most common cause, and
+`GSK_RENDERER=cairo` is a one-line, framework-native, always-available workaround. Read the *environment*
+(remote-desktop tooling on the desktop, VM chrome, session type) as evidence — it is as diagnostic as the
+window title.

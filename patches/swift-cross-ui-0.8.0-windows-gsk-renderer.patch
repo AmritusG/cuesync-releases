@@ -1,0 +1,74 @@
+# swift-cross-ui v0.8.0 GtkBackend Windows GSK-renderer fix (CUESYNC-9, round 4)
+#
+# Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
+# *resolved checkout* at `.build/checkouts/swift-cross-ui` — the upstream dependency
+# source is never edited in place in this repo; this file is the only checked-in copy
+# of the change. Kept SEPARATE from patches/swift-cross-ui-0.8.0-gtk-interactivity.patch
+# (CUESYNC-8) and patches/swift-cross-ui-0.8.0-windows-input.patch (CUESYNC-9 rounds
+# 1-2) so each patch documents exactly one root cause and stays independently
+# revertable (spec CUESYNC-9 step 5). Apply order: interactivity, then windows-input,
+# then this one. All three touch Sources/GtkBackend/GtkBackend.swift, but at disjoint
+# line ranges (createPathWidget / mainRunLoopTicklingLoop / runMainLoop here), so they
+# apply cleanly in sequence.
+#
+# Root cause (spec CUESYNC-9 step 4 CONTINGENCY — a GTK-runtime/init *config* defect,
+# "an env the launch must set," fixed with the framework's own API, not an upstream
+# source bug; specs/CUESYNC-9-findings.md §0.3):
+#   The clean-PC probe box is driven over remote desktop (RustDesk is on its desktop;
+#   see .factory/probe/after.png). GTK 4's default GSK renderer on Windows is the
+#   GPU/OpenGL-backed `ngl`/`gl` renderer, which must create a GL context on the
+#   window's surface. Over an RDP / remote-desktop / headless session the GL surface
+#   the remote host exposes cannot back a GskGLRenderer, so the renderer never
+#   realizes, the window never paints or presents, and the process sits alive with NO
+#   visible window — the probe captures only the launcher `cmd.exe` console, exactly
+#   the current before.png/after.png. This gates every downstream input test: a window
+#   that never appears cannot be clicked, cannot receive a close event, and cannot
+#   change centre pixels (the three symptoms the gate reported).
+#
+# Fix (one hunk, `#if os(Windows)`, GLib's own public API — no new dependency, no
+# network, no dynamic load, no text-substitution, no GtkFixed/absolute-position):
+#   Force GTK's pure-software Cairo renderer by setting `GSK_RENDERER=cairo` via
+#   GLib's `g_setenv` at the top of `runMainLoop`, BEFORE `gtkApp.run`
+#   (g_application_run -> activate -> window realize -> first GskRenderer). The Cairo
+#   renderer needs no GPU/GL context and always succeeds, so the window reliably
+#   appears in a remote session. Linux/macOS keep their working default renderers
+#   (the hunk is Windows-only); on macOS CueSync uses the native AppKit/SwiftUI app,
+#   not GtkBackend, so this cannot affect the shipping mac build at all.
+#
+# Compile/link verified on macOS: `swift build -c release` links CueSync with this
+# hunk temporarily un-guarded (g_setenv resolves via CGtk, which GtkBackend already
+# imports) — the symbol/signature are sound; only the live remote-desktop behaviour
+# needs the on-box probe/GTE to confirm.
+#
+# Idempotency: `.github/workflows/swift-windows.yml` and scripts/patch-swift-cross-ui.sh
+# guard re-application with `git apply --reverse --check` before applying, so a second
+# run against an already-patched checkout is a no-op rather than a failure.
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index d83bbefb..0fc62404 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -116,6 +116,23 @@ public final class GtkBackend:
+     var globalCSSProvider: CSSProvider?
+
+     public func runMainLoop(_ callback: @escaping @MainActor () -> Void) {
++        #if os(Windows)
++            // GTK 4's default GSK renderer on Windows is GPU/OpenGL-backed (the
++            // `ngl`/`gl` renderer). Creating that GL context fails on the
++            // remote-desktop / RDP / headless session this app is launched into on
++            // the clean-PC probe box (accessed over RustDesk): the GL surface the
++            // remote session exposes cannot back a GskGLRenderer, so no GskRenderer
++            // ever realizes for the window's surface and the window never paints or
++            // presents — the probe captures only the launcher console, with no
++            // CueSync window anywhere on screen. Force GTK's pure-software Cairo
++            // renderer, which needs no GPU/GL context and always succeeds, so the
++            // window reliably appears. Set here, before `gtkApp.run`
++            // (g_application_run -> activate -> window realize -> first GskRenderer),
++            // so GSK reads it before selecting a renderer. GLib's own public API
++            // (g_setenv), Windows-only; Linux/macOS keep their working default
++            // renderers untouched.
++            _ = g_setenv("GSK_RENDERER", "cairo", 1)
++        #endif
+         gtkApp.run { window in
+             self.measurementCustomLabel = (self.createTextView() as! CustomLabel)
+             self.precreatedWindow = window

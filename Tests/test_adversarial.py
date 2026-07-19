@@ -1016,6 +1016,10 @@ GESTURE_STEP_NAME = "Patch swift-cross-ui GTK interactivity"
 # file, kept in its own reviewable file (never merged into GESTURE_PATCH_NAME —
 # see CUESYNC9WindowsInputDispatchWorkflowTests' non-overlapping-hunk check).
 WINDOWS_INPUT_PATCH_NAME = "swift-cross-ui-0.8.0-windows-input.patch"
+# CUESYNC-9 §0.3 (round 4): a third, distinct root-cause patch against the same
+# upstream file (runMainLoop — GSK_RENDERER=cairo for the remote-desktop GL-renderer
+# failure), kept in its own reviewable file, disjoint hunk from the other two.
+WINDOWS_GSK_PATCH_NAME = "swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
 
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
@@ -1679,11 +1683,11 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME])
+    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME, WINDOWS_GSK_PATCH_NAME])
     assert gtk_patches == expected, (
-        "spec §4: expected exactly the two named checked-in patches touching "
-        "GtkBackend.swift (" + repr(expected) + "); a THIRD file or a divergent "
-        "copy of either is a supply-chain risk. Found: " + repr(gtk_patches)
+        "spec §4/§0.3: expected exactly the three named checked-in patches touching "
+        "GtkBackend.swift (" + repr(expected) + "); a FOURTH file or a divergent "
+        "copy of any is a supply-chain risk. Found: " + repr(gtk_patches)
     )
     dev_script = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
     assert dev_script.is_file(), "scripts/patch-swift-cross-ui.sh must exist (spec §3)"

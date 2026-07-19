@@ -160,6 +160,30 @@ jobs:
             echo "Applied swift-cross-ui Windows input patch"
           fi
 
+      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
+      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
+      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
+      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
+      # so the window never realizes a renderer and never appears — the probe captures
+      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
+      # g_setenv. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
+      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Applied after the input-dispatch
+      # patch above and before "Build (release)" below; `git apply --reverse --check`
+      # guards idempotency.
+      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
+        run: |
+          set -euo pipefail
+          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+          cd .build/checkouts/swift-cross-ui
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
+          else
+            git apply "$PATCH"
+            echo "Applied swift-cross-ui Windows GSK-renderer patch"
+          fi
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -628,6 +652,41 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows input patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
+      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
+      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
+      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
+      # so no GskRenderer realizes and the window never appears — the probe captures
+      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
+      # g_setenv. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
+      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Clears the Windows read-only flag on
+      # exactly GtkBackend.swift first (same rationale as the gulong/gsize step),
+      # applied after the input-dispatch patch above and before "Build (release)" below;
+      # `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
           }
           Pop-Location
 
@@ -1310,6 +1369,41 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows input patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
+      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
+      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
+      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
+      # so no GskRenderer realizes and the window never appears — the probe captures
+      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
+      # g_setenv. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
+      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
+      # dependency itself is never edited in place. Clears the Windows read-only flag on
+      # exactly GtkBackend.swift first (same rationale as the gulong/gsize step),
+      # applied after the input-dispatch patch above and before "Test" below (which
+      # builds before it runs); `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
           }
           Pop-Location
 

@@ -1,0 +1,399 @@
+import Foundation
+import XCTest
+
+// =============================================================================
+// CUESYNC-9 §0.3 / step-4-contingency compliance — the GtkBackend Windows
+// GSK-renderer patch (round 4): its presence, placement, idempotency, read-only
+// scoping, pin, and no-regression on the CUESYNC-8 interactivity patch and the
+// CUESYNC-9 input-dispatch patch, across all three GtkBackend-compiling CI legs
+// (macos, windows-build, windows-test), and the checked-in `.patch` file itself.
+//
+// Same rationale as CUESYNC9WindowsInputDispatchWorkflowTests: `swift test` is
+// deterministic and network-free, so it cannot spin up a real Windows build box +
+// click-probe gate to prove a window actually appears — what it CAN verify is that
+// the workflow declares the patch step the spec's step-4 contingency requires, in
+// the order it requires, without vacuous-green shapes. The YAML-scoping helpers are
+// intentionally file-local (mirrors the repo convention of each compliance file
+// keeping its own parser — see CUESYNC9WindowsInputDispatchWorkflowTests' header).
+// =============================================================================
+
+private let auditedRevision = "a6d206370812e3b9edba259d167e848892c5013d"
+private let gskPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+private let windowsInputPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-input.patch"
+private let interactivityPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
+private let gskStepNamePattern = #"name:\s*Patch swift-cross-ui Windows GSK renderer"#
+
+final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
+
+    /// The GSK-renderer patch step must exist on all three legs that compile GtkBackend.
+    func testGskPatchStepExistsOnAllThreeGtkBackendCompilingLegs() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            XCTAssertNotNil(
+                job.firstLineIndex(matching: gskStepNamePattern),
+                "\(jobName) must declare a 'Patch swift-cross-ui Windows GSK renderer' step (CUESYNC-9 §0.3)")
+        }
+    }
+
+    /// The GSK-renderer step must run AFTER the CUESYNC-9 input-dispatch patch step on
+    /// every leg (apply order: interactivity -> input -> gsk).
+    func testGskPatchStepRunsAfterTheInputDispatchPatchOnEveryLeg() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            guard let inputLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows input dispatch"#) else {
+                XCTFail("\(jobName) has no CUESYNC-9 input-dispatch patch step to order against")
+                continue
+            }
+            guard let gskLine = job.firstLineIndex(matching: gskStepNamePattern) else {
+                XCTFail("\(jobName) has no GSK-renderer patch step to order")
+                continue
+            }
+            XCTAssertGreaterThan(gskLine, inputLine,
+                "\(jobName)'s GSK-renderer patch step must run AFTER the input-dispatch patch step " +
+                "(apply order interactivity -> input -> gsk, CUESYNC-9 §0.3)")
+        }
+    }
+
+    /// The GSK-renderer patch must land before `swift build`/`swift test` compiles GtkBackend.
+    func testGskPatchStepRunsBeforeBuildOrTestOnEveryLeg() throws {
+        let expectations: [(job: String, pattern: String)] = [
+            ("macos", #"run:\s*swift build -c release"#),
+            ("windows-build", #"run:\s*swift build -c release"#),
+            ("windows-test", #"swift test -c release"#),
+        ]
+        for (jobName, invocationPattern) in expectations {
+            let job = try JobBlocksGSK.require(jobName)
+            guard let patchLine = job.firstLineIndex(matching: gskStepNamePattern) else {
+                XCTFail("\(jobName) has no GSK-renderer patch step to order against build/test")
+                continue
+            }
+            guard let invocationLine = job.firstLineIndex(matching: invocationPattern) else {
+                XCTFail("\(jobName) must still invoke the expected build/test command")
+                continue
+            }
+            XCTAssertLessThan(patchLine, invocationLine,
+                "\(jobName)'s GSK-renderer patch step must run BEFORE the build/test step that compiles " +
+                "GtkBackend (CUESYNC-9 §0.3)")
+        }
+    }
+}
+
+final class CUESYNC9GskRendererPatchIdempotencyAndScopeTests: XCTestCase {
+
+    /// Idempotent (git apply --reverse --check) on every leg.
+    func testGskPatchStepIsGuardedByReverseApplyCheckOnEveryLeg() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
+            XCTAssertTrue(block.contains("git apply --reverse --check"),
+                "\(jobName)'s GSK-renderer patch step must guard re-application with " +
+                "`git apply --reverse --check` so a second run is a no-op")
+        }
+    }
+
+    /// Clears the Windows read-only flag on exactly GtkBackend.swift on both Windows legs.
+    func testGskPatchStepClearsWindowsReadOnlyFlagOnBothWindowsLegs() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
+            XCTAssertTrue(block.contains("IsReadOnly"),
+                "\(jobName)'s GSK-renderer patch step must clear the Windows read-only flag " +
+                "(Set-ItemProperty ... -Name IsReadOnly -Value $false) before patching")
+        }
+    }
+
+    /// Read-only clear scoped to exactly GtkBackend.swift — never Widget.swift, never a
+    /// blanket -Recurse (the GSK patch touches only GtkBackend.swift).
+    func testGskPatchStepClearsReadOnlyOnExactlyGtkBackendSwiftNotOtherFiles() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
+            XCTAssertTrue(block.contains("GtkBackend.swift"),
+                "\(jobName)'s GSK-renderer patch step must clear read-only naming GtkBackend.swift specifically")
+            XCTAssertFalse(block.contains("Widget.swift"),
+                "\(jobName)'s GSK-renderer patch step must not touch Widget.swift — out of scope for this patch")
+            XCTAssertFalse(block.contains("-Recurse"),
+                "\(jobName)'s read-only clear must target the one named file, not recurse over the checkout")
+        }
+    }
+
+    /// Pinned in a comment naming the audited v0.8.0 commit on every leg.
+    func testGskPatchStepNamesTheAuditedV080CommitOnEveryLeg() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#, includingPrecedingComments: true)
+            XCTAssertTrue(block.contains(auditedRevision),
+                "\(jobName)'s GSK-renderer patch step (or its preceding comment) must name the audited " +
+                "v0.8.0 commit \(auditedRevision)")
+        }
+    }
+}
+
+final class CUESYNC9GskRendererPatchFileTests: XCTestCase {
+
+    func testGskPatchFileExists() {
+        XCTAssertTrue(FileManager.default.fileExists(atPath: RepoPathsGSK.gskPatch.path),
+            "\(gskPatchRelativePath) must exist — the fix must be a checked-in, reviewable patch, not an " +
+            "in-place dependency edit")
+    }
+
+    /// Targets only GtkBackend.swift, exactly one diff header.
+    func testGskPatchTargetsOnlyGtkBackendSwift() throws {
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        XCTAssertTrue(patch.contains("Sources/GtkBackend/GtkBackend.swift"),
+            "the patch must touch Sources/GtkBackend/GtkBackend.swift (runMainLoop, the audited site)")
+        let diffHeaderCount = patch.components(separatedBy: "diff --git a/").count - 1
+        XCTAssertEqual(diffHeaderCount, 1,
+            "the patch must touch exactly one file — found \(diffHeaderCount) diff --git headers")
+    }
+
+    /// A real unified diff, never sed/-replace.
+    func testGskPatchFileIsARealUnifiedDiffNotATextSubstitutionScript() throws {
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        XCTAssertTrue(patch.contains("diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift"),
+            "expected a real `diff --git` unified-diff header for GtkBackend.swift")
+        XCTAssertFalse(patch.contains("-replace") || patch.contains("sed -i") || patch.contains("sed 's"),
+            "the checked-in patch must be a real diff, not a -replace/sed text-substitution script")
+    }
+
+    /// Uses GTK/GLib's own API (g_setenv) to set GSK_RENDERER=cairo, Windows-only, and
+    /// introduces no new dependency/network/dynamic-load.
+    func testGskPatchUsesGLibSetenvForCairoRendererWithNoNewDependency() throws {
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        XCTAssertTrue(patch.contains("g_setenv"),
+            "the fix must set the env via GLib's own public API g_setenv — not a new dependency, not the " +
+            "Windows-only ucrt _putenv_s")
+        XCTAssertTrue(patch.contains("GSK_RENDERER") && patch.contains("cairo"),
+            "the fix must force GTK's software Cairo renderer via GSK_RENDERER=cairo")
+        XCTAssertTrue(patch.contains("#if os(Windows)"),
+            "the fix must be guarded to Windows only — Linux/macOS keep their working default renderers")
+        for banned in ["import ", "dlopen", "Process(", "URLSession", "http://", "https://"] {
+            XCTAssertFalse(patch.contains(banned),
+                "the patch must not introduce '\(banned)' — no new dependency, no network, no dynamic load")
+        }
+    }
+
+    /// No GtkFixed/absolute positioning introduced.
+    func testGskPatchDoesNotIntroduceGtkFixedOrAbsolutePositioning() throws {
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        XCTAssertFalse(patch.contains("Fixed("),
+            "the GSK-renderer patch must not introduce a Gtk.Fixed/absolute-positioning usage")
+    }
+
+    /// LF-only bytes — a CRLF-corrupted diff fails `git apply` on the Windows legs.
+    func testGskPatchFileContainsNoCarriageReturns() throws {
+        let data = try Data(contentsOf: RepoPathsGSK.gskPatch)
+        XCTAssertFalse(data.contains(0x0D),
+            "\(gskPatchRelativePath) must be LF-only (no \\r) — a CRLF-corrupted diff can fail `git apply` " +
+            "on the Windows legs this patch exists to fix")
+    }
+
+    /// Not a degenerate stub.
+    func testGskPatchFileHasSubstantiveContentNotAnEmptyStub() throws {
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        let lineCount = patch.split(separator: "\n", omittingEmptySubsequences: false).count
+        XCTAssertGreaterThan(lineCount, 20,
+            "\(gskPatchRelativePath) is suspiciously small (\(lineCount) lines) for a real, documented diff")
+    }
+
+    /// Kept SEPARATE from the other two patches (one root cause per patch, independently revertable).
+    func testGskPatchIsADistinctFileFromTheOtherTwoPatches() {
+        XCTAssertNotEqual(RepoPathsGSK.gskPatch.path, RepoPathsGSK.windowsInputPatch.path)
+        XCTAssertNotEqual(RepoPathsGSK.gskPatch.path, RepoPathsGSK.interactivityPatch.path)
+    }
+}
+
+final class CUESYNC9GskRendererDisjointHunkTests: XCTestCase {
+
+    /// All three patches touch GtkBackend.swift but at disjoint anchors — the GSK patch
+    /// is anchored at runMainLoop, distinct from the input patch (mainRunLoopTicklingLoop)
+    /// and the interactivity patch (createPathWidget) — so they apply cleanly in sequence.
+    func testThreePatchesTargetDisjointAnchorsWithinGtkBackendSwift() throws {
+        let interactivity = try String(contentsOf: RepoPathsGSK.interactivityPatch, encoding: .utf8)
+        let windowsInput = try String(contentsOf: RepoPathsGSK.windowsInputPatch, encoding: .utf8)
+        let gsk = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+
+        // Inspect only the unified-diff body (from the first `diff --git` on): the
+        // header comment above it legitimately NAMES the other two anchors to explain
+        // disjointness, so the exclusion must be checked against the actual hunk, not
+        // the prose.
+        guard let diffStart = gsk.range(of: "diff --git a/") else {
+            XCTFail("GSK patch has no `diff --git` body")
+            return
+        }
+        let gskDiffBody = String(gsk[diffStart.lowerBound...])
+
+        XCTAssertTrue(gskDiffBody.contains("runMainLoop"),
+            "the GSK patch's GtkBackend.swift hunk must be anchored at runMainLoop")
+        XCTAssertFalse(gskDiffBody.contains("createPathWidget"),
+            "the GSK patch hunk must not touch createPathWidget — that is the CUESYNC-8 interactivity patch's hunk")
+        XCTAssertFalse(gskDiffBody.contains("mainRunLoopTicklingLoop"),
+            "the GSK patch hunk must not touch mainRunLoopTicklingLoop — that is the CUESYNC-9 input patch's hunk")
+        XCTAssertFalse(interactivity.contains("g_setenv"),
+            "the interactivity patch must not contain the GSK fix")
+        XCTAssertFalse(windowsInput.contains("g_setenv"),
+            "the input-dispatch patch must not contain the GSK fix — kept separate, one root cause per patch")
+    }
+}
+
+final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
+
+    /// scripts/patch-swift-cross-ui.sh applies all three patches in executable code.
+    func testDevScriptReferencesAllThreePatchFilesInExecutableCode() throws {
+        let codeOnly = try codeOnlyDevScript()
+        XCTAssertTrue(codeOnly.contains(gskPatchRelativePath),
+            "scripts/patch-swift-cross-ui.sh must apply \(gskPatchRelativePath) in executable code")
+        XCTAssertTrue(codeOnly.contains(windowsInputPatchRelativePath),
+            "scripts/patch-swift-cross-ui.sh must still apply the input-dispatch patch")
+        XCTAssertTrue(codeOnly.contains(interactivityPatchRelativePath),
+            "scripts/patch-swift-cross-ui.sh must still apply the interactivity patch")
+    }
+
+    /// Each of the three patches is guarded idempotently and actually applied.
+    func testDevScriptAppliesAllThreePatchesIdempotentlyAndActually() throws {
+        let codeOnly = try codeOnlyDevScript()
+        let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
+        XCTAssertGreaterThanOrEqual(reverseCheckCount, 3,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the three patches with its own " +
+            "`git apply --reverse --check` — found only \(reverseCheckCount)")
+        let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
+        let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
+        XCTAssertGreaterThanOrEqual(plainApplyCount, 3,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the three patches — " +
+            "found only \(plainApplyCount)")
+    }
+
+    func testDevScriptStillFailsFastOnAnyError() throws {
+        let codeOnly = try codeOnlyDevScript()
+        XCTAssertTrue(codeOnly.contains("set -euo pipefail") || codeOnly.contains("set -eu") || codeOnly.contains("set -e"),
+            "scripts/patch-swift-cross-ui.sh must keep fail-fast shell options")
+    }
+
+    private func codeOnlyDevScript() throws -> String {
+        let text = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+            .joined(separator: "\n")
+    }
+}
+
+final class CUESYNC9GskRendererNoRegressionTests: XCTestCase {
+
+    /// The CUESYNC-8 interactivity patch and the CUESYNC-9 input-dispatch patch are
+    /// unchanged by round 4 (still exist, still target their audited files/anchors).
+    func testPriorTwoPatchesAreUnchangedAndStillPresent() throws {
+        let interactivity = try String(contentsOf: RepoPathsGSK.interactivityPatch, encoding: .utf8)
+        XCTAssertTrue(interactivity.contains(#""can-target""#) && interactivity.contains("canTarget = false"),
+            "the CUESYNC-8 interactivity patch's can-target hunk must stay intact")
+        let windowsInput = try String(contentsOf: RepoPathsGSK.windowsInputPatch, encoding: .utf8)
+        XCTAssertTrue(windowsInput.contains("g_main_context_iteration") && windowsInput.contains("mainRunLoopTicklingLoop"),
+            "the CUESYNC-9 input-dispatch patch must stay intact (drain + tickler hunks)")
+    }
+
+    /// The input-dispatch patch step's name is unchanged on all legs (round 4 must not
+    /// rename or remove it — the input suite pins that name).
+    func testInputDispatchPatchStepStillPresentOnAllLegs() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocksGSK.require(jobName)
+            XCTAssertNotNil(job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows input dispatch"#),
+                "\(jobName) must still declare the CUESYNC-9 input-dispatch patch step (round 4 must not remove it)")
+        }
+    }
+}
+
+final class CUESYNC9GskRendererFindingsTests: XCTestCase {
+
+    /// specs/CUESYNC-9-findings.md documents the round-4 GSK-renderer root cause + fix.
+    func testFindingsDocumentsRound4GskRendererRootCauseAndFix() throws {
+        let text = try String(contentsOf: RepoPathsGSK.findings, encoding: .utf8)
+        XCTAssertTrue(text.contains("GSK_RENDERER") && text.contains("cairo"),
+            "specs/CUESYNC-9-findings.md must document the GSK_RENDERER=cairo fix (round 4)")
+        XCTAssertTrue(text.lowercased().contains("remote desktop") || text.lowercased().contains("rustdesk") || text.contains("RDP"),
+            "specs/CUESYNC-9-findings.md must ground the root cause in the remote-desktop environment evidence")
+        XCTAssertTrue(text.contains("Fork W"),
+            "specs/CUESYNC-9-findings.md must keep classifying the failure as Fork W")
+        XCTAssertTrue(text.contains(auditedRevision),
+            "specs/CUESYNC-9-findings.md must name the audited pinned commit \(auditedRevision)")
+    }
+}
+
+// MARK: - Helpers (deliberately file-local — see the file header rationale)
+
+private enum RepoPathsGSK {
+    /// Tests/CueSyncCoreTests/<this file> -> Tests/CueSyncCoreTests -> Tests -> repo root
+    static let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    static let workflow = root.appendingPathComponent(".github/workflows/swift-windows.yml")
+    static let gskPatch = root.appendingPathComponent(gskPatchRelativePath)
+    static let windowsInputPatch = root.appendingPathComponent(windowsInputPatchRelativePath)
+    static let interactivityPatch = root.appendingPathComponent(interactivityPatchRelativePath)
+    static let devScript = root.appendingPathComponent("scripts/patch-swift-cross-ui.sh")
+    static let findings = root.appendingPathComponent("specs/CUESYNC-9-findings.md")
+}
+
+private enum WorkflowFileGSK {
+    static func contents() throws -> String {
+        try String(contentsOf: RepoPathsGSK.workflow, encoding: .utf8)
+    }
+}
+
+private struct JobBlockGSK {
+    let text: String
+    let lines: [String]
+
+    func firstLineIndex(matching pattern: String, caseInsensitive: Bool = false) -> Int? {
+        let options: String.CompareOptions = caseInsensitive ? [.regularExpression, .caseInsensitive] : [.regularExpression]
+        return lines.firstIndex { $0.range(of: pattern, options: options) != nil }
+    }
+
+    func stepBlock(named namePattern: String, includingPrecedingComments: Bool = false,
+                   file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        guard let nameIndex = firstLineIndex(matching: #"name:\s*"# + namePattern) else {
+            XCTFail("no step matching '\(namePattern)' found in job", file: file, line: line)
+            return ""
+        }
+        var start = nameIndex
+        if includingPrecedingComments {
+            var cursor = nameIndex - 1
+            while cursor >= 0, lines[cursor].trimmingCharacters(in: .whitespaces).hasPrefix("#") {
+                start = cursor
+                cursor -= 1
+            }
+        } else {
+            start = nameIndex
+        }
+        var end = lines.count
+        for i in (nameIndex + 1)..<lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- name:") || trimmed.hasPrefix("- uses:") {
+                end = i
+                break
+            }
+        }
+        return lines[start..<end].joined(separator: "\n")
+    }
+}
+
+private enum JobBlocksGSK {
+    static func require(_ name: String, file: StaticString = #filePath, line: UInt = #line) throws -> JobBlockGSK {
+        let raw = try WorkflowFileGSK.contents()
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        let allLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let start = allLines.firstIndex(of: "  \(name):") else {
+            XCTFail("could not locate the top-level `\(name):` job in .github/workflows/swift-windows.yml",
+                    file: file, line: line)
+            return JobBlockGSK(text: "", lines: [])
+        }
+        var end = allLines.count
+        for i in (start + 1)..<allLines.count {
+            if allLines[i].range(of: #"^  [A-Za-z0-9_-]+:\s*$"#, options: .regularExpression) != nil {
+                end = i
+                break
+            }
+        }
+        let block = Array(allLines[start..<end])
+        return JobBlockGSK(text: block.joined(separator: "\n"), lines: block)
+    }
+}
