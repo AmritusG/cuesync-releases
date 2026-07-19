@@ -408,18 +408,39 @@ final class PortComplianceTests: XCTestCase {
         }
     }
 
-    /// spec §B.10/§3 Behavior: the swift-cross-ui window must mirror `App/CueSyncApp.swift`
-    /// exactly — title **CUE SYNC**, default size **1200×800**, minimum **1200×700**. CI is
-    /// headless and can't launch the window (spec §E.22), so this structural check on the
-    /// literal source values is the closest automated proxy to that manual acceptance check.
+    /// spec §B.10/§3 Behavior: the swift-cross-ui window mirrors `App/CueSyncApp.swift`'s
+    /// title **CUE SYNC** and default size **1200×800**. CI is headless and can't launch the
+    /// window (spec §E.22), so this structural check on the literal source values is the
+    /// closest automated proxy to that manual acceptance check.
+    ///
+    /// CUESYNC-9 round 8 (see specs/CUESYNC-9-findings.md §0.7): §B.10's *minimum* 1200×700
+    /// clause is deliberately NOT ported as a `.frame(minWidth:/minHeight:)` on the content.
+    /// The app's own Windows stderr (captured green on windows-latest CI) proved that a hard
+    /// content min-height becomes swift-cross-ui's `minimumWindowSize`; when the display can't
+    /// grant it (a headless/remote-desktop window caps at 1200x657) `WindowReference.update`
+    /// clamps back up to 700, commits it, GTK re-allocates 657, and the resize callback
+    /// re-enters update — an infinite relayout loop that collapses the UI and kills all input
+    /// (the CUESYNC-7/8/9 "paints but nothing clickable" defect). GTK offers no hard window
+    /// minimum that yields to a smaller display, so the port approximates §B.10 with
+    /// `.defaultSize` (preferred opening size) + the inner ScrollView for overflow, and drops
+    /// the min-frame. This assertion therefore *forbids* the min-frame so the root-cause defect
+    /// cannot silently regress back into the source.
     func testUICueSyncAppDeclaresTheSpecifiedWindowTitleAndSizing() throws {
         let url = Self.sourceRoot.appendingPathComponent("UI/CueSyncApp.swift")
         let src = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(src.contains("\"CUE SYNC\""), "UI/CueSyncApp.swift must title the window exactly \"CUE SYNC\"")
         XCTAssertTrue(src.contains("width: 1200") && src.contains("height: 800"),
                       "UI/CueSyncApp.swift must set the default size to 1200x800 (spec §B.10)")
-        XCTAssertTrue(src.contains("minWidth: 1200") && src.contains("minHeight: 700"),
-                      "UI/CueSyncApp.swift must set the minimum size to 1200x700 (spec §B.10)")
+        // Scan CODE only — the explanatory comment above the window intentionally names the
+        // forbidden `.frame(min…)` modifier, so a raw substring check would match its own prose.
+        let codeOnly = src
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        XCTAssertFalse(codeOnly.contains(".frame(min"),
+                       "UI/CueSyncApp.swift must NOT put a hard .frame(minWidth:/minHeight:) on the "
+                        + "window content — it drives the Windows relayout-loop input death "
+                        + "(CUESYNC-9 findings §0.7); express the preferred size via .defaultSize only")
     }
 
     /// spec CUESYNC-7 §K: the CUESYNC-6-era guard this replaces asserted `.commands` must

@@ -1,5 +1,79 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.7 — ROUND 8 (2026-07-19): the app's OWN Windows stderr, finally auditable, overturns the main-loop diagnosis — it is a layout-thrash loop from a content min-height the display can't grant
+
+> **This round replaces guessing with the app's actual Windows runtime output.** The branch is now
+> pushed (`origin/adw/CUESYNC-9`), so `.github/workflows/swift-windows.yml` ran on real
+> `windows-latest`. The origin tip went **fully green** (run `29698945034`: build + test + macOS all
+> pass), which independently machine-confirms round 7's `#if os(Windows)` hunk **compiles and links on
+> Windows** — the one structural gap every prior round flagged. More important: round 6's **"Capture
+> CueSync.exe startup diagnostics"** step (build job `88224564640`) launched the real self-contained
+> exe headless and dumped its stderr **into the CI job log** — retrievable with `gh run view --log`,
+> and therefore the FIRST time the app's own Windows diagnostics are **independently auditable** (the
+> `.factory/probe/CueSync-startup.log` channel §0.6 relied on is gitignored; this one is not).
+
+**What the log actually shows (deduplicated, whole run):** the `=== CUE SYNC — Windows startup
+diagnostics ===` banner + `argv` (exe reached Swift `App.init()`), then **148 GTK layout messages and
+nothing else** — 100 `Gtk-WARNING` + 48 `Gtk-CRITICAL`, every one about a single `GtkFixed`:
+- `Allocating size to GtkFixed … without calling gtk_widget_measure(). How does the code know the size to allocate?` (×48)
+- `Gtk-CRITICAL … Allocation height too small. Tried to allocate 1200x657, but GtkFixed … needs at least 1200x800` (early) → `… at least 1200x700` (steady state) (×48)
+- `Trying to measure GtkFixed … for height of 657, but it needs at least 700` (×46)
+
+**Zero** `Pango`/`fontconfig`/font lines. **Zero** `Gsk`/GL/`renderer` lines. No crash/assert. Cairo
+is active (forced by the gsk-renderer patch).
+
+**This DISPROVES §0.6's branch-(A) main-loop-starvation classification.** §0.6 itself carried the
+honest caveat that its "(A)" reading came from round 7's *commit message*, not from re-auditable log
+lines. Now that the lines are auditable they say the opposite of starvation: GTK is **actively
+re-running allocation every ~600 ms for 25 s** — a starved main loop paints one frame then freezes
+silently; it does not emit a steady 2 Hz stream of fresh layout criticals. The event path is not
+being starved by a Win32-queue race. The `GtkFixed`-without-`gtk_widget_measure()` warning is
+**inherent swift-cross-ui architecture** (every container is a `Gtk.Fixed` populated by Swift-side
+layout — `GtkBackend.createContainer` returns `Fixed()`, children `put`/`move`d to absolute
+positions), so it prints on macOS/Linux too and is **noise**. The *signal* is the `Gtk-CRITICAL`.
+
+**Root cause (mechanically traced in the resolved checkout @ `a6d2063`, locally auditable):** a
+content minimum height that the runtime window cannot be granted, driving an **infinite
+relayout/resize loop**:
+1. `CueSyncApp.swift` put `.frame(minWidth: 1200, minHeight: 700)` on the window content.
+2. `WindowReference.update` (`Sources/SwiftCrossUI/Scenes/WindowReference.swift:194`) computes
+   `minimumWindowSize` by proposing `.zero` to the view graph → the frame clamps it to **700** high.
+3. The display caps the window: a headless CI monitor and a RustDesk remote session both yield a
+   content allocation of **1200x657**. Lines 224-233 clamp the window size back **up** to
+   `max(700, 657) = 700`; line 235 sees `700 ≠ 657` and **restarts `update`**, committing the 700
+   height via `backend.setSize(ofWindow:)` (line 274).
+4. GTK still can only allocate **657**. `gtk_custom_root_widget_allocate` (the `CustomRootWidget` C
+   helper) fires its resize callback with 657 → `.onResize` (`WindowReference.swift:164`) re-enters
+   `update(proposedWindowSize: 657)` → back to step 3. **The two never agree.** That is the 2 Hz
+   `Gtk-CRITICAL` flood. A window in permanent layout thrash renders collapsed and never settles to
+   dispatch input → the exact "paints but nothing is clickable" symptom of CUESYNC-7/8/9, and the
+   undersized "background + scrollbar only" probe screenshots.
+
+macOS never hit this: its display grants 1200x800 ≥ 700, so step 3's clamp equals the proposal, no
+restart, no loop — which is why the same GtkBackend + ContentView rendered correctly at 1200x832 on
+macOS in every prior round's local reproduction.
+
+**Round-8 fix (view-layer lane, `CueSync/CueSync/UI/CueSyncApp.swift`):** remove the hard
+`.frame(minWidth: 1200, minHeight: 700)`. The preferred opening size stays `.defaultSize(1200×800)`
+(honored wherever the display allows); the inner `ScrollView` already returns the *proposed* height
+when one is given (`ScrollView.swift:138`), so it absorbs vertical overflow on any smaller/constrained
+display instead of forcing an unsatisfiable window minimum. No screen/wording/layout-order/section
+change; macOS opens at 1200×800 exactly as before. This is the first CUESYNC-9 fix grounded in the
+app's real Windows runtime output rather than a source-only theory.
+
+**Round 7's `windows-input.patch` is left in place this round, but its premise is now disproven.** It
+is CI-green (compiles/links/tests on `windows-latest`) and independent of the resize loop (the loop
+runs on GLib timeouts, not `RunLoop.main`), so reverting it simultaneously would change two things at
+once and destabilize a green CI on a hunch. Flagged as a candidate revert once round 8 is confirmed to
+be the actual mover — do not treat it as load-bearing.
+
+**Verification now reachable (the machine-check the ticket demands).** Push and re-read the same
+diagnostics step: the fix predicts the `Gtk-CRITICAL: Allocation height too small` flood **disappears**
+(window settles at whatever the display grants, ScrollView scrolls). If a click-probe/GTE pass is run,
+the window should render the full UI and respond. If the CRITICALs are gone but input is *still* dead,
+THEN re-open toward a backend decision (§0.6 round-8 tree, WinUIBackend) — but the layout loop is a
+confirmed defect regardless and must be fixed first.
+
 ## §0.6 — ROUND 7 (2026-07-19): the round-6 log came back branch (A); stop pumping `RunLoop.main` on Windows entirely
 
 > This is the seventh CUESYNC-9 round and the first **evidence-driven** input patch — it acts on

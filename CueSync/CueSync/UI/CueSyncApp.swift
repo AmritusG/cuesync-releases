@@ -155,7 +155,27 @@ struct CueSyncApp: App {
         WindowGroup("CUE SYNC") {
             ContentView()
                 .environment(state)
-                .frame(minWidth: 1200, minHeight: 700)
+                // CUESYNC-9 round 8 — NO hard content minimum here. Root cause, from the
+                // app's OWN Windows stderr (the round-6 diagnostics step, finally captured
+                // green on windows-latest CI — see specs/CUESYNC-9-findings.md §0.7): a
+                // `.frame(minWidth:/minHeight:)` on the window's content becomes
+                // swift-cross-ui's `minimumWindowSize` (WindowReference.update). When the
+                // display cannot grant it — a headless CI monitor and a remote-desktop
+                // (RustDesk) session both cap the window content at 1200x657 — the update
+                // clamps the size back UP to the 700 minimum, commits it via
+                // `setSize(ofWindow:)`, GTK can still only allocate 657, the CustomRootWidget
+                // resize callback re-enters `update`, and the two never agree: an infinite
+                // relayout loop. That is the ~2 Hz `Gtk-CRITICAL: Allocation height too
+                // small … 1200x657 … needs at least 1200x700` flood in the startup log — the
+                // ONLY runtime error on Windows (no Pango/font, no GSK/GL). A window stuck
+                // in permanent layout thrash renders collapsed and dispatches no input: the
+                // "paints but nothing is clickable" symptom that CUESYNC-7/8/9 all reported.
+                // The prior 7 rounds' main-loop-starvation theory is disproven by that same
+                // log — GTK is actively re-laying-out, not starved. Fix: express the
+                // preferred opening size with `.defaultSize` only (below); the inner
+                // ScrollView absorbs vertical overflow on any smaller/constrained display.
+                // macOS is unaffected — its display grants 1200x800, so the clamp/loop never
+                // fired there (the UI already rendered correctly at 1200x832).
                 .task { state.loadPreferences() }
         }
         .defaultSize(width: 1200, height: 800)

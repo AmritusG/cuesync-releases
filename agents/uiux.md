@@ -257,3 +257,43 @@ returns, and write into one of them.** A measurement is only as good as its chan
 
 Generalized: **capture + a dead delivery channel = no measurement.** Wire the instrument to what the
 harness returns before you trust it to unblock the next round.
+
+## When the measurement finally arrives, let it overturn the theory — don't make it confirm the story (CUESYNC-9, round 8)
+
+Rounds 1–7 all built on one theory: Foundation's `RunLoop.main` starves GDK of the Win32 message
+queue → "paints but no input." Round 6 wired the instrument (capture `CueSync.exe` stderr) and a CI
+channel that returns it. Round 8, the branch was pushed, `swift-windows.yml` ran the diagnostics step
+on real `windows-latest`, and the log came back **readable via `gh run view --log`** — the first
+independently-auditable Windows runtime evidence in the whole saga.
+
+It said the opposite of the theory. The app's only runtime errors were **148 GTK layout messages**
+(100 WARNING + 48 CRITICAL), all one widget: `Gtk-CRITICAL: Allocation height too small … 1200x657 …
+needs at least 1200x700`, repeating **~2 Hz for 25 s**. Zero Pango/font, zero GSK/GL. A starved main
+loop paints one frame and freezes silently — it does **not** emit a steady stream of fresh layout
+criticals. GTK was busy re-laying-out the whole time. Root cause: `ContentView`'s
+`.frame(minWidth: 1200, minHeight: 700)` became swift-cross-ui's `minimumWindowSize`; when the display
+can't grant it (headless/remote-desktop caps the window at 657) `WindowReference.update` clamps back up
+to 700, commits it, GTK re-allocates 657, the `CustomRootWidget` resize callback re-enters `update` —
+an **infinite relayout loop** that never settles, so the UI renders collapsed and dispatches no input.
+Fix: drop the hard content min; keep `.defaultSize`; let the inner `ScrollView` absorb overflow.
+
+- **Separate inherent toolkit noise from the real signal.** The `Allocating size to GtkFixed …
+  without calling gtk_widget_measure()` warning is how swift-cross-ui's GtkBackend works on *every*
+  platform (every container is a `Gtk.Fixed` positioned by Swift-side layout) — noise. The `CRITICAL`
+  was the signal. Grep-dedup the log and count by message type before theorizing.
+- **A hard minimum size the display can't satisfy is a deadlock, not a nicety.** On GtkBackend a
+  content `.frame(min…)` is not a soft "prefer at least" — it is a window minimum enforced through a
+  clamp-and-recommit loop with no floor for "yield to a smaller display." There is no GTK hard window
+  minimum that yields; the resilient port has **no** hard min and uses `.defaultSize` + a ScrollView.
+- **A faithful-port literal can be the bug.** Spec §B.10 said "minimum 1200×700" and a compliance test
+  pinned the exact `minWidth:1200`/`minHeight:700` source tokens — so the test was enforcing the
+  root-cause defect. When an acceptance criterion and the ticket's own DoD ("fix input at the root")
+  contradict, the criterion that encodes the defect loses: fix the code, flip the test to *forbid* the
+  defect (so it can't regress), document the divergence loudly, and surface the spec tension.
+- **Don't let a disproven-but-green patch masquerade as load-bearing.** Round 7's input patch is
+  CI-green and independent of the resize loop, so it stays this round — but its premise is dead. Flag
+  it as a candidate revert; don't let "it's committed and green" harden a fix for a non-problem.
+
+Generalized: **an unverifiable fix is a guess, and a guess repeated seven times is still a guess.**
+The moment real evidence lands, rank it above every prior round's narrative — even (especially) your
+own. CUESYNC-9 §0.7, `CueSync/CueSync/UI/CueSyncApp.swift`.
