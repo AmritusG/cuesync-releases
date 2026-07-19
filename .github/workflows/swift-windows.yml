@@ -728,6 +728,14 @@ jobs:
       # unresolved (junction) path — same as the existing "not a reparse
       # point" branch — lets the step degrade instead of hard-failing,
       # since junctions are transparent to normal file I/O like Copy-Item.
+      # CI-observed (this branch, run 29706722369): even with the ResolveLinkTarget
+      # retry above, this step now fails one line later — "Copy-Item: Access to the
+      # path 'D:\...\.build\release' is denied." — on the fallback (unresolved
+      # junction) path. The retry above only covers resolving the link; the
+      # transient post-link lock on the directory itself can still be held when
+      # Copy-Item touches it a moment later, whether or not resolution succeeded.
+      # Wrapping the copy itself in the same retry-with-backoff pattern lets that
+      # lock clear before giving up.
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
@@ -742,9 +750,21 @@ jobs:
             }
           }
           $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
-          Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File |
-            Where-Object { $_.Extension -eq '.dll' } |
-            Copy-Item -Destination $artifactDir -Force
+          $gtkDlls = Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File | Where-Object { $_.Extension -eq '.dll' }
+          $copied = $false
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              $gtkDlls | Copy-Item -Destination $artifactDir -Force -ErrorAction Stop
+              $copied = $true
+              break
+            } catch {
+              Start-Sleep -Seconds 3
+            }
+          }
+          if (-not $copied) {
+            Write-Error "failed to copy GTK 4 runtime DLLs into $artifactDir after 5 attempts"
+            exit 1
+          }
 
       # spec §0.6/§D.18 — the dependency-checking tool: marcoesposito1988/
       # dependency_runner's `wldd` ("ldd for Windows"), corrected from the
@@ -1189,6 +1209,18 @@ jobs:
       # other two ResolveLinkTarget call sites in this job: this step's own
       # `if: always()` contract — always producing SOME `dir` value even when
       # earlier steps failed — must hold even when the resolve itself throws.
+      # CI-observed (this branch, run 29706722369): "Upload build artifact" below
+      # failed with "EPERM: operation not permitted, stat 'D:\...\.build\release'"
+      # even though this step itself reported success — it had fallen back to the
+      # unresolved junction path (ResolveLinkTarget exhausted its retries again)
+      # and that path was still locked by the time upload-artifact's Node-based
+      # walker stat'd it moments later. The likely holder: the "Capture CueSync.exe
+      # startup diagnostics" step just above launches CueSync.exe out of this same
+      # directory and force-kills it — Stop-Process returning doesn't guarantee the
+      # OS has released every handle into the directory yet. Since upload-artifact
+      # has no retry of its own, this step now also waits for $artifactDir to be
+      # genuinely enumerable before publishing it, giving that lock the same
+      # retry-with-backoff treatment as the ResolveLinkTarget call above it.
       - name: Resolve real build output directory (Windows junction workaround)
         id: resolve-artifact-dir
         if: always()
@@ -1206,6 +1238,14 @@ jobs:
               }
             }
             $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              try {
+                Get-ChildItem -LiteralPath $artifactDir -ErrorAction Stop | Out-Null
+                break
+              } catch {
+                Start-Sleep -Seconds 3
+              }
+            }
           } else {
             $artifactDir = ".build\release"
           }
