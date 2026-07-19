@@ -2487,7 +2487,7 @@ def test_windows_input_patch_is_a_real_unified_diff_touching_only_gtkbackend_and
 
     for tool in ["-replace", "sed -i", "sed 's", "perl -pi", "awk '", "> "]:
         assert tool not in "\n".join(_win_input_added_lines()), (
-            "spec CUESYNC-9 §4 (\"never sed/-replace\"): the checked-in fix must be a "
+            'spec CUESYNC-9 §4 ("never sed/-replace"): the checked-in fix must be a '
             "real diff, not a `%s` text-substitution/redirect. Found in an added line."
             % tool
         )
@@ -2506,7 +2506,7 @@ def test_windows_input_patch_is_a_real_unified_diff_touching_only_gtkbackend_and
     for repin in ["Package.swift", "Package.resolved", "exact:", ".package(", "from:"]:
         offenders = [c for c in _win_input_added_lines() if repin in c]
         assert not offenders, (
-            "spec CUESYNC-9 acceptance: swift-cross-ui stays pinned `exact: \"0.8.0\"` and "
+            'spec CUESYNC-9 acceptance: swift-cross-ui stays pinned `exact: "0.8.0"` and '
             "Package.swift/Package.resolved are UNCHANGED — the windows-input diff body "
             "must not touch the manifest or re-pin. An added line contains `%s`:\n    %s"
             % (repin, offenders[0].strip())
@@ -2531,17 +2531,23 @@ def test_windows_input_patch_drain_is_scoped_windows_only_and_nonblocking():
     _win_input_or_skip()
     added = _win_input_added_lines()
 
-    if_idx = next((i for i, l in enumerate(added) if "#if os(Windows)" in l), None)
+    if_idx = next(
+        (i for i, line in enumerate(added) if "#if os(Windows)" in line), None
+    )
     endif_idx = next(
-        (i for i, l in enumerate(added) if i > (if_idx or -1) and "#endif" in l),
+        (i for i, line in enumerate(added) if i > (if_idx or -1) and "#endif" in line),
         None,
     )
-    drain_idxs = [i for i, l in enumerate(added) if "g_main_context_iteration" in l]
+    drain_idxs = [
+        i for i, line in enumerate(added) if "g_main_context_iteration" in line
+    ]
     assert if_idx is not None, (
         "the windows-input patch must add a `#if os(Windows)` guard — the "
         "message-queue-ownership race is Windows-only (findings §2.5)"
     )
-    assert endif_idx is not None, "the `#if os(Windows)` guard is never closed with `#endif`"
+    assert endif_idx is not None, (
+        "the `#if os(Windows)` guard is never closed with `#endif`"
+    )
     assert drain_idxs, "the patch must add a `g_main_context_iteration` drain call"
     for d in drain_idxs:
         assert if_idx < d < endif_idx, (
@@ -2552,7 +2558,9 @@ def test_windows_input_patch_drain_is_scoped_windows_only_and_nonblocking():
         )
 
     # Non-blocking: every drain call's may_block argument must be 0/false/FALSE.
-    calls = re.findall(r"g_main_context_iteration\s*\([^,]+,\s*([^)\s]+)\s*\)", "\n".join(added))
+    calls = re.findall(
+        r"g_main_context_iteration\s*\([^,]+,\s*([^)\s]+)\s*\)", "\n".join(added)
+    )
     assert calls, "could not parse the g_main_context_iteration(...) call's arguments"
     for arg in calls:
         assert arg in ("0", "false", "FALSE"), (
@@ -2596,8 +2604,8 @@ def test_windows_input_patch_applies_cleanly_in_the_real_ci_sequence_and_its_rev
     )
 
     first = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH)
-    assert first.returncode == 0, "forward apply of the windows-input patch failed:\n" + (
-        first.stderr or ""
+    assert first.returncode == 0, (
+        "forward apply of the windows-input patch failed:\n" + (first.stderr or "")
     )
 
     reverse = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH, "--reverse", "--check")
@@ -2633,15 +2641,17 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
     _win_input_or_skip()
     git, tree = _pristine_tree_or_skip()
     assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, "gesture apply failed"
-    assert (
-        _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0
-    ), "windows-input apply failed"
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input apply failed"
+    )
 
     backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
         encoding="utf-8"
     )
     idx = backend.find("func mainRunLoopTicklingLoop")
-    assert idx != -1, "mainRunLoopTicklingLoop vanished from GtkBackend.swift after apply"
+    assert idx != -1, (
+        "mainRunLoopTicklingLoop vanished from GtkBackend.swift after apply"
+    )
     # The whole tickler body is small; a generous window stays inside it (the next
     # `func ` bounds it) and never reaches an unrelated later function.
     nxt = backend.find("\n    private ", idx + 40)
@@ -2715,7 +2725,8 @@ def test_windows_input_patch_step_runs_after_resolve_and_java_repair_on_windows_
         ):
             assert other is not None, (
                 "%s: the `%s` step is missing — spec §4 requires the windows-input patch "
-                "to run AFTER it, so its absence breaks the ordering premise" % (job, label)
+                "to run AFTER it, so its absence breaks the ordering premise"
+                % (job, label)
             )
             assert other < win_input_idx, (
                 "%s: the windows-input patch step (line %d) must run AFTER `%s` (line %d). "
