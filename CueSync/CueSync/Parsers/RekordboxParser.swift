@@ -29,6 +29,10 @@ public enum RekordboxParser {
         }
         let delegate = RekordboxXMLDelegate()
         let parser = XMLParser(data: data)
+        // OWASP XXE Prevention: never rely on the parser's default. The Linux/Windows
+        // FoundationXML (libxml2) path diverges from Darwin here, and a resolved SYSTEM
+        // entity in untrusted Rekordbox XML is a file-read/SSRF vector.
+        parser.shouldResolveExternalEntities = false
         parser.delegate = delegate
         guard parser.parse() else {
             throw ParseError.invalidFormat("Failed to parse Rekordbox XML: \(parser.parserError?.localizedDescription ?? "unknown error")")

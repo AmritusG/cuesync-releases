@@ -9,12 +9,14 @@ public enum ShowKontrolExporter {
 
         let lines = enabled.enumerated().map { index, cue -> String in
             let tc = secondsToTimecode(cue.start)
-            // Strip commas (field separator) AND CR/LF (record separator) so a cue name
-            // can't inject extra columns or rows into the .cue output.
+            // Strip commas (field separator) AND every Unicode line/paragraph separator
+            // (CharacterSet.newlines: CR, LF, VT, FF, NEL, LS, PS) — not just CR/LF — so a
+            // cue name can't inject extra columns or rows into the .cue output. Matches the
+            // same newline class ShowKontrolParser trims on import (.whitespacesAndNewlines).
             let cleanName = cue.name
                 .replacingOccurrences(of: ",", with: " ")
-                .replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ")
+                .components(separatedBy: .newlines)
+                .joined(separator: " ")
             let name = cleanName.isEmpty ? "CUE\(index + 1)" : cleanName
             return "\(tc.formatted),\(tc.compact),\(tc.milliseconds),\(name),TAG,,,,,,"
         }
