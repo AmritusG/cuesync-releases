@@ -2355,6 +2355,502 @@ def test_no_decorative_shape_under_ui_is_wired_as_a_tap_or_hover_target():
     )
 
 
+# ===========================================================================
+# CUESYNC-9 RED-TEAM — the NEW windows-input patch is a supply-chain surface
+# (spec CUESYNC-9 §4: "The patched dependency is a supply-chain surface … it
+# must be a checked-in, reviewable `.patch` … no network call, no new
+# dependency, no dynamic code load"). The whole existing Python adversarial
+# suite above hardens the CUESYNC-8 GESTURE patch (PATCH_TEXT) but never once
+# looks at patches/swift-cross-ui-0.8.0-windows-input.patch — so a malicious or
+# careless future edit to THAT file (an exec/network/dynamic-load payload, a
+# second smuggled `diff --git`, a re-pin, the drain leaking onto macOS/Linux,
+# or a blocking drain that freezes the tick) sails past every test here. The
+# Swift CUESYNC9WindowsInputDispatchWorkflowTests check some of this, but with a
+# short banned-token list and no behavioural `git apply`. These tests attack the
+# patch itself, the real application sequence, and the now-live value-handling
+# paths the acceptance criteria newly expose.
+# ===========================================================================
+
+WINDOWS_INPUT_PATCH_PATH = REPO_ROOT / "patches" / WINDOWS_INPUT_PATCH_NAME
+WINDOWS_INPUT_PATCH_TEXT = (
+    WINDOWS_INPUT_PATCH_PATH.read_text(encoding="utf-8")
+    if WINDOWS_INPUT_PATCH_PATH.is_file()
+    else ""
+)
+WINDOWS_INPUT_STEP_NAME = "Patch swift-cross-ui Windows input dispatch"
+RESOLVE_STEP_NAME = "Resolve Swift package dependencies"
+
+
+def _win_input_or_skip():
+    if not WINDOWS_INPUT_PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % WINDOWS_INPUT_PATCH_NAME)
+    return WINDOWS_INPUT_PATCH_TEXT
+
+
+def _win_input_added_lines():
+    """Content of every added (`+`) line of the windows-input patch, excluding
+    the `+++` header — exactly the bytes `git apply` injects into GtkBackend.
+    Comment/header prose (which legitimately names `Package.swift`, `system`,
+    `PeekMessage`, …) is NOT an added dependency line and is excluded on purpose."""
+    return [
+        ln[1:]
+        for ln in WINDOWS_INPUT_PATCH_TEXT.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    ]
+
+
+def _apply_patch(git, tree, patch_path, *args):
+    return subprocess.run(
+        [git, "apply", *args, str(patch_path)], cwd=tree, capture_output=True, text=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 48 (SUPPLY CHAIN) — the windows-input patch's ADDED code must be pure
+# GLib-drain wiring: no network, no subprocess, no dynamic load, no new import.
+# The Swift test bans only {import, dlopen, Process(, URLSession, http/https}
+# and scans the whole file; a payload using `system(`/`popen(`/`LoadLibrary`/
+# `dlsym`/`Data(contentsOf:`/`FileHandle`/a raw `socket(` slips past it AND past
+# every test in this file (none of which look at this patch). This closes that
+# hole with the same broad banned list ATTACK 26 applies to the gesture patch,
+# scoped to added lines so the rationale comment is not a false positive.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_added_lines_are_pure_glib_drain_no_exec_network_or_new_import():
+    _win_input_or_skip()
+    added = _win_input_added_lines()
+    assert added, "the windows-input patch adds no lines at all — nothing to review"
+
+    forbidden = [
+        "http://",
+        "https://",
+        "ftp://",
+        "URLSession",
+        "getaddrinfo",
+        "socket(",  # network
+        "Process(",
+        "NSTask",
+        "posix_spawn",
+        "system(",
+        "popen(",
+        "ShellExecute",
+        "execve",
+        "execvp",  # process spawn
+        "/bin/sh",
+        "cmd.exe",
+        "Invoke-WebRequest",
+        "Invoke-Expression",
+        "eval(",  # shells / dynamic eval
+        "dlopen",
+        "dlsym",
+        "LoadLibrary",
+        "GetProcAddress",  # dynamic load
+        "Data(contentsOf:",
+        "FileHandle",
+        "fopen(",
+        "mmap(",
+        "VirtualAlloc",  # arbitrary file/memory I/O
+    ]
+    for content in added:
+        for token in forbidden:
+            assert token not in content, (
+                "spec CUESYNC-9 §4: the windows-input patch must be pure GLib "
+                "main-context drain wiring — no network, subprocess, dynamic load, or "
+                "arbitrary file/memory I/O. An added line contains `%s`:\n    %s"
+                % (token, content.strip())
+            )
+        assert not content.strip().startswith("import "), (
+            "spec CUESYNC-9 §4 (no new dependency): the windows-input patch must not "
+            "add an `import` — the fix uses only GLib's own `g_main_context_iteration`, "
+            "already reachable in GtkBackend.swift. Found:\n    %s" % content.strip()
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 49 (SUPPLY CHAIN) — the windows-input patch is a REAL unified diff that
+# touches exactly one file and re-pins nothing. A `sed`/`-replace` script, a
+# second smuggled `diff --git` (a co-located edit to another dependency file),
+# or a hunk that bumps Package.swift/Package.resolved would all keep the pin
+# from meaning anything. The header comment legitimately NAMES Package.swift /
+# `exact:` in prose, so the re-pin check is scoped to the diff body, not the
+# whole text — a distinction no existing test draws.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_is_a_real_unified_diff_touching_only_gtkbackend_and_repins_nothing():
+    text = _win_input_or_skip()
+    assert (
+        "diff --git a/Sources/GtkBackend/GtkBackend.swift "
+        "b/Sources/GtkBackend/GtkBackend.swift" in text
+    ), "expected a real `diff --git` unified-diff header for GtkBackend.swift"
+
+    for tool in ["-replace", "sed -i", "sed 's", "perl -pi", "awk '", "> "]:
+        assert tool not in "\n".join(_win_input_added_lines()), (
+            "spec CUESYNC-9 §4 (\"never sed/-replace\"): the checked-in fix must be a "
+            "real diff, not a `%s` text-substitution/redirect. Found in an added line."
+            % tool
+        )
+
+    targets = sorted(set(re.findall(r"diff --git a/(\S+) b/\S+", text)))
+    assert targets == ["Sources/GtkBackend/GtkBackend.swift"], (
+        "spec CUESYNC-9 acceptance: the windows-input patch must touch ONLY the file "
+        "named in specs/CUESYNC-9-findings.md (GtkBackend.swift's mainRunLoopTicklingLoop). "
+        "A second `diff --git` is an out-of-scope edit to another dependency file — a "
+        "supply-chain smuggling surface. Found targets: %r" % targets
+    )
+
+    # No re-pin: the pin stays `exact: "0.8.0"`; the dependency is patched at the
+    # checkout, never re-pinned. Assert against the DIFF BODY (added lines), since
+    # the rationale comment above the diff legitimately mentions these tokens.
+    for repin in ["Package.swift", "Package.resolved", "exact:", ".package(", "from:"]:
+        offenders = [c for c in _win_input_added_lines() if repin in c]
+        assert not offenders, (
+            "spec CUESYNC-9 acceptance: swift-cross-ui stays pinned `exact: \"0.8.0\"` and "
+            "Package.swift/Package.resolved are UNCHANGED — the windows-input diff body "
+            "must not touch the manifest or re-pin. An added line contains `%s`:\n    %s"
+            % (repin, offenders[0].strip())
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 50 (correctness / blast radius) — the GLib drain must be Windows-only
+# AND non-blocking. The Swift test only checks `#if os(Windows)` and
+# `g_main_context_iteration` each appear SOMEWHERE in the patch; it never proves
+# the drain call sits INSIDE the Windows guard, nor that the iteration is
+# non-blocking. If the drain leaked outside `#if os(Windows)` it would run on the
+# macOS GtkBackend CI leg (spec §5: that leg must stay green) and change Linux
+# behaviour for no reason; if it passed `may_block = TRUE` it would BLOCK the 50 ms
+# tickler waiting for an event that may never come — a trivially reachable UI
+# freeze that also starves RunLoop.main (regressing PR #141), the opposite of the
+# fix. findings §2.5/Fix demand exactly `g_main_context_iteration(nil, 0)`.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_drain_is_scoped_windows_only_and_nonblocking():
+    _win_input_or_skip()
+    added = _win_input_added_lines()
+
+    if_idx = next((i for i, l in enumerate(added) if "#if os(Windows)" in l), None)
+    endif_idx = next(
+        (i for i, l in enumerate(added) if i > (if_idx or -1) and "#endif" in l),
+        None,
+    )
+    drain_idxs = [i for i, l in enumerate(added) if "g_main_context_iteration" in l]
+    assert if_idx is not None, (
+        "the windows-input patch must add a `#if os(Windows)` guard — the "
+        "message-queue-ownership race is Windows-only (findings §2.5)"
+    )
+    assert endif_idx is not None, "the `#if os(Windows)` guard is never closed with `#endif`"
+    assert drain_idxs, "the patch must add a `g_main_context_iteration` drain call"
+    for d in drain_idxs:
+        assert if_idx < d < endif_idx, (
+            "spec §5: the `g_main_context_iteration` drain (added line %d) must live "
+            "STRICTLY inside the `#if os(Windows)` … `#endif` block (added lines %d…%d). "
+            "Outside it, the drain runs on the macOS GtkBackend leg (which must stay "
+            "green) and needlessly changes Linux behaviour." % (d, if_idx, endif_idx)
+        )
+
+    # Non-blocking: every drain call's may_block argument must be 0/false/FALSE.
+    calls = re.findall(r"g_main_context_iteration\s*\([^,]+,\s*([^)\s]+)\s*\)", "\n".join(added))
+    assert calls, "could not parse the g_main_context_iteration(...) call's arguments"
+    for arg in calls:
+        assert arg in ("0", "false", "FALSE"), (
+            "findings §2.5/Fix: the tickler drain must be NON-BLOCKING "
+            "(`g_main_context_iteration(nil, 0)`). A blocking drain (may_block=`%s`) "
+            "freezes the 50 ms tick waiting on input that may never arrive — a UI hang "
+            "that also starves RunLoop.main, regressing PR #141." % arg
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 51 (BEHAVIORAL) — the windows-input patch must apply cleanly IN THE REAL
+# CI SEQUENCE (interactivity patch first, then windows-input — the order both the
+# workflow and scripts/patch-swift-cross-ui.sh use), and its `--reverse --check`
+# idempotency guard must be load-bearing. Every text-only assertion (Swift or
+# Python) passes on a patch whose `@@` context has gone stale against the pinned
+# commit — or after the CUESYNC-8 hunk shifts line numbers — while CI's real
+# `git apply` dies and the whole GtkBackend build fails. NOTHING else applies this
+# patch for real. Mirrors ATTACK 22/23 (which only exercise the gesture patch).
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_applies_cleanly_in_the_real_ci_sequence_and_its_reverse_guard_is_load_bearing():
+    _win_input_or_skip()
+    git, tree = _pristine_tree_or_skip()
+
+    gesture = _apply_patch(git, tree, PATCH_PATH)
+    assert gesture.returncode == 0, (
+        "the CUESYNC-8 interactivity patch (applied FIRST in the real CI order) failed "
+        "to apply to the pinned checkout:\n" + (gesture.stderr or gesture.stdout)
+    )
+
+    check = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH, "--check")
+    assert check.returncode == 0, (
+        "spec CUESYNC-9 §4: %s must apply cleanly AFTER the interactivity patch (the "
+        "real CI/dev-script order) to the pinned v0.8.0 checkout (commit %s). A "
+        "text-only test cannot catch a stale hunk offset/context; this reconstructed "
+        "the pristine HEAD sources, applied CUESYNC-8, then ran `git apply --check`, "
+        "which reported:\n%s"
+        % (WINDOWS_INPUT_PATCH_NAME, AUDITED_REVISION, check.stderr or check.stdout)
+    )
+
+    first = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH)
+    assert first.returncode == 0, "forward apply of the windows-input patch failed:\n" + (
+        first.stderr or ""
+    )
+
+    reverse = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH, "--reverse", "--check")
+    assert reverse.returncode == 0, (
+        "spec §4 idempotency: on an already-patched tree `git apply --reverse --check` "
+        "(the workflow's / dev-script's own no-op guard for this patch) MUST report "
+        "success so the step skips. It returned %d:\n%s"
+        % (reverse.returncode, reverse.stderr or reverse.stdout)
+    )
+
+    second = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH)
+    assert second.returncode != 0, (
+        "a SECOND unguarded forward `git apply` of the windows-input patch must FAIL on "
+        "an already-patched tree — this is exactly why the `--reverse --check` guard is "
+        "load-bearing, not decorative. It unexpectedly succeeded, meaning the patch is a "
+        "silent no-op or duplicates content (spec §4)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 52 (BEHAVIORAL) — after applying both patches, the tickler must ACTUALLY
+# drain GLib's own context BEFORE it ticks RunLoop.main, on Windows only. It is
+# not enough that the patch mentions `g_main_context_iteration`: findings §Fix is
+# explicit that GDK's win32 backend must get "deterministic first refusal … before
+# Foundation's competing `PeekMessage` drain ever runs." If a future edit reordered
+# the drain to AFTER `RunLoop.main.limitDate`, or dropped it out of the Windows
+# guard, every text test still passes but the race the fix exists to end is back.
+# Verified against the real applied bytes of mainRunLoopTicklingLoop.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
+    _win_input_or_skip()
+    git, tree = _pristine_tree_or_skip()
+    assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, "gesture apply failed"
+    assert (
+        _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0
+    ), "windows-input apply failed"
+
+    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
+        encoding="utf-8"
+    )
+    idx = backend.find("func mainRunLoopTicklingLoop")
+    assert idx != -1, "mainRunLoopTicklingLoop vanished from GtkBackend.swift after apply"
+    # The whole tickler body is small; a generous window stays inside it (the next
+    # `func ` bounds it) and never reaches an unrelated later function.
+    nxt = backend.find("\n    private ", idx + 40)
+    region = backend[idx : nxt if nxt != -1 else idx + 2500]
+
+    pos_if = region.find("#if os(Windows)")
+    pos_drain = region.find("g_main_context_iteration")
+    pos_endif = region.find("#endif", pos_if if pos_if != -1 else 0)
+    # Anchor on the real code token, not bare "limitDate" — the patch's rationale
+    # comment mentions "`limitDate` below" ABOVE the drain, which would otherwise
+    # match first and invert the ordering check.
+    pos_limit = region.find("RunLoop.main.limitDate")
+
+    assert pos_if != -1 and pos_drain != -1 and pos_endif != -1 and pos_limit != -1, (
+        "mainRunLoopTicklingLoop after apply is missing one of {#if os(Windows), "
+        "g_main_context_iteration, #endif, limitDate}:\n%s" % region
+    )
+    assert pos_if < pos_drain < pos_endif, (
+        "the GLib drain must sit inside the `#if os(Windows)` guard within the applied "
+        "mainRunLoopTicklingLoop body (findings §Fix)"
+    )
+    assert pos_drain < pos_limit, (
+        "findings §Fix: on Windows the tickler must drain GLib's own GMainContext "
+        "(`g_main_context_iteration`) BEFORE ticking `RunLoop.main` "
+        "(`RunLoop.main.limitDate`), so GDK's win32 backend gets first refusal on "
+        "queued input before Foundation's competing PeekMessage drain. In the applied "
+        "bytes the drain (offset %d) comes AFTER limitDate (offset %d) — the race is "
+        "back." % (pos_drain, pos_limit)
+    )
+    assert pos_endif < pos_limit, (
+        "the `#if os(Windows)` drain block must close (`#endif`) BEFORE the "
+        "unconditional `RunLoop.main.limitDate` tick — otherwise the tick itself is "
+        "wrongly Windows-gated."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 53 (SUPPLY CHAIN / placement) — on the Windows legs the windows-input
+# patch step must run AFTER `swift package resolve`, AFTER the swift-java symlink
+# repair, AND after the gesture patch. The Swift tests order it only against the
+# gesture step and build/test; nothing pins it against resolve or the reparse-point
+# repair. Patching a checkout that has not been resolved (no .build/checkouts) or
+# whose symlinked layers are still broken reparse points fails the `cd`/`git apply`
+# on precisely the platform this ticket targets.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_step_runs_after_resolve_and_java_repair_on_windows_legs():
+    for job in ("windows-build", "windows-test"):
+        assert job in JOBS, "missing job " + job
+        start, end = JOBS[job]
+        resolve_idx = repair_idx = gesture_idx = win_input_idx = None
+        for k in range(start, end):
+            m = STEP_NAME_RE.match(LINES[k])
+            if not m:
+                continue
+            name = m.group(1)
+            if name.startswith(RESOLVE_STEP_NAME):
+                resolve_idx = k
+            if name.startswith(REPAIR_STEP_NAME):
+                repair_idx = k
+            if GESTURE_STEP_NAME in name:
+                gesture_idx = k
+            if WINDOWS_INPUT_STEP_NAME in name:
+                win_input_idx = k
+        assert win_input_idx is not None, job + ": no windows-input patch step found"
+        for label, other in (
+            (RESOLVE_STEP_NAME, resolve_idx),
+            (REPAIR_STEP_NAME, repair_idx),
+            (GESTURE_STEP_NAME, gesture_idx),
+        ):
+            assert other is not None, (
+                "%s: the `%s` step is missing — spec §4 requires the windows-input patch "
+                "to run AFTER it, so its absence breaks the ordering premise" % (job, label)
+            )
+            assert other < win_input_idx, (
+                "%s: the windows-input patch step (line %d) must run AFTER `%s` (line %d). "
+                "spec §4: it lands after resolve / the swift-java symlink repair / the "
+                "existing patch steps and before build. Patching an unresolved or "
+                "still-broken-reparse-point checkout fails `git apply` on the Windows legs "
+                "this patch exists to fix." % (job, win_input_idx, label, other)
+            )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 54 (§4 runtime trust boundary) — the "+ Add Cue Point" button is a
+# NOW-LIVE entry point (acceptance criteria list it explicitly). Its handler,
+# ConfigureSectionView.addCueAtPosition(), parses `Double(newCueSec) ?? 0` /
+# `Double(newCueMs) ?? 0` — and `Double("nan")`/`Double("inf")` PARSE, so `?? 0`
+# does NOT catch them; a hand-typed `nan` reaches AppState.addCuePoint(at:), where
+# `min(max(nan, 0), trackDuration)` stays NaN (Swift Comparable min/max propagate
+# NaN). This path does NOT go through StepperField's isFinite guard (the only
+# now-live guard ATTACK 36 pins), so the ONE thing standing between a typed `nan`
+# and `cue.start` → the envelope Path/curve math is `.sanitized()` inside
+# addCuePoint. spec §4: "a hand-typed nan/inf in a cue position … must never reach
+# cue.start." This pins that backstop for the Add-Cue path specifically.
+# ---------------------------------------------------------------------------
+
+
+def _ui_src_or_skip(rel):
+    p = REPO_ROOT / "CueSync" / "CueSync" / rel
+    if not p.is_file():
+        raise unittest.SkipTest("%s not found" % rel)
+    return p.read_text(encoding="utf-8")
+
+
+def _func_body(src, signature_needle, bound_needle="\n    func "):
+    """Slice a Swift method body from its signature to the next method (or a
+    generous window). Used for text-level guard assertions, not parsing."""
+    i = src.find(signature_needle)
+    if i == -1:
+        return None
+    j = src.find(bound_needle, i + len(signature_needle))
+    return src[i : j if j != -1 else i + 1500]
+
+
+def test_add_cue_point_now_live_path_sanitises_nonfinite_before_the_model():
+    appstate = _ui_src_or_skip("UI/State/AppState.swift")
+    body = _func_body(appstate, "func addCuePoint(")
+    assert body is not None, "AppState.addCuePoint not found"
+    assert ".sanitized()" in body, (
+        "spec CUESYNC-9 §4: the NOW-LIVE `+ Add Cue Point` path parses "
+        "`Double(newCueSec) ?? 0` (nan/inf survive `?? 0`) and does NOT use "
+        "StepperField's isFinite guard, so AppState.addCuePoint(at:) MUST route the "
+        "constructed cue through `.sanitized()` — the only backstop stopping a typed "
+        "`nan` from landing in cue.start and reaching the envelope Path/curve math. "
+        "That call is missing from addCuePoint."
+    )
+    # The wiring is real: the acceptance-criteria button funnels into addCuePoint.
+    cfg = _ui_src_or_skip("UI/Sections/ConfigureSectionView.swift")
+    assert "func addCueAtPosition" in cfg and "state.addCuePoint(" in cfg, (
+        "ConfigureSectionView.addCueAtPosition() must still be the `+ Add Cue Point` "
+        "handler that calls state.addCuePoint(at:) — if this rewiring changed, "
+        "re-verify the now-live nan/inf entry point before trusting the guard above."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 55 (§4 runtime trust boundary) — CuePoint.sanitized() is the model-layer
+# backstop every now-live edit path (Add Cue, cue-table StepperField edits,
+# duplicate-with-offset, imported tracks) leans on. It must neutralise a
+# non-finite `start` AND a non-finite `yValue`, and clamp `curve` into 1...23.
+# If a refactor dropped the isFinite check on either coordinate, NaN geometry
+# reaches the canvas and the Resolume/ShowKontrol exporters. Nothing in this file
+# pins the sanitiser itself — ATTACK 36 pins only the StepperField producer.
+# ---------------------------------------------------------------------------
+
+
+def test_cuepoint_sanitized_neutralises_nonfinite_start_and_yvalue_and_clamps_curve():
+    src = _ui_src_or_skip("Models/CuePoint.swift")
+    body = _func_body(src, "func sanitized(", bound_needle="\n    }")
+    assert body is not None, "CuePoint.sanitized() not found"
+    start_guarded = re.search(r"start\b[^\n]*\bisFinite\b", body) is not None
+    yvalue_guarded = re.search(r"yValue\b[^\n]*\bisFinite\b", body) is not None
+    curve_clamped = ("1...23" in body) or ("(1...23)" in body)
+    assert start_guarded, (
+        "spec §4: CuePoint.sanitized() must guard `start` with `isFinite` — otherwise a "
+        "typed/imported NaN start survives into the envelope Path/curve math and export."
+    )
+    assert yvalue_guarded, (
+        "spec §4: CuePoint.sanitized() must guard `yValue` with `isFinite` — a NaN "
+        "y-value reaches the canvas draw and the exporter's 0..1 normalisation."
+    )
+    assert curve_clamped, (
+        "spec §4: CuePoint.sanitized() must clamp `curve` into 1...23 (the 23 valid "
+        "Resolume curve types) — an out-of-range curve index is hostile-input geometry."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 56 (§4 runtime trust boundary) — the duration modal is now live (its
+# Cancel/Import must respond per acceptance criteria). Its handler,
+# ProjectSectionView.confirmDurationImport(), builds `totalSeconds` from
+# `Double(durationMinutes) ?? 0` … (nan/inf survive `?? 0`) and feeds it to the
+# track duration. The ONLY guard is AppState.safeDuration()'s isFinite check —
+# and every branch (ShowKontrol direct, Resolume via loadResolumeEnvelope) must
+# route the typed duration through it, or a NaN trackDuration reaches the
+# `Int(duration …)` conversions AppState.safeDuration exists to keep from
+# overflowing. spec §4 threat model calls out exactly these now-reachable paths.
+# ---------------------------------------------------------------------------
+
+
+def test_duration_modal_now_live_path_routes_typed_duration_through_safeduration_isfinite_guard():
+    appstate = _ui_src_or_skip("UI/State/AppState.swift")
+    safe_body = _func_body(appstate, "func safeDuration(", bound_needle="\n    }")
+    assert safe_body is not None, "AppState.safeDuration not found"
+    assert "isFinite" in safe_body, (
+        "spec §4: AppState.safeDuration() must guard `isFinite` — it is the sole barrier "
+        "between a typed `nan`/`inf` duration and the model's `Int(duration …)` math."
+    )
+
+    load_body = _func_body(appstate, "func loadResolumeEnvelope(")
+    assert load_body is not None, "AppState.loadResolumeEnvelope not found"
+    assert "safeDuration(" in load_body, (
+        "spec §4: the Resolume branch of the duration modal calls loadResolumeEnvelope, "
+        "which MUST pass the user-supplied `duration` through safeDuration() — otherwise "
+        "a typed `nan` duration sets trackDuration non-finite and scales every cue."
+    )
+
+    cfg = _ui_src_or_skip("UI/Sections/ProjectSectionView.swift")
+    confirm = _func_body(cfg, "func confirmDurationImport(")
+    assert confirm is not None, "ProjectSectionView.confirmDurationImport not found"
+    assert "safeDuration(" in confirm or "loadResolumeEnvelope(" in confirm, (
+        "spec §4: confirmDurationImport() must not write trackDuration from a raw "
+        "`Double(text) ?? 0` — every branch routes the typed duration through "
+        "safeDuration() (directly for ShowKontrol, via loadResolumeEnvelope for Resolume)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
