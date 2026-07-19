@@ -3963,7 +3963,7 @@ _RT_SOURCE_RELPATHS = [
 #   rbres <b64xml>             -> b64("OK\tcueCount\t<b64 resolume-xml>" | "THREW\t<b64 err>")
 #         Rekordbox-import the XML, then Resolume-export the first track's cues (dur 60).
 #   rbparse <b64xml>           -> b64("OK\ttrackCount\tcueCount\t<b64 firstTrackName>" | "THREW\t<b64 err>")
-_RT_HARNESS_MAIN = r'''
+_RT_HARNESS_MAIN = r"""
 import Foundation
 
 func b64dec(_ s: String) -> String { guard let d = Data(base64Encoded: s) else { return "" }; return String(decoding: d, as: UTF8.self) }
@@ -4027,7 +4027,7 @@ while let line = readLine(strippingNewline: true) {
     default: print(b64enc("ERR"))
     }
 }
-'''
+"""
 
 _RT_HARNESS = {"built": False, "bin": None, "err": None}
 
@@ -4053,7 +4053,9 @@ def _rt_harness_binary():
     st["built"] = True
     srcs = _rt_sources_or_none()
     if srcs is None:
-        st["err"] = "CueSyncCore parser/exporter sources not found — cannot exercise chains"
+        st["err"] = (
+            "CueSyncCore parser/exporter sources not found — cannot exercise chains"
+        )
         raise unittest.SkipTest(st["err"])
     swiftc = shutil.which("swiftc")
     if swiftc is None:
@@ -4132,14 +4134,17 @@ def test_showkontrol_export_reimport_roundtrip_cannot_inject_records_or_shift_co
         records, re_count, fields, has_cr, has_lf, max_ms, _sk = out.split("\t")
         assert records == "1", (
             "spec §4: a single exported cue split into %s CR-records — name %r injected "
-            "a record separator that the .cue format's own CR/LF re-import honours" % (records, name)
+            "a record separator that the .cue format's own CR/LF re-import honours"
+            % (records, name)
         )
         assert has_cr == "0" and has_lf == "0", (
-            "name %r leaked a CR/LF into the exported .cue (hasCR=%s hasLF=%s)" % (name, has_cr, has_lf)
+            "name %r leaked a CR/LF into the exported .cue (hasCR=%s hasLF=%s)"
+            % (name, has_cr, has_lf)
         )
         assert int(fields) == _SK_FIELD_COUNT, (
             "ShowKontrol row is %d comma-columns; name %r produced %s — a comma survived "
-            "into the name field and injected extra columns" % (_SK_FIELD_COUNT, name, fields)
+            "into the name field and injected extra columns"
+            % (_SK_FIELD_COUNT, name, fields)
         )
         assert re_count == "2", (
             "spec §4: re-parsing the exported .cue yielded %s cues (expected 2 = the one "
@@ -4173,7 +4178,8 @@ def test_serato_geob_cue_name_cannot_inject_into_showkontrol_export():
     for a, out in zip(attacks, outs):
         count, sk_b64 = out.split("\t", 1)
         assert count == "1", (
-            "the crafted Serato GEOB must decode to exactly one cue (name %r) — got %s" % (a, count)
+            "the crafted Serato GEOB must decode to exactly one cue (name %r) — got %s"
+            % (a, count)
         )
         sk = _rt_inner(sk_b64)
         assert "\r" not in sk, (
@@ -4182,7 +4188,8 @@ def test_serato_geob_cue_name_cannot_inject_into_showkontrol_export():
         )
         assert "\n" not in sk, "Serato cue name %r leaked a LF into the .cue export" % a
         assert len(sk.split(",")) == _SK_FIELD_COUNT, (
-            "Serato cue name %r injected extra columns into the .cue export (%d fields)" % (a, len(sk.split(",")))
+            "Serato cue name %r injected extra columns into the .cue export (%d fields)"
+            % (a, len(sk.split(",")))
         )
 
 
@@ -4197,7 +4204,8 @@ def test_serato_geob_cue_name_cannot_inject_into_showkontrol_export():
 
 def test_rekordbox_import_to_resolume_export_never_emits_nonfinite_coords():
     marks = "".join(
-        '<POSITION_MARK Name="m%d" Start="%s" Red="%s" Green="%s" Blue="%s"/>' % (i, s, r, g, b)
+        '<POSITION_MARK Name="m%d" Start="%s" Red="%s" Green="%s" Blue="%s"/>'
+        % (i, s, r, g, b)
         for i, (s, r, g, b) in enumerate(
             [
                 ("nan", "99999", "-40", "abc"),
@@ -4213,7 +4221,9 @@ def test_rekordbox_import_to_resolume_export_never_emits_nonfinite_coords():
         '<TRACK TrackID="1" Name="t">' + marks + "</TRACK></COLLECTION></DJ_PLAYLISTS>"
     )
     out = _run_rt_batch(["rbres %s" % _b64(xml_in)])[0]
-    assert out.startswith("OK\t"), "Rekordbox import chain unexpectedly failed: %r" % out[:120]
+    assert out.startswith("OK\t"), (
+        "Rekordbox import chain unexpectedly failed: %r" % out[:120]
+    )
     _ok, count, xml_b64 = out.split("\t")
     assert count == "5", "expected 5 imported cues, got %s" % count
     root = ET.fromstring(_rt_inner(xml_b64))
@@ -4221,14 +4231,18 @@ def test_rekordbox_import_to_resolume_export_never_emits_nonfinite_coords():
     assert points, "Resolume export produced no <point> elements"
     for p in points:
         cv = int(p.attrib["curve"])
-        assert 1 <= cv <= 23, "curve %d escaped the 1..23 clamp on the import->export chain" % cv
+        assert 1 <= cv <= 23, (
+            "curve %d escaped the 1..23 clamp on the import->export chain" % cv
+        )
         for axis in ("x", "y"):
             v = p.attrib[axis]
             assert _PLAIN_DECIMAL_RE.fullmatch(v), (
                 "spec §4: a hostile Rekordbox Start leaked a non-finite/scientific %s=%r into "
                 "the Resolume XML across the import->export chain" % (axis, v)
             )
-            assert 0.0 <= float(v) <= 1.0, "coordinate %s=%s outside [0,1] after the chain" % (axis, v)
+            assert 0.0 <= float(v) <= 1.0, (
+                "coordinate %s=%s outside [0,1] after the chain" % (axis, v)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4253,7 +4267,8 @@ def test_rekordbox_xml_importer_does_not_resolve_external_entities():
     xxe = (
         '<?xml version="1.0"?>\n'
         '<!DOCTYPE DJ_PLAYLISTS [ <!ENTITY xxe SYSTEM "%s"> ]>\n'
-        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&xxe;"/></COLLECTION></DJ_PLAYLISTS>' % uri
+        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&xxe;"/></COLLECTION></DJ_PLAYLISTS>'
+        % uri
     )
     out = _run_rt_batch(["rbparse %s" % _b64(xxe)])[0]
     # Safe either way: the parser rejects the DTD outright, OR it parses but leaves the
@@ -4288,7 +4303,8 @@ def test_xml_importers_do_not_expand_internal_entity_bombs():
 
     rb_bomb = (
         '<?xml version="1.0"?><!DOCTYPE DJ_PLAYLISTS [ %s ]>'
-        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&a7;"/></COLLECTION></DJ_PLAYLISTS>' % ents
+        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&a7;"/></COLLECTION></DJ_PLAYLISTS>'
+        % ents
     )
     rb_out = _run_rt_batch(["rbparse %s" % _b64(rb_bomb)])[0]
     if rb_out.startswith("OK\t"):
@@ -4298,13 +4314,16 @@ def test_xml_importers_do_not_expand_internal_entity_bombs():
             "%d-char track name — an unbounded-expansion DoS" % len(name)
         )
     else:
-        assert rb_out.startswith("THREW\t"), "unexpected rbparse result: %r" % rb_out[:120]
+        assert rb_out.startswith("THREW\t"), (
+            "unexpected rbparse result: %r" % rb_out[:120]
+        )
 
     # Resolume importer via the existing value-path harness (its `parse` returns the
     # presetName): the same bomb targeted at the preset name attribute.
     res_bomb = (
         '<?xml version="1.0"?><!DOCTYPE Preset [ %s ]>'
-        '<Preset name="&a7;"><point x="0" y="0" curve="1"/><point x="1" y="0" curve="1"/></Preset>' % ents
+        '<Preset name="&a7;"><point x="0" y="0" curve="1"/><point x="1" y="0" curve="1"/></Preset>'
+        % ents
     )
     res_out = _run_cs_batch(["parse %s" % _b64(res_bomb)])[0]
     assert big_run not in res_out and len(res_out) < 200_000, (
@@ -4324,7 +4343,18 @@ def test_xml_importers_do_not_expand_internal_entity_bombs():
 
 
 def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
-    starts = ["nan", "inf", "-inf", "1e308", "1e400", "1e18", "-5", "359999", "5.0", "0"]
+    starts = [
+        "nan",
+        "inf",
+        "-inf",
+        "1e308",
+        "1e400",
+        "1e18",
+        "-5",
+        "359999",
+        "5.0",
+        "0",
+    ]
     outs = _run_rt_batch(["skrt %s %s" % (_b64("nm"), _numarg(s)) for s in starts])
     for s, out in zip(starts, outs):
         assert out != "NIL", "one enabled cue must still export (start %r)" % s
@@ -4332,10 +4362,12 @@ def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
         # Re-import stays finite / non-negative / within the 100h clamp.
         assert 0 <= int(max_ms) <= 359_999_000, (
             "spec §4: hostile start %r round-tripped to %s ms on re-import — outside the "
-            "[0, 359_999_000] clamp (a non-finite/overflowing start escaped)" % (s, max_ms)
+            "[0, 359_999_000] clamp (a non-finite/overflowing start escaped)"
+            % (s, max_ms)
         )
         assert 1 <= int(re_count) <= 2, (
-            "hostile start %r yielded %s re-parsed cues (expected 1 or 2)" % (s, re_count)
+            "hostile start %r yielded %s re-parsed cues (expected 1 or 2)"
+            % (s, re_count)
         )
         # The emitted timecode is well-formed and never a nan/inf token.
         sk = _rt_inner(sk_b64)
@@ -4345,9 +4377,12 @@ def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
         )
         low = sk.lower()
         assert "nan" not in low and "inf" not in low, (
-            "start %r leaked a non-finite token into the round-tripped .cue: %r" % (s, sk)
+            "start %r leaked a non-finite token into the round-tripped .cue: %r"
+            % (s, sk)
         )
-        assert has_cr == "0" and has_lf == "0", "start %r perturbed the record framing" % s
+        assert has_cr == "0" and has_lf == "0", (
+            "start %r perturbed the record framing" % s
+        )
 
 
 # ---------------------------------------------------------------------------
