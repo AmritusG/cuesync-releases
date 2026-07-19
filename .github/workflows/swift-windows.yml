@@ -680,13 +680,17 @@ jobs:
       # code nobody would otherwise inspect.
       #
       # The Swift runtime DLLs (swiftCore.dll, Foundation.dll, dispatch.dll,
-      # BlocksRuntime.dll, ...) are deliberately NOT in the system allowlist
-      # and are NOT bundled — spec §D.18 forbids allowlisting them into
-      # silence, and this ticket leaves bundling them genuinely out of scope.
-      # That gap is real and is the next ticket's work — but it must not be
-      # confused with the thing this check actually guards against (a wrong
-      # or missing dependency resolving from an arbitrary/untrusted
-      # location). CI-observed (this branch, run 29580303796): the clean run
+      # BlocksRuntime.dll, ...) are NOT in the system allowlist — spec §D.18
+      # forbids allowlisting them into silence — and at the point THIS check
+      # runs they are not yet in the artifact either. CUESYNC-9 §0.2 identified
+      # leaving them unbundled as the actual cause of the input-death gate: on a
+      # clean PC (no Swift toolchain) the /SUBSYSTEM:WINDOWS exe fails to load
+      # before any code runs, so no window ever appears and the click-probe
+      # captured only the launcher's cmd.exe console. The "Bundle Swift runtime
+      # DLLs" step below now copies them in (and re-verifies the closure), so
+      # this branch tolerates their toolchain-root resolution here rather than
+      # treating it as the wrong/missing-dependency failure the check exists to
+      # catch. CI-observed (this branch, run 29580303796): the clean run
       # failed with "non-system DLL resolved outside the artifact directory:
       # swiftCRT.dll => C:\Users\runneradmin\...\Swift\Runtimes\6.3.3\usr\bin\
       # swiftCRT.dll" — every Swift runtime/toolchain DLL resolved via PATH
@@ -717,7 +721,8 @@ jobs:
           # Windows GDI/ANGLE compositing path, exactly like dwmapi.dll and
           # comctl32.dll already on this list. Adding it here, not routing it
           # through the Swift-toolchain-root branch, which is reserved for the
-          # separate known gap of unbundled Swift runtime DLLs.
+          # Swift runtime DLLs the "Bundle Swift runtime DLLs" step below bundles
+          # into the artifact (spec CUESYNC-9 §0.2).
           #
           # CI-observed (this branch, run 29607447687): with dcomp.dll
           # allowed, the clean run advanced further into wldd's dependency
@@ -832,7 +837,13 @@ jobs:
                 $isAllowedSystemDll = [bool]($allow | Where-Object { $name -like $_ })
                 $isFromSwiftToolchain = $swiftToolchainRoot -and $path.StartsWith($swiftToolchainRoot, [System.StringComparison]::OrdinalIgnoreCase)
                 if ($isFromSwiftToolchain) {
-                  Write-Host "known gap, not bundled (spec CUESYNC-6d/CUESYNC-6 §D.18, next ticket's work): $name => $path"
+                  # These resolve from the toolchain root HERE because this check runs
+                  # before the "Bundle Swift runtime DLLs" step below copies them into
+                  # the artifact (spec CUESYNC-9 §0.2 — the clean PC has no toolchain,
+                  # so leaving them unbundled is what kept the exe from launching at
+                  # all). Tolerated here; the bundling step makes the uploaded artifact
+                  # self-contained and re-verifies the closure.
+                  Write-Host "resolved from Swift toolchain root; bundled into the artifact by the step below (spec CUESYNC-9 §0.2): $name => $path"
                 } elseif (-not $isInsideArtifact -and -not $isAllowedSystemDll) {
                   Write-Error "non-system DLL resolved outside the artifact directory: $name => $path" -ErrorAction Continue
                   $failed = $true
@@ -886,6 +897,95 @@ jobs:
             throw "closure check still fails after restoring $victimDll.dll"
           }
           Write-Host "Closure check passes again after restoring the DLL."
+
+      # spec CUESYNC-9 §4 contingency (specs/CUESYNC-9-findings.md §0.2, round 3):
+      # THE round-3 root-cause fix. The click-probe gate's before.png/after.png do
+      # not show CueSync's GTK window "rendering empty" (rounds 1-2's premise) — the
+      # window title bar in the capture reads "C:\WINDOWS\SYSTEM32\cmd.exe": the probe
+      # screenshotted and clicked the LAUNCHER console, because CueSync's own window
+      # never appeared. Why it never appears on the clean-PC gate: CueSync.exe is
+      # /SUBSYSTEM:WINDOWS (Package.swift) and its transitive import closure includes
+      # the Swift runtime DLLs (swiftCore.dll, Foundation.dll, dispatch.dll,
+      # swiftCRT.dll, BlocksRuntime.dll, the ICU data DLLs, ...). The "Verify DLL
+      # closure" step ABOVE proves these resolve ONLY from the Swift toolchain root on
+      # this runner's PATH (its `$isFromSwiftToolchain` "known gap, not bundled" branch
+      # fires on every one of them) — they are NOT in the artifact. A clean PC has no
+      # Swift toolchain, so the Windows loader fails to start CueSync.exe before a
+      # single line of Swift runs: no window, no input, exactly the cmd.exe-only,
+      # dead-input capture the gate recorded. Bundle them so the uploaded artifact is
+      # self-contained and launches off any Windows box.
+      #
+      # Driven off wldd's OWN resolved closure (not a hardcoded DLL list) so it copies
+      # exactly CueSync.exe's transitive Swift dependencies, from wherever the toolchain
+      # placed them, and nothing more — the same tool and the same `name => path`
+      # parsing the closure check above already trusts. Runs AFTER that check + its
+      # negative control (both stay green, unchanged, gating the pre-bundle artifact)
+      # and BEFORE the upload, then re-runs wldd to PROVE the artifact now resolves
+      # every dependency from inside itself (machine-verification of "self-contained",
+      # the one half of this fix a non-Windows box cannot check).
+      - name: Bundle Swift runtime DLLs next to CueSync.exe (self-contained artifact)
+        shell: pwsh
+        run: |
+          # Same Swift-toolchain-root derivation the closure check performs — the
+          # DLLs to bundle are exactly the ones it flags as resolved under this root.
+          $swiftExe = Get-Command swift.exe -ErrorAction SilentlyContinue
+          if (-not $swiftExe) { Write-Error "swift.exe not on PATH — cannot locate the Swift runtime DLLs to bundle"; exit 1 }
+          $swiftRootMatch = [regex]::Match($swiftExe.Source, '^.+\\Swift(?=\\(Toolchains|Runtimes)\\)')
+          if (-not $swiftRootMatch.Success) { Write-Error "could not derive the Swift toolchain root from $($swiftExe.Source)"; exit 1 }
+          $swiftToolchainRoot = $swiftRootMatch.Value
+
+          # `.build\release` is a junction to `.build\<triple>\release` on Windows;
+          # resolve it to the same canonical path wldd reports (see the closure
+          # check's identical ResolveLinkTarget rationale).
+          $artifactItem = Get-Item ".build\release"
+          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+
+          $copied = 0
+          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+            $trimmedLine = $rawLine.Trim()
+            $separatorIndex = $trimmedLine.IndexOf(' => ')
+            if ($separatorIndex -le 0) { continue }
+            $name = $trimmedLine.Substring(0, $separatorIndex).Trim()
+            $path = $trimmedLine.Substring($separatorIndex + 4).Trim()
+            if ($path -eq 'not found') { continue }
+            if ([System.IO.Path]::GetExtension($path).ToLowerInvariant() -ne '.dll') { continue }
+            # Bundle only the Swift toolchain-root deps; anything already inside the
+            # artifact (bundled GTK) or a system DLL is left as-is.
+            if (-not $path.StartsWith($swiftToolchainRoot, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            if ($path.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            if (-not (Test-Path -LiteralPath $path)) { Write-Error "resolved Swift dependency missing on disk: $name => $path"; exit 1 }
+            Copy-Item -LiteralPath $path -Destination $artifactDir -Force
+            Write-Host "bundled Swift runtime dependency: $name  ($path)"
+            $copied++
+          }
+          if ($copied -eq 0) {
+            Write-Error "no Swift runtime DLL resolved from the toolchain root ($swiftToolchainRoot) in CueSync.exe's closure — a clean PC would still fail to load the exe; refusing to upload a non-runnable artifact"
+            exit 1
+          }
+          Write-Host "bundled $copied Swift runtime DLL(s) into the artifact."
+
+          # Machine-verify the bundle actually closed the gap: re-walk CueSync.exe and
+          # assert nothing resolves from the Swift toolchain root anymore (every dep
+          # now comes from inside the artifact or a system path). This is the on-box
+          # proof that the exe is self-contained.
+          $remaining = @()
+          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+            $trimmedLine = $rawLine.Trim()
+            $separatorIndex = $trimmedLine.IndexOf(' => ')
+            if ($separatorIndex -le 0) { continue }
+            $name = $trimmedLine.Substring(0, $separatorIndex).Trim()
+            $path = $trimmedLine.Substring($separatorIndex + 4).Trim()
+            if ($path.StartsWith($swiftToolchainRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $path.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+              $remaining += "$name => $path"
+            }
+          }
+          if ($remaining.Count -gt 0) {
+            Write-Error "artifact still resolves dependencies from the Swift toolchain root after bundling:`n$($remaining -join "`n")"
+            exit 1
+          }
+          Write-Host "Self-contained artifact confirmed: no dependency resolves from the Swift toolchain root."
 
       - name: Upload build artifact
         if: always()

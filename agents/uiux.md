@@ -120,3 +120,34 @@ consumer of the thread's Win32 message queue (Foundation's `RunLoop.main` is one
 `_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`). GLib source **priority** is the lever: GDK's
 event (0) and redraw (120) sources must out-prioritize whatever else pumps the queue, or GDK
 starves of both input and repaint at once.
+
+## Before you debug input, prove the window is even yours (CUESYNC-9, round 3)
+
+The single most expensive mistake on this ticket was **reading a probe screenshot's pixels without
+reading its window title.** Rounds 1–2 spent two full iterations patching swift-cross-ui's main-loop
+because a black content area with a scrollbar *looked like* "CueSync rendering empty." It wasn't:
+the title bar read `C:\WINDOWS\SYSTEM32\cmd.exe` — the probe had screenshotted and clicked the
+harness's **launcher console**, and CueSync's own `CUE SYNC`-titled window was **never on screen at
+all**. Every downstream symptom (close-click doesn't kill, center-click changes zero pixels) follows
+trivially from "there is no app window," and no amount of input-dispatch or renderer patching can
+move a probe that isn't pointed at your app.
+
+The generalized rule, in order, before theorizing about input:
+1. **Read the window title in the capture.** If it isn't your app's title, you are debugging the
+   wrong window. An empty console (black buffer + a scrollbar, because cmd.exe's screen buffer is
+   taller than its window) is the classic decoy — it reads as "renders nothing" to a pixel scan.
+2. **Confirm the process is actually running.** A `/SUBSYSTEM:WINDOWS` app opens no console, so a
+   launch failure is silent on the terminal; the app simply never shows a window.
+3. **On a clean PC, a Swift GUI exe that "does nothing" is usually a missing-DLL loader failure, not
+   a UI bug.** The Windows loader resolves the exe's import closure *before* `main` runs; if the
+   Swift runtime DLLs (`swiftCore.dll`, `Foundation.dll`, `dispatch.dll`, `swiftCRT.dll`, ICU, …)
+   aren't next to the exe and the box has no toolchain on PATH, it fails to start with no window and
+   no output. Your CI's own dependency-closure log tells you this: if it resolves those DLLs from a
+   *toolchain root* rather than the artifact directory, the shipped artifact is not self-contained.
+   The fix is packaging (bundle the runtime DLLs into the artifact), not a source patch — CUESYNC-9
+   §0.2, `.github/workflows/swift-windows.yml`'s "Bundle Swift runtime DLLs" step.
+
+The through-line with the `can-target` and main-loop lessons above: **classify the failure at the
+right layer before fixing it.** Widget hit-testing, main-loop/event-source integration, and
+"the exe never loaded" are three different layers; a screenshot alone cannot tell them apart, but
+the window title and the DLL-closure log can.

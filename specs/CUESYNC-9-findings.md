@@ -1,5 +1,84 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.2 — ROUND 3 (2026-07-19, this session): the probe was clicking the LAUNCHER, not CueSync
+
+> This is the third CUESYNC-9 fix round, and it OVERTURNS the shared premise of rounds 1–2 (and of
+> the spec's Problem statement): that the Windows window "draws the whole UI correctly but input is
+> dead," or "renders essentially empty." A closer machine read of the current probe capture shows
+> that premise is **false**. The classification bucket is still **Fork W** (window-level input dead
+> — the close-button click does not kill the process and the center click changes zero pixels), but
+> the *mechanism* is not input dispatch, an empty render, or main-loop starvation. **CueSync's own
+> window never appears at all.** Rounds 1–2's `patches/swift-cross-ui-0.8.0-windows-input.patch`
+> targeted a phantom "empty render"; it is retained (it is harmless and fixes a real main-loop
+> busy-spin that will matter *once the app launches* — see below), but it is NOT and never could be
+> the probe-mover.
+
+**The decisive new datum: the window in the probe is a `cmd.exe` console, not CueSync.**
+The current `.factory/probe/before.png` / `after.png` (md5 `dc6d8369000a858bc5d1aa9fc5ffe8a0`, still
+byte-identical to each other, captured after round 2's commit `a3516e7`) has a **title bar that
+reads `C:\WINDOWS\SYSTEM32\cmd.exe`** with the cmd.exe console icon, a pure-black console buffer,
+and a Windows **console** scrollbar (cmd.exe's default 80×300 screen buffer is taller than its
+window, so it always draws a vertical scrollbar). This is the GTE/probe harness's **launcher
+terminal**, not CueSync's window — CueSync's `WindowGroup` is titled `CUE SYNC`
+(`CueSync/CueSync/UI/CueSyncApp.swift:33`), never `cmd.exe`. §0's earlier scan of the same-class
+image (zero accent/text pixels, "only a scroll-bar," undersized, "desktop visible below/right")
+was correct about the pixels but **mis-attributed** them: the flat-black area with a scrollbar is
+an **empty console**, and there is **no 1200×800 CueSync window anywhere in the full-screen
+capture**. "Renders empty" (§0/§0.1) was reading an empty cmd.exe console as CueSync rendering
+nothing. A window that never appears cannot be clicked, cannot receive a close event, and cannot
+change center pixels — the exact three symptoms the gate reported.
+
+**Root cause (suspect (1) re-scoped from "input wiring" to "the exe never loads"; CI-confirmed).**
+CueSync.exe is linked `/SUBSYSTEM:WINDOWS` + `/ENTRY:mainCRTStartup` (`Package.swift:83-88`), so it
+opens **no console of its own** — the cmd.exe is external, the box's launcher. Its transitive import
+closure includes the **Swift runtime DLLs** (`swiftCore.dll`, `Foundation.dll`, `dispatch.dll`,
+`swiftCRT.dll`, `BlocksRuntime.dll`, the ICU data DLLs, …). The Windows job's **own "Verify DLL
+closure" step proves these are unbundled**: it resolves every one of them from the **Swift toolchain
+root on the runner's PATH** (its `$isFromSwiftToolchain` branch — CI-observed run 29580303796:
+`swiftCRT.dll => C:\Users\runneradmin\...\Swift\Runtimes\6.3.3\usr\bin\swiftCRT.dll`), never from the
+`.build\release` artifact. The GTE runs on a **clean PC with no Swift toolchain**, so the Windows
+loader cannot find `swiftCore.dll` et al. and **fails to start CueSync.exe before `main` runs** — no
+GDK init, no `gtk_window_present`, no window. This is a **packaging** defect, not a swift-cross-ui
+source defect, and it fully explains a clean-PC "program opens [the launcher], nothing can be
+clicked [there is nothing to click]" across CUESYNC-7/8/9. The swift-cross-ui show/present path
+itself is correct (`GtkBackend.swift:286-291` → `Window.show()` / `gtk_window_present`,
+`Application.swift:81-92` creates+presents exactly one `ApplicationWindow`) — it just never runs.
+
+**Round-3 fix (`.github/workflows/swift-windows.yml`, `windows-build` job — a `git apply`-free
+packaging fix, spec step-4 contingency: "a GTK-runtime/init config defect … apply the minimal
+equivalent at the app-shell/launch layer").** A new **"Bundle Swift runtime DLLs next to
+CueSync.exe (self-contained artifact)"** step, placed AFTER the closure check + its negative control
+(both stay green, unchanged, gating the pre-bundle artifact) and BEFORE the upload. It re-uses
+`wldd`'s own resolved closure — copying **exactly** the dependencies it resolves from the Swift
+toolchain root into the artifact directory, nothing hardcoded — then re-walks CueSync.exe and
+**asserts no dependency resolves from the toolchain root anymore** (on-box machine-verification that
+the exe is now self-contained). No swift-cross-ui bytes change; `Package.swift`/`Package.resolved`
+untouched; the CUESYNC-8 interactivity patch and the round-2 input patch untouched.
+
+**Why the round-2 input patch stays (and is honestly not the mover).** Its priority + 8 ms floor fix
+a genuine 0 ms busy-reschedule (100 % CPU) in `mainRunLoopTicklingLoop` and preserve PR #141's
+`@MainActor`/`DispatchQueue.main` servicing that `.task { state.loadPreferences() }` depends on —
+real main-loop hygiene that matters the moment the exe actually launches and the tickler starts
+running. It is retained rather than reverted because it is harmless and correct on its own terms;
+§0.1's "the fix the drain should have been" framing is superseded here only as to *what moves the
+probe*, not as to the patch's local correctness. (Spec step 5's "revert non-movers" is about not
+*stacking speculative fixes for the same symptom*; this is a different, now-correctly-identified
+symptom, so the round-2 hunk is left as standalone main-loop hygiene, not stacked as a second guess
+at input death.)
+
+**If round 3 still does not move the probe — the pre-scoped round-4 datum.** Bundling is a no-op iff
+the gate does **not** run the CI artifact but instead builds/runs on a Swift-equipped box (then the
+Swift DLLs already resolve and the window would already appear — pushing the cause to **(B)** a
+GTK-runtime/display defect: the GSK GL renderer failing on a headless/RDP box, or Pango/fontconfig
+finding no fonts). The clean discriminator remains **CueSync.exe's own stderr on the box**, still
+uncaptured because `/SUBSYSTEM:WINDOWS` detaches it. Round 4, iff this misses: an **app-shell**
+change at process start on Windows — `freopen` the CRT `stderr`/`stdout` to a log next to
+`.factory/probe/*.png`, and set `GSK_RENDERER=cairo` before GDK init. It is deliberately **not**
+bundled here: it is Windows-only C interop this macOS box cannot compile-check, and a mistyped
+module import would turn the currently-green Windows CI *red* — strictly worse than this round's
+fully compile-safe, CI-only packaging change. One suspect per round (spec step 5): the missing
+runtime DLLs are round 3's single, CI-confirmed suspect.
+
 ## §0.1 — ROUND 2 (2026-07-19, this session): the fix the drain should have been
 
 > This is the second CUESYNC-9 fix round. Round 1 (the GLib-drain `windows-input.patch`)
