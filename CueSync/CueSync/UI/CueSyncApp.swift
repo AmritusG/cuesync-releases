@@ -67,9 +67,11 @@ struct CueSyncApp: App {
         #endif
     }
 
-    /// Redirects the process's C `stderr` to `CueSync-startup.log` next to the
-    /// executable so GTK/GLib/Pango/GSK diagnostics are retained on a clean Windows
-    /// box that runs the /SUBSYSTEM:WINDOWS (console-less) build.
+    /// Redirects the process's C `stderr` to `CueSync-startup.log` in the repo's
+    /// `.factory/probe/` (see `startupLogPath()` — the directory the click-probe gate
+    /// harvests; next-to-exe fallback off-box) so GTK/GLib/Pango/GSK diagnostics are
+    /// retained on a clean Windows box that runs the /SUBSYSTEM:WINDOWS (console-less)
+    /// build, and actually come back to be read.
     ///
     /// Best-effort and non-fatal: a null `freopen` result is ignored, because a
     /// missing log must never keep the app from starting. Uses only ISO-C
@@ -101,15 +103,50 @@ struct CueSyncApp: App {
         fflush(stderr)
     }
 
-    /// `CueSync-startup.log` next to the executable, falling back to the current
-    /// working directory when argv[0] carries no directory component.
+    /// Where to write `CueSync-startup.log`.
+    ///
+    /// Round 5 wrote this next to the executable — but on the build box the exe lives
+    /// deep in `<repo>/.build/release/`, a directory the click-probe gate never returns
+    /// (it harvests only `.factory/probe/before.png` / `after.png`), so the one datum
+    /// four rounds deferred still never came back to be read. Round 6 routes the log to
+    /// the directory the gate DOES return: the exe ships *inside* the repo build tree, so
+    /// walk up from argv[0] to the enclosing repo root — the first ancestor carrying
+    /// `Package.swift` (committed, so always present on the box and on CI) — and write the
+    /// log into `<repo>/.factory/probe/`, beside the probe evidence. Create that directory
+    /// if the gate has not yet (do not gamble on it pre-existing when the process starts).
+    ///
+    /// A shipped end-user install has no `Package.swift` ancestor, so it falls back to
+    /// next-to-exe (round-5 behaviour) then the CWD — the `.factory/probe` routing is
+    /// scoped to exactly the box/CI checkouts where the gate reads it.
     private static func startupLogPath() -> String {
         let fileName = "CueSync-startup.log"
-        if let arg0 = CommandLine.arguments.first, !arg0.isEmpty {
-            let directory = URL(fileURLWithPath: arg0).deletingLastPathComponent()
-            if !directory.path.isEmpty {
-                return directory.appendingPathComponent(fileName).path
+        let fileManager = FileManager.default
+        guard let arg0 = CommandLine.arguments.first, !arg0.isEmpty else {
+            return fileName
+        }
+        let executableDirectory = URL(fileURLWithPath: arg0).deletingLastPathComponent()
+
+        var directory = executableDirectory
+        for _ in 0..<10 {
+            let repoMarker = directory.appendingPathComponent("Package.swift")
+            if fileManager.fileExists(atPath: repoMarker.path) {
+                let probeDirectory = directory
+                    .appendingPathComponent(".factory")
+                    .appendingPathComponent("probe")
+                try? fileManager.createDirectory(
+                    at: probeDirectory, withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: probeDirectory.path) {
+                    return probeDirectory.appendingPathComponent(fileName).path
+                }
+                break
             }
+            let parent = directory.deletingLastPathComponent()
+            if parent.path == directory.path { break }  // reached the filesystem root
+            directory = parent
+        }
+
+        if !executableDirectory.path.isEmpty {
+            return executableDirectory.appendingPathComponent(fileName).path
         }
         return fileName
     }

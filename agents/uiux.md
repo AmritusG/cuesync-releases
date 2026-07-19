@@ -212,3 +212,39 @@ highest-value change is not another candidate fix — it is the missing measurem
 
 Generalized: **a fix you cannot verify is a guess; after two of them miss, stop guessing and
 instrument.** One well-placed, compile-safe log redirect is worth more than a fifth plausible patch.
+
+## An instrument is worthless if its output lands where nothing collects it (CUESYNC-9, round 6)
+
+Round 5 did the right thing — capture `CueSync.exe`'s `stderr` — and still learned nothing, because
+it wrote the log **next to the exe** (`<repo>/.build/release/`) and assumed "the box owner will
+retrieve it." The click-probe gate returns **exactly two files**: `.factory/probe/before.png` and
+`.factory/probe/after.png`. Nothing else in the checkout comes back. So the decisive datum was
+captured on the box and then discarded at the delivery layer — the round-5 bullet above that says
+"write the log **next to the exe**" was itself the bug.
+
+The lesson: **before you place an instrument's output, find out which artifacts the harness actually
+returns, and write into one of them.** A measurement is only as good as its channel back to you.
+
+- **Enumerate the return channels first.** Here they were: (1) the two probe PNGs the gate always
+  returns, and (2) GitHub CI logs/artifacts (readable via `gh run view`), which run rarely. Point the
+  instrument at a channel that returns — not at wherever is convenient to write.
+- **Exploit build-tree layout to reach the collected directory.** The Windows exe ships *inside* the
+  repo (`<repo>/.build/release/CueSync.exe`), two levels below `.factory/probe/`. So the app can walk
+  argv[0] up to the repo root (the first ancestor carrying a committed marker like `Package.swift`)
+  and write the log **into `.factory/probe/`**, beside the evidence the gate harvests — creating the
+  dir rather than gambling it pre-exists. Scope it: an end-user install has no `Package.swift`
+  ancestor, so it falls back to next-to-exe and the routing only activates on the box/CI checkout.
+- **Add a channel you fully control.** A `windows-build` CI step that launches the self-contained exe
+  headless under a hard timeout, kills it, and `Get-Content`s the log to the CI console makes the same
+  datum readable via `gh run view` on an independent, GPU-less headless Windows VM — which also
+  exercises the same `GSK_RENDERER=cairo` path and may reproduce the failure directly. Make it a pure
+  instrument: `if: always()` + an explicit `exit 0`, so it can never turn CI red.
+- **Re-verify "nothing to backport" against the live upstream, not a prior round's note.** Round 6
+  re-checked: swift-cross-ui v0.8.0 is still latest and none of the 17 post-tag commits touch
+  GtkBackend Windows input — *and every one of the post-tag Windows commits targets WinUIBackend*.
+  When the toolkit's own maintainers have moved all Windows work to a different backend, "patch the
+  unmaintained backend" may be a losing game; surface that as a backend decision for the ticket owner,
+  don't keep grinding one-line patches. CUESYNC-9 §0.5, `CueSync/CueSync/UI/CueSyncApp.swift`.
+
+Generalized: **capture + a dead delivery channel = no measurement.** Wire the instrument to what the
+harness returns before you trust it to unblock the next round.

@@ -1046,6 +1046,66 @@ jobs:
           }
           Write-Host "Self-contained artifact confirmed: no dependency resolves from the Swift toolchain root."
 
+      # CUESYNC-9 round 6 — MEASUREMENT, not a gate. Round 5 redirected CueSync.exe's
+      # stderr to CueSync-startup.log (the /SUBSYSTEM:WINDOWS build has no console), but
+      # the click-probe box only ever returns before.png/after.png, so that log — the one
+      # datum four rounds named decisive and deferred — never came back to be read. This
+      # step launches the freshly-built, self-contained exe here on the CI runner (an
+      # independent headless Windows box, GPU-less like the RDP probe box, so it exercises
+      # the same GSK_RENDERER=cairo path) under a hard timeout, then prints the log the exe
+      # writes so the GTK/GLib/Pango/GSK diagnostics are readable straight from the CI log
+      # (`gh run view`) and folded into the uploaded artifact alongside a runner screenshot
+      # (a second, independent render of the same build to compare against the probe box).
+      # It must NEVER fail the build — it always exits 0.
+      - name: Capture CueSync.exe startup diagnostics (launch headless, then kill)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $exeItem = Get-Item ".build\release\CueSync.exe" -ErrorAction SilentlyContinue
+          if (-not $exeItem) { Write-Host "no CueSync.exe to launch — build/bundle did not produce one; nothing to measure"; exit 0 }
+          $exe = $exeItem.FullName
+          try {
+            $proc = Start-Process -FilePath $exe -PassThru
+            Write-Host "launched CueSync.exe (pid $($proc.Id)); waiting 25s for GTK realize/paint/diagnostics..."
+            Start-Sleep -Seconds 25
+            # Best-effort: a screenshot of the runner desktop is a second, independent render
+            # of this exact build. If the runner has no interactive desktop it just fails soft.
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+              $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+              $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+              $bmp.Save((Join-Path $exeItem.DirectoryName "ci-runner-screenshot.png"))
+              Write-Host "captured CI-runner screenshot next to the exe"
+            } catch { Write-Host "runner screenshot unavailable: $($_.Exception.Message)" }
+          } catch {
+            Write-Host "CueSync.exe launch failed: $($_.Exception.Message)"
+          } finally {
+            Get-Process -Name CueSync -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+          Write-Host "===================== CueSync-startup.log ====================="
+          # Round 6 routes the log to <repo>\.factory\probe\; older builds wrote next to the
+          # exe — print whichever exists, and copy it into the artifact dir so it uploads.
+          $candidates = @(".factory\probe\CueSync-startup.log", ".build\release\CueSync-startup.log")
+          $printed = $false
+          foreach ($log in $candidates) {
+            if (Test-Path $log) {
+              Write-Host "--- $log ---"
+              Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ }
+              Copy-Item -LiteralPath $log -Destination $exeItem.DirectoryName -Force -ErrorAction SilentlyContinue
+              $printed = $true
+            }
+          }
+          if (-not $printed) {
+            Write-Host "NO CueSync-startup.log was produced. The exe never reached App.init() — a"
+            Write-Host "packaging/loader failure (missing DLL, bad entry point), NOT a window/input"
+            Write-Host "failure. Investigate the launch/loader path, not GtkBackend."
+          }
+          Write-Host "===================== end diagnostics ========================="
+          exit 0
+
       - name: Upload build artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -116,6 +116,89 @@ final class CUESYNC9SelfContainedArtifactWorkflowTests: XCTestCase {
     }
 }
 
+// MARK: - CUESYNC-9 §0.5 (round 6): the startup-diagnostics MEASUREMENT, routed to a channel that returns
+//
+// Round 5 captured CueSync.exe's stderr to CueSync-startup.log but wrote it next to the
+// exe (deep in .build/, never returned by the gate), so the decisive datum never came
+// back. Round 6 (a) routes the log to <repo>/.factory/probe/ — beside the before/after
+// PNGs the gate DOES harvest — via the Package.swift repo-root marker, and (b) launches
+// the exe in CI and echoes that log to the console. These tests pin the two load-bearing
+// properties: the CI step is a measurement that can NEVER fail the build, and the app
+// routes the log to the returnable directory.
+final class CUESYNC9StartupDiagnosticsMeasurementTests: XCTestCase {
+    private let captureStepPattern = #"name:\s*Capture CueSync\.exe startup diagnostics"#
+    private let bundleStepPattern = #"name:\s*Bundle Swift runtime DLLs"#
+    private let uploadStepPattern = #"name:\s*Upload build artifact"#
+
+    /// The diagnostic step exists in windows-build (where the runnable exe is produced).
+    func testWindowsBuildDeclaresTheStartupDiagnosticsCaptureStep() throws {
+        let job = try SelfContainedJob.require("windows-build")
+        XCTAssertNotNil(job.firstLineIndex(matching: captureStepPattern),
+            "windows-build must declare a 'Capture CueSync.exe startup diagnostics' step so round 5's "
+            + "stderr log is echoed to a channel that returns (specs/CUESYNC-9-findings.md §0.5)")
+    }
+
+    /// It runs AFTER the Swift-DLL bundle (needs the self-contained exe) and BEFORE the
+    /// upload (so the log + runner screenshot fold into the uploaded artifact).
+    func testCaptureStepRunsAfterBundleAndBeforeUpload() throws {
+        let job = try SelfContainedJob.require("windows-build")
+        guard let bundle = job.firstLineIndex(matching: bundleStepPattern),
+              let capture = job.firstLineIndex(matching: captureStepPattern),
+              let upload = job.firstLineIndex(matching: uploadStepPattern) else {
+            XCTFail("windows-build must declare the bundle, capture, and upload steps"); return
+        }
+        XCTAssertGreaterThan(capture, bundle,
+            "the capture step must run AFTER the Swift-runtime-DLL bundle so it launches the "
+            + "self-contained exe (spec CUESYNC-9 §0.5)")
+        XCTAssertLessThan(capture, upload,
+            "the capture step must run BEFORE the artifact upload so the log + screenshot upload "
+            + "with it (spec CUESYNC-9 §0.5)")
+    }
+
+    /// It is an INSTRUMENT, not a gate: it launches then kills the exe under a timeout and
+    /// can never fail the build (`if: always()` + an explicit `exit 0`). A measurement step
+    /// that could turn CI red would be actively harmful.
+    func testCaptureStepIsAMeasurementThatNeverFailsTheBuild() throws {
+        let job = try SelfContainedJob.require("windows-build")
+        let block = try job.stepBlock(named: #"Capture CueSync\.exe startup diagnostics"#)
+        XCTAssertTrue(block.contains("if: always()"),
+            "the capture step must run even when earlier steps fail — it is diagnostic")
+        XCTAssertTrue(block.contains("exit 0"),
+            "the capture step must always exit 0 — a measurement must never fail the build")
+        XCTAssertTrue(block.contains("Start-Process"),
+            "the capture step must launch the exe to make it emit its startup diagnostics")
+        XCTAssertTrue(block.contains("Stop-Process"),
+            "the capture step must kill the launched GUI process (it never exits on its own)")
+        XCTAssertTrue(block.contains("Get-Content"),
+            "the capture step must print the log so it is readable in the CI console (gh run view)")
+    }
+
+    /// The app-shell routes the log to the directory the gate returns: <repo>/.factory/probe,
+    /// located via the committed Package.swift repo-root marker (not a gate-timing gamble).
+    func testAppShellRoutesTheStartupLogToTheReturnableProbeDirectory() throws {
+        let appShell = SelfContainedRepoPaths.root
+            .appendingPathComponent("CueSync/CueSync/UI/CueSyncApp.swift")
+        let text = try String(contentsOf: appShell, encoding: .utf8)
+        XCTAssertTrue(text.contains("Package.swift"),
+            "startupLogPath() must find the repo root via the committed Package.swift marker")
+        XCTAssertTrue(text.contains(".factory") && text.contains("probe"),
+            "startupLogPath() must route the log into <repo>/.factory/probe — the directory the "
+            + "click-probe gate harvests (specs/CUESYNC-9-findings.md §0.5)")
+        XCTAssertTrue(text.contains("createDirectory"),
+            "startupLogPath() must create .factory/probe if the gate has not yet, rather than gamble "
+            + "on it pre-existing when the process starts")
+    }
+
+    /// The findings doc records the round-6 re-diagnosis: the log was stranded off-channel.
+    func testFindingsRecordsTheRoundSixLogRoutingReDiagnosis() throws {
+        let text = try String(contentsOf: SelfContainedRepoPaths.findings, encoding: .utf8)
+        XCTAssertTrue(text.contains("§0.5"),
+            "specs/CUESYNC-9-findings.md must contain the round-6 §0.5 section")
+        XCTAssertTrue(text.contains(".factory/probe"),
+            "§0.5 must record routing the startup log to the .factory/probe directory the gate returns")
+    }
+}
+
 // MARK: - Helpers (deliberately file-local — see the file header rationale)
 
 private enum SelfContainedRepoPaths {

@@ -1,5 +1,94 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.5 — ROUND 6 (2026-07-19, this session): round 5's measurement was RIGHT but delivered to a dead channel — route it back, don't guess again
+
+> This is the sixth CUESYNC-9 round. It ships **no** new swift-cross-ui input patch. Round 5's
+> premise was correct — *stop guessing, capture CueSync.exe's own stderr* — but it made one wrong
+> assumption that silently defeated it: it wrote `CueSync-startup.log` **next to the executable**
+> (argv[0] dir → `<repo>/.build/release/`), assuming "the box / gate owner will retrieve it." The
+> click-probe gate does **not** retrieve arbitrary files: it returns **only**
+> `.factory/probe/before.png` and `.factory/probe/after.png` (confirmed — those two files are the
+> entire `.factory/probe/` payload, and `.factory/` is gitignored so nothing else is even tracked).
+> So the log round 6 was told to read (§0.4: "Do NOT author round 6 until it is read") **never came
+> back**. The decisive datum was captured on the box and then thrown away at the delivery layer.
+
+**Round 6's whole job: fix the delivery so the datum actually returns — through the two channels
+that verifiably come back.** No cause is guessed; the instrument is simply pointed at a channel that
+works. Two coordinated changes, both measurement-only:
+
+1. **App-shell (`CueSync/CueSync/UI/CueSyncApp.swift`, `startupLogPath()`): write the log where the
+   gate already harvests.** The Windows exe ships *inside* the repo build tree
+   (`<repo>/.build/release/CueSync.exe`), two levels below `.factory/probe/`. So instead of writing
+   next-to-exe (buried in `.build/`, never returned), walk up from argv[0] to the enclosing **repo
+   root** — the first ancestor carrying **`Package.swift`** (committed, always present on box and
+   CI) — and write `CueSync-startup.log` into `<repo>/.factory/probe/`, **beside** before.png/
+   after.png, creating that dir if the gate has not yet (do not gamble on it pre-existing at process
+   start). A shipped end-user install has no `Package.swift` ancestor → falls back to next-to-exe
+   then CWD, so the `.factory/probe` routing is scoped to exactly the box/CI checkouts where the gate
+   reads it. This is the load-bearing change: it puts the log in the one directory the gate is known
+   to return.
+2. **CI (`.github/workflows/swift-windows.yml`, `windows-build`, new step "Capture CueSync.exe
+   startup diagnostics"): launch the exe and echo the log to a channel I can read.** Between the
+   Swift-DLL bundling and the artifact upload (adjacency invariant preserved — bundling still runs
+   after the closure check and before upload), launch the self-contained exe under a hard 25 s
+   timeout, kill it, then `Get-Content` the log to the CI console (so it is readable via
+   `gh run view`) and copy it + a best-effort runner screenshot into the uploaded artifact. The
+   GitHub `windows-latest` runner is itself a **GPU-less, headless-ish Windows VM** — the same
+   constraint round 4 pinned the RDP box's GL failure on — so it exercises the forced
+   `GSK_RENDERER=cairo` path and may reproduce the empty-render/dead-input failure directly, handing
+   me the app's own `Pango`/`GSK`/`GDK` stderr. The step **always exits 0**; it is an instrument, not
+   a gate.
+
+**Upstream re-verified this round (not trusted from a prior round's note).** `moreSwift/swift-cross-ui`
+**v0.8.0 is still the latest tag** (checked live via the GitHub API against both `moreSwift` and the
+`stackotter` origin — no v0.9). `main` carries **17** commits past the tag; reading every subject
+line, **none** touches GtkBackend Windows input, the main loop, the message pump, or gdk-win32 — so
+§0's "no fix to backport" holds, now re-confirmed rather than assumed. A sharper signal fell out of
+that read: **every** post-v0.8.0 Windows commit targets **WinUIBackend** (`sheets`, `openExternalURL`,
+`stdout fix before App.init`, `multiple alerts`) — i.e. upstream actively maintains its *native*
+Windows backend and leaves **GtkBackend-on-Windows input unmaintained**. That is context for whoever
+owns the ticket after the log is read: if the log proves GtkBackend's win32 event integration is
+structurally broken in this pinned build, the durable fix may be a backend decision, not a patchable
+one-liner — but that is out of scope for this round and this agent's lane, and is flagged, not acted on.
+
+**Why NOT another input patch this round (the discipline the pattern demands).** Rounds 1–5 each
+shipped one fix reasoned from source alone and each returned a **byte-identical** probe (md5s across
+rounds: `d3a753ec…` → `e165fe8e…` → `dc6d8369…` → `262857fe…` → `926fa17a…` — the desktop behind the
+window changes, the black window + dead input never does). Shipping a sixth blind input patch now —
+even the well-motivated one §0.4 names (round 2's priority hack does not stop
+`RunLoop.main.limitDate(forMode: .default)` from still `PeekMessage(NULL, …, PM_REMOVE)`-draining the
+win32 queue every tick; a non-`.default`-mode pump would) — would repeat the exact failure: an
+unverifiable change producing another byte-identical probe and teaching nothing. The lesson stands:
+**when every blind fix returns an identical probe, ship the measurement, not guess N+1.** Round 5 had
+the right instrument and the wrong wire; round 6 fixes the wire. The three existing patches
+(interactivity, windows-input, gsk-renderer) and round 5's stderr redirect are **retained unchanged**
+— each still independently revertable.
+
+**The round-7 decision tree — now that the log will actually arrive** (read `<repo>/.factory/probe/
+CueSync-startup.log` from the box's returned evidence, and/or the `windows-build` job's "Capture
+CueSync.exe startup diagnostics" console output / `cuesync-windows` artifact):
+- **No log at all** (banner absent from both channels) → CueSync.exe never reached Swift `App.init()`
+  — a packaging/loader failure (missing DLL, bad entry point), not a window bug. Fix the launch path.
+- **Banner present, then `Pango-*`/`fontconfig`/`couldn't load font`** → **(B-fonts)**: text measures
+  to 0, layout collapses. Bundle fonts + point Pango/fontconfig at them (app-shell). Note this is only
+  partially consistent with the pixels — the probe shows **no** accent-colour fills either, which a
+  fonts-only failure would leave visible — so weigh it against (A).
+- **Banner present, then `Gsk`/`GSK`/GL/`renderer` lines** → **(B-renderer)**: cairo not actually in
+  effect / a paint failure. Confirm/force the software renderer earlier.
+- **Banner present, log otherwise clean, window empty + dead** → **(A) starvation confirmed**: fix the
+  `GtkBackend` run loop so `RunLoop.main` stops draining the win32 queue — a **non-`.default`-mode
+  pump** (a run-loop mode with no Windows message-queue mask) that services `DispatchQueue.main`
+  without `PeekMessage(NULL)`, replacing round 2's priority hack. Now targetable against evidence.
+- **CI runner renders the UI fine but the RDP box does not** → the failure is **box-display/RDP-input
+  specific**, not a code defect the GtkBackend patch can reach — hand the runner/probe-harness owner
+  the display/input-injection path.
+
+**One-suspect discipline (spec step 5).** Round 6's "suspect" is not a cause — it is the corrected
+delivery of round 5's measurement. It touches two files (the app-shell log path; a new, always-green
+CI diagnostic step), adds **no** swift-cross-ui patch, no dependency, no network, no dynamic load, and
+no `GtkFixed`/absolute positioning. The app screens, wording, and layout are byte-for-byte unchanged
+(the change is the log *path*, invisible to the UI). It hands round 7 the datum ten rounds have lacked.
+
 ## §0.4 — ROUND 5 (2026-07-19, this session): stop guessing — capture CueSync.exe's own stderr, the one datum every prior round named decisive and deferred
 
 > This is the fifth CUESYNC-9 round, and it deliberately BREAKS the pattern of rounds 1–4: each
