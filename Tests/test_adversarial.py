@@ -1012,6 +1012,10 @@ def test_generate_token_distribution_has_no_gross_modulo_bias():
 AUDITED_REVISION = "a6d206370812e3b9edba259d167e848892c5013d"
 GESTURE_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-interactivity.patch"
 GESTURE_STEP_NAME = "Patch swift-cross-ui GTK interactivity"
+# CUESYNC-9 §4: a second, distinct root-cause patch against the same upstream
+# file, kept in its own reviewable file (never merged into GESTURE_PATCH_NAME —
+# see CUESYNC9WindowsInputDispatchWorkflowTests' non-overlapping-hunk check).
+WINDOWS_INPUT_PATCH_NAME = "swift-cross-ui-0.8.0-windows-input.patch"
 
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
@@ -1653,10 +1657,16 @@ def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit(
 
 
 # ---------------------------------------------------------------------------
-# ATTACK 35 (SUPPLY CHAIN) — one checked-in patch, no divergent copy. spec §3:
-# the dev script applies "the SAME patch locally" as CI. Two patch files that
-# both touch GtkBackend would mean "the bytes we reviewed" and "the bytes we
-# build" could drift apart — the split §4 exists to prevent.
+# ATTACK 35 (SUPPLY CHAIN) — no divergent/duplicate copy of either checked-in
+# patch. spec §3: the dev script applies "the SAME patch locally" as CI. A
+# THIRD file, or a second copy of an already-named patch, touching GtkBackend
+# would mean "the bytes we reviewed" and "the bytes we build" could drift
+# apart. CUESYNC-9 §4 deliberately adds a second, distinct-root-cause patch
+# (WINDOWS_INPUT_PATCH_NAME) alongside the CUESYNC-8 gesture patch — kept in
+# its own file on purpose, with non-overlapping hunks, rather than merged into
+# one (see CUESYNC9WindowsInputDispatchWorkflowTests) — so the invariant this
+# guards is "exactly these two named patches, nothing else", not "at most one
+# patch may ever touch this file".
 # ---------------------------------------------------------------------------
 
 
@@ -1669,10 +1679,11 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    assert gtk_patches == [GESTURE_PATCH_NAME], (
-        "spec §4: expected exactly ONE checked-in patch touching GtkBackend.swift; a "
-        "second copy is a divergent-source supply-chain risk. Found: "
-        + repr(gtk_patches)
+    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME])
+    assert gtk_patches == expected, (
+        "spec §4: expected exactly the two named checked-in patches touching "
+        "GtkBackend.swift (" + repr(expected) + "); a THIRD file or a divergent "
+        "copy of either is a supply-chain risk. Found: " + repr(gtk_patches)
     )
     dev_script = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
     assert dev_script.is_file(), "scripts/patch-swift-cross-ui.sh must exist (spec §3)"
