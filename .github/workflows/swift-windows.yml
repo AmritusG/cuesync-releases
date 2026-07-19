@@ -736,33 +736,54 @@ jobs:
       # Copy-Item touches it a moment later, whether or not resolution succeeded.
       # Wrapping the copy itself in the same retry-with-backoff pattern lets that
       # lock clear before giving up.
+      #
+      # CI-observed (this branch, run 29707267892): this step still exhausted its
+      # 5 copy attempts (~15s of backoff) and failed — the underlying exception was
+      # never surfaced because the catch blocks below discarded it, so the only
+      # visible symptom was the job's own "Process completed with exit code 1." The
+      # post-link Defender/AV lock on `.build\release` evidently outlasts 15s on a
+      # busy runner (the same directory is also what "Upload build artifact" hit the
+      # identical lock against, one exit-status-check further down this same run —
+      # see that step's history). Two fixes: (1) always report the last caught
+      # exception's message before giving up, so a future recurrence of this exact
+      # lock is diagnosable from the log instead of guessed at again; (2) give both
+      # the link-resolve and the copy their own longer retry budget (10 attempts)
+      # before falling back/failing, matching the more patient wait the later
+      # "Resolve real build output directory" step already uses for this same lock.
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
           $artifactItem = Get-Item ".build\release"
           $resolvedTarget = $null
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
+          $lastError = $null
+          for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
               $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
               break
             } catch {
+              $lastError = $_
               Start-Sleep -Seconds 2
             }
+          }
+          if (-not $resolvedTarget -and $lastError) {
+            Write-Host "ResolveLinkTarget did not succeed after 10 attempts, falling back to unresolved path: $($lastError.Exception.Message)"
           }
           $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
           $gtkDlls = Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File | Where-Object { $_.Extension -eq '.dll' }
           $copied = $false
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
+          $lastError = $null
+          for ($attempt = 1; $attempt -le 10; $attempt++) {
             try {
               $gtkDlls | Copy-Item -Destination $artifactDir -Force -ErrorAction Stop
               $copied = $true
               break
             } catch {
+              $lastError = $_
               Start-Sleep -Seconds 3
             }
           }
           if (-not $copied) {
-            Write-Error "failed to copy GTK 4 runtime DLLs into $artifactDir after 5 attempts"
+            Write-Error "failed to copy GTK 4 runtime DLLs into $artifactDir after 10 attempts: $($lastError.Exception.Message)"
             exit 1
           }
 
