@@ -50,7 +50,7 @@ index d83bbefb..0fc62404 100644
 +++ b/Sources/GtkBackend/GtkBackend.swift
 @@ -116,6 +116,23 @@ public final class GtkBackend:
      var globalCSSProvider: CSSProvider?
-
+ 
      public func runMainLoop(_ callback: @escaping @MainActor () -> Void) {
 +        #if os(Windows)
 +            // GTK 4's default GSK renderer on Windows is GPU/OpenGL-backed (the
