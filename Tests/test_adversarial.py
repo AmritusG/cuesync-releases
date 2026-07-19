@@ -2695,7 +2695,9 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
     pos_drain = region.find("g_main_context_iteration")
     pos_dispatch = region.find("scui_dispatchMainQueueCallback4CF")
     pos_else = region.find("#else", pos_if if pos_if != -1 else 0)
-    pos_endif = region.find("#endif", pos_else if pos_else != -1 else (pos_if if pos_if != -1 else 0))
+    pos_endif = region.find(
+        "#endif", pos_else if pos_else != -1 else (pos_if if pos_if != -1 else 0)
+    )
     # Anchor on the real code token, not bare "limitDate" — the patch's rationale
     # comment mentions "`limitDate` below" ABOVE the drain, which would otherwise
     # match first and invert the ordering check.
@@ -2710,8 +2712,9 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
         "RunLoop.main.limitDate": pos_limit,
     }
     missing = [name for name, pos in positions.items() if pos == -1]
-    assert not missing, (
-        "mainRunLoopTicklingLoop after apply is missing %r:\n%s" % (missing, region)
+    assert not missing, "mainRunLoopTicklingLoop after apply is missing %r:\n%s" % (
+        missing,
+        region,
     )
     assert pos_if < pos_drain < pos_else, (
         "findings §3/§Fix (round 7): the GLib drain (`g_main_context_iteration`) must "
@@ -3350,7 +3353,7 @@ def test_gsk_patch_setenv_call_is_scoped_inside_the_windows_only_guard():
     setenv_pos = text.find("g_setenv(", guard_start)
     assert setenv_pos != -1, "no g_setenv( call found after the Windows guard opens"
     assert setenv_pos < guard_end, (
-        "spec CUESYNC-9 §5: the g_setenv(\"GSK_RENDERER\", \"cairo\", ...) call must "
+        'spec CUESYNC-9 §5: the g_setenv("GSK_RENDERER", "cairo", ...) call must '
         "sit INSIDE the #if os(Windows) ... #endif guard, not after it closes — "
         "otherwise it would force the software renderer on macOS/Linux too"
     )
@@ -3510,7 +3513,9 @@ def _cs_harness_binary():
     st["built"] = True
     srcs = _cs_sources_or_none()
     if srcs is None:
-        st["err"] = "CueSyncCore exporter/parser sources not found — cannot exercise them"
+        st["err"] = (
+            "CueSyncCore exporter/parser sources not found — cannot exercise them"
+        )
         raise unittest.SkipTest(st["err"])
     swiftc = shutil.which("swiftc")
     if swiftc is None:
@@ -3591,12 +3596,12 @@ def _cs_read_source_or_skip(*parts):
 def test_showkontrol_export_cannot_inject_rows_or_columns_from_a_hostile_cue_name():
     attacks = [
         "clean name",
-        "a,b,c,EXTRA,COLUMN",                 # comma = field separator
-        "row1\rrow2",                          # CR = the .cue record separator
-        "row1\nrow2",                          # LF
-        "row1\r\nrow2",                        # CRLF
+        "a,b,c,EXTRA,COLUMN",  # comma = field separator
+        "row1\rrow2",  # CR = the .cue record separator
+        "row1\nrow2",  # LF
+        "row1\r\nrow2",  # CRLF
         "x,\r00:00:00:00,00000000,0,FORGED,TAG,,,,,,",  # a full forged trailing record
-        ",,,,,,,,,,",                          # nothing but separators
+        ",,,,,,,,,,",  # nothing but separators
     ]
     outs = _run_cs_batch(["sk %s 1.0" % _b64(a) for a in attacks])
     for a, out in zip(attacks, outs):
@@ -3700,12 +3705,12 @@ def test_showkontrol_timecode_is_bounded_and_wellformed_for_hostile_start_values
 def test_resolume_export_neutralises_xml_injection_in_the_preset_name():
     attacks = [
         "plain",
-        '"/><Malicious a="',                                    # attribute/quote breakout
-        "']]>",                                                 # CDATA close
-        "A&B<C>D\"E'F",                                         # all five metacharacters
-        'x"/><point x="9" y="9" curve="9"/><Preset name="',    # element injection
-        "&xxe; &amp; &#x41;",                                   # entity-looking text
-        "emoji\U0001f39b️ accént",                        # legal non-ASCII passes through
+        '"/><Malicious a="',  # attribute/quote breakout
+        "']]>",  # CDATA close
+        "A&B<C>D\"E'F",  # all five metacharacters
+        'x"/><point x="9" y="9" curve="9"/><Preset name="',  # element injection
+        "&xxe; &amp; &#x41;",  # entity-looking text
+        "emoji\U0001f39b️ accént",  # legal non-ASCII passes through
     ]
     outs = _run_cs_batch(["res %s 1.0 1 10" % _b64(a) for a in attacks])
     for a, out in zip(attacks, outs):
@@ -3776,8 +3781,9 @@ def test_resolume_export_clamps_hostile_curve_and_neutralises_nonfinite_position
         # coordinate that fails the finite-plain-decimal regex or a curve out of range.
         for p in root.iter("point"):
             cv = int(p.attrib["curve"])
-            assert 1 <= cv <= 23, (
-                "curve %d not clamped to 1..23 (hostile curve=%d)" % (cv, c)
+            assert 1 <= cv <= 23, "curve %d not clamped to 1..23 (hostile curve=%d)" % (
+                cv,
+                c,
             )
             for axis in ("x", "y"):
                 v = p.attrib[axis]
