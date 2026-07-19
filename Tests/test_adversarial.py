@@ -2862,6 +2862,296 @@ def test_duration_modal_now_live_path_routes_typed_duration_through_safeduration
     )
 
 
+# ===========================================================================
+# CUESYNC-9 windows-input PATCH STEP hardening (ATTACK 57–62)
+#
+# The windows-input PATCH FILE is thoroughly attacked above (ATTACK 48–53) and by
+# the Swift CUESYNC9WindowsInputDispatchWorkflowTests. What neither suite hardens
+# is the windows-input STEP the way the gesture step is hardened (ATTACK 30/31/32/
+# 44): the Swift step tests assert only that a token (`IsReadOnly`, `--reverse
+# --check`) appears SOMEWHERE in the block — never its ORDER against the apply, the
+# STRICTNESS of the forward `git apply`, byte-parity across the two Windows legs, or
+# fail-loud on a bad apply. Those are exactly the properties a supply-chain-minded
+# adversary edits to defeat the pin while leaving every existing test green. These
+# six close that asymmetry, mirroring the gesture-step attacks one-for-one.
+# ===========================================================================
+
+
+def _win_input_step_blocks():
+    """(job, name_line_idx, block_text) for every windows-input patch step, one per
+    job. A block runs from its `- name:` line up to (excluding) the next step."""
+    blocks = []
+    for job, (jstart, jend) in JOBS.items():
+        i = jstart
+        while i < jend:
+            m = STEP_NAME_RE.match(LINES[i])
+            if m and m.group(1).startswith(WINDOWS_INPUT_STEP_NAME):
+                j = i + 1
+                while j < jend and not STEP_NAME_RE.match(LINES[j]):
+                    j += 1
+                blocks.append((job, i, "\n".join(LINES[i:j])))
+                i = j
+            else:
+                i += 1
+    return blocks
+
+
+WINDOWS_INPUT_BLOCKS = _win_input_step_blocks()
+
+
+def _win_input_bodies():
+    """job -> de-indented `run: |` script body of that job's windows-input patch
+    step. Reuses `_gesture_run_body`, which trims the trailing comment block that
+    the windows-test leg carries and the windows-build leg does not — so two
+    byte-identical scripts do not read as divergent purely by that comment."""
+    return {job: _gesture_run_body(block) for job, _i, block in WINDOWS_INPUT_BLOCKS}
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 57 (SUPPLY CHAIN) — every forward `git apply` of the windows-input patch
+# must be STRICT (bare), on all three legs. ATTACK 44 pins this for the GESTURE
+# patch only: `_all_forward_git_apply_lines()` scans the gesture step bodies (plus
+# the whole dev script), never the windows-input WORKFLOW steps. So a future edit
+# that added `--3way`, `--whitespace=fix`, `--reject`, `--unidiff-zero`, or a
+# `-C<n>` fuzz flag to the windows-input `git apply` would let that patch land on
+# DRIFTED context — a bumped pin or a tampered checkout — silently defeating the
+# "audited == built" guarantee (spec CUESYNC-9 §4) for the windows-input patch
+# specifically, and no Swift or Python test would notice.
+# ---------------------------------------------------------------------------
+
+
+def _all_windows_input_git_apply_lines():
+    """(where, command) for every `git apply` of the windows-input patch across the
+    three windows-input step bodies AND the dev script, comment-stripped. Includes
+    the `--reverse --check` guard lines — a fuzzed reverse check would wrongly
+    report 'already applied' and skip a needed apply, so strictness must hold there
+    too."""
+    out = []
+    for job, body in _win_input_bodies().items():
+        for ln in body.splitlines():
+            code = ln.split("#", 1)[0]
+            if "git apply" in code:
+                out.append(("workflow:" + job, code.strip()))
+    if DEV_PATCH_SCRIPT.is_file():
+        for ln in _dev_script_code_or_skip().splitlines():
+            code = ln.split("#", 1)[0]
+            if "git apply" in code and "WINDOWS_INPUT" in code:
+                out.append(("scripts/patch-swift-cross-ui.sh", code.strip()))
+    return out
+
+
+def test_every_git_apply_of_the_windows_input_patch_is_strict_not_fuzzy():
+    invocations = _all_windows_input_git_apply_lines()
+    if not invocations:
+        raise unittest.SkipTest("no windows-input `git apply` invocation found")
+    banned_substrings = [
+        "--ignore-whitespace",
+        "--whitespace",  # =fix mutates; =nowarn/=error still signal intent to coerce
+        "--unidiff-zero",
+        "--3way",
+        "--reject",
+        "--inaccurate-eof",
+    ]
+    fuzz_re = re.compile(r"(?:^|\s)-C\d")  # -C<n> relaxes required context (fuzz)
+    for where, cmd in invocations:
+        tail = cmd[cmd.index("git apply") + len("git apply") :]
+        for flag in banned_substrings:
+            assert flag not in tail, (
+                "spec CUESYNC-9 §4 (audited==built): the windows-input `git apply` in "
+                "%s carries `%s`, a leniency/partial-apply flag. `git apply` is strict "
+                "by default; that strictness is the ONLY thing forcing the patch to "
+                "match the audited v0.8.0 bytes exactly. With `%s` the patch applies to "
+                "DRIFTED context (a bumped pin, a tampered checkout), silently defeating "
+                "the pin. Invocation: %r" % (where, flag, flag, cmd)
+            )
+        assert not fuzz_re.search(tail), (
+            "spec CUESYNC-9 §4: the windows-input `git apply` in %s carries a `-C<n>` "
+            "fuzz flag that relaxes context matching, letting the patch land on code "
+            "that has drifted from the audited commit. Keep it strict (bare). "
+            "Invocation: %r" % (where, cmd)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 58 (SPLIT-BRAIN) — the windows-build and windows-test windows-input step
+# bodies must be BYTE-IDENTICAL. ATTACK 30 pins this for the gesture step; nothing
+# pins it for windows-input. If the two Windows legs' input-patch steps drift, the
+# build leg and the test leg compile differently-patched swift-cross-ui checkouts —
+# the exact split-brain CUESYNC-6d suffered, where `swift build` and `swift test`
+# disagree about what source they built. A green build then hides a test-leg break
+# (or vice-versa) that only surfaces on the clean PC.
+# ---------------------------------------------------------------------------
+
+
+def test_both_windows_input_patch_steps_are_byte_identical():
+    bodies = _win_input_bodies()
+    a, b = bodies.get("windows-build"), bodies.get("windows-test")
+    assert a is not None and b is not None, (
+        "windows-input patch step missing on a Windows leg: " + repr(sorted(bodies))
+    )
+    assert a == b, (
+        "spec CUESYNC-9 §4: the windows-build and windows-test windows-input patch "
+        "step bodies must not drift — a divergence means build and test compile "
+        "differently-patched checkouts (the split-brain CUESYNC-6d suffered).\n"
+        "--- windows-build ---\n" + a + "\n--- windows-test ---\n" + b
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 59 (ORDERING) — on both Windows legs the read-only clear must run BEFORE
+# the forward `git apply`, and on EXACTLY the file the patch modifies. The Swift
+# test (testWindowsInputPatchStepClearsWindowsReadOnlyFlagOnBothWindowsLegs) only
+# asserts `IsReadOnly` appears SOMEWHERE in the block — a clear that ran AFTER the
+# apply, or that named the wrong file, still contains the token yet is a live
+# break: `git apply` hits a read-only dependency source and dies before the clear
+# ever executes. Dependency sources check out read-only on Windows (the reason the
+# gulong/gsize and gesture steps clear it too).
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_clears_read_only_before_apply_on_exactly_gtkbackend():
+    for job in ("windows-build", "windows-test"):
+        body = _win_input_bodies()[job]
+        apply_idx = body.find("git apply $patch")
+        assert apply_idx != -1, job + ": no forward `git apply $patch` in the step"
+        ro_positions = [m.start() for m in re.finditer(r"IsReadOnly", body)]
+        assert ro_positions, job + ": step never clears the Windows read-only flag"
+        assert all(p < apply_idx for p in ro_positions), (
+            job + ": a `Set-ItemProperty … -Name IsReadOnly -Value $false` clear runs "
+            "AFTER the forward `git apply` — the apply hits a read-only dependency "
+            "source and fails before the clear ever executes (spec CUESYNC-9 §4)"
+        )
+        cleared = set()
+        for _var, path in re.findall(r'\$(\w+)\s*=\s*"([^"]+)"', body):
+            if path.endswith(".swift"):
+                cleared.add(
+                    path.replace("\\", "/").replace(
+                        ".build/checkouts/swift-cross-ui/", ""
+                    )
+                )
+        assert cleared == {"Sources/GtkBackend/GtkBackend.swift"}, (
+            job + ": the windows-input read-only clear targets %r, but the patch "
+            "modifies ONLY GtkBackend.swift — clearing the wrong (or an extra) file "
+            "leaves the real target read-only, or needlessly clears a file this patch "
+            "does not touch (spec CUESYNC-9 §4: 'exactly the file(s) it patches')"
+            % sorted(cleared)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 60 (FAIL-LOUD) — a failed windows-input `git apply` must fail the job
+# LOUD, on every leg. ATTACK 32 pins this for the gesture step only. A swallowed
+# apply failure is the worst possible outcome: the build proceeds against a
+# checkout still missing the message-queue-drain fix and ships the dead-on-click UI
+# while CI stays green — precisely the "every gate green, nothing clickable"
+# failure this whole ticket exists to end. macOS relies on `set -euo pipefail` so
+# the bare forward `git apply "$PATCH"` aborts; the Windows legs check
+# `$LASTEXITCODE -ne 0` and `exit 1` explicitly.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_step_fails_loud_on_a_bad_apply_on_every_leg():
+    bodies = _win_input_bodies()
+    mac = bodies.get("macos")
+    assert mac is not None, "windows-input patch step missing on the macos leg"
+    assert re.search(r"set -euo?\s+pipefail|set -e\b", mac), (
+        "spec CUESYNC-9 §4: the macos windows-input patch step must set fail-fast "
+        "shell options (`set -euo pipefail`) so a failed `git apply` aborts the job "
+        "instead of building an un-patched checkout"
+    )
+    assert 'git apply "$PATCH"' in mac, (
+        'the macos step must contain a forward `git apply "$PATCH"` (not only the '
+        "`--reverse --check` guard) for set -e to fail loud on"
+    )
+    for job in ("windows-build", "windows-test"):
+        body = bodies[job]
+        assert "$LASTEXITCODE -ne 0" in body and "exit 1" in body, (
+            job + ": the windows-input patch step must fail loud on a `git apply` "
+            "error (`$LASTEXITCODE -ne 0` -> `exit 1`), never proceed against an "
+            "un-patched checkout (spec CUESYNC-9 §4)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 61 (correctness) — the GLib drain must be a LOOP that empties the context,
+# not a single pass. findings §Fix is explicit: drain "in a loop until nothing is
+# pending" so GDK gets first refusal on ALL queued input every tick. ATTACK 50
+# pins only that the drain is Windows-only and non-blocking (may_block=0); a future
+# edit collapsing `while g_main_context_iteration(nil, 0) != 0 {}` to a single
+# `g_main_context_iteration(nil, 0)` call would pass ATTACK 50 (still `#if
+# os(Windows)`, still may_block=0) yet drain at most ONE event per 50 ms tick,
+# leaving a backlog of mouse/keyboard events for Foundation's competing PeekMessage
+# to eat — the race the fix exists to end, back in slow motion.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_drain_loops_until_the_context_is_empty():
+    _win_input_or_skip()
+    added = _win_input_added_lines()
+    drain_lines = [c for c in added if "g_main_context_iteration" in c]
+    assert drain_lines, "the patch adds no `g_main_context_iteration` drain at all"
+    joined = "\n".join(added)
+    loop_re = re.compile(
+        r"while\s*\(?\s*g_main_context_iteration\s*\([^)]*\)\s*!=\s*0", re.S
+    )
+    assert loop_re.search(joined), (
+        "findings §Fix: the drain must repeat WHILE `g_main_context_iteration(nil, 0)` "
+        "keeps returning non-zero (i.e. drain the context until it is empty), not run "
+        "a single pass per tick. A one-shot drain leaves a per-tick backlog for "
+        "Foundation's PeekMessage to consume — the ownership race, merely slowed. "
+        "Added drain lines:\n    " + "\n    ".join(drain_lines)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 62 (NO-REGRESSION, behavioral) — after applying BOTH patches in the real
+# CI order (gesture first, windows-input second), the CUESYNC-8 `can-target` hunk
+# must SURVIVE alongside the CUESYNC-9 drain, in the fully-patched bytes. ATTACK 24
+# checks can-target on a gesture-ONLY tree; ATTACK 52 checks the drain on the
+# both-applied tree but never re-checks can-target there. So a future windows-input
+# patch that widened its hunk to overlap/clobber `createPathWidget` (or that a
+# rebase silently mangled) would leave the fully-patched tree missing
+# `canTarget = false` while passing every existing test — a silent CUESYNC-8
+# regression the spec forbids ("the can-target hunk intact", "CUESYNC-8 tests stay
+# green"). This asserts both fixes coexist in the exact bytes CI compiles.
+# ---------------------------------------------------------------------------
+
+
+def test_both_patches_applied_preserve_can_target_and_add_the_glib_drain():
+    _win_input_or_skip()
+    git, tree = _pristine_tree_or_skip()
+    assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, "gesture apply failed"
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input apply (second, real CI order) failed"
+    )
+
+    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
+        encoding="utf-8"
+    )
+    widget = (Path(tree) / "Sources/Gtk/Widgets/Widget.swift").read_text(
+        encoding="utf-8"
+    )
+
+    idx = backend.find("createPathWidget")
+    assert idx != -1, "createPathWidget vanished from the fully-patched GtkBackend.swift"
+    nxt = backend.find("public func ", idx + len("public func createPathWidget"))
+    factory_body = backend[idx:nxt] if nxt != -1 else backend[idx:]
+    assert "canTarget = false" in factory_body, (
+        "spec CUESYNC-9 no-regression: after BOTH patches apply, CUESYNC-8's "
+        "`canTarget = false` in createPathWidget must still be present — the "
+        "windows-input patch must not clobber the gesture hunk. It is missing from the "
+        "fully-patched bytes."
+    )
+    assert '"can-target"' in widget and "canTarget" in widget, (
+        "spec CUESYNC-9 no-regression: CUESYNC-8's `can-target` GObject-property "
+        "wrapper on the Gtk Widget base class must survive the full patch sequence."
+    )
+    assert "g_main_context_iteration" in backend, (
+        "spec CUESYNC-9: the windows-input GLib drain must be present in the "
+        "fully-patched bytes CI compiles — both fixes must coexist."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
