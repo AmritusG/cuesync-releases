@@ -75,7 +75,15 @@ let package = Package(
             path: "CueSync/CueSync",
             exclude: ["App", "Views", "Theme", "Utilities", "Resources", "Models", "Parsers", "Exporters", "Support"],
             sources: ["UI"],
-            swiftSettings: [.define("CUESYNC_CROSSUI")],
+            swiftSettings: [
+                .define("CUESYNC_CROSSUI"),
+                // Silences MSVC ucrt's __declspec(deprecated) on freopen (it wants
+                // freopen_s). We keep plain freopen in CueSyncApp.swift so the exact
+                // shipped call still type-checks on Darwin (freopen_s doesn't exist
+                // there) — this just disables the CRT header's deprecation warning
+                // for the Windows compile, per the compiler's own suggested fix.
+                .unsafeFlags(["-Xcc", "-D_CRT_SECURE_NO_WARNINGS"], .when(platforms: [.windows])),
+            ],
             // Links the exe for the Windows GUI subsystem so no console window opens
             // beside the app (spec CUESYNC-7 §A). /ENTRY:mainCRTStartup keeps Swift's
             // C-runtime entry point — without it, /SUBSYSTEM:WINDOWS makes link.exe
