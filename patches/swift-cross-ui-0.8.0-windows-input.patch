@@ -1,4 +1,4 @@
-# swift-cross-ui v0.8.0 GtkBackend Windows message-queue-ownership fix (CUESYNC-9)
+# swift-cross-ui v0.8.0 GtkBackend Windows main-loop starvation fix (CUESYNC-9)
 #
 # Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
 # Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
@@ -7,62 +7,121 @@
 # of the change. Kept SEPARATE from patches/swift-cross-ui-0.8.0-gtk-interactivity.patch
 # (CUESYNC-8) so each patch documents exactly one root cause; apply the interactivity
 # patch first, this one second (see the CI workflow / scripts/patch-swift-cross-ui.sh
-# ordering).
+# ordering). Both patches touch Sources/GtkBackend/GtkBackend.swift, but at disjoint
+# line ranges (the CUESYNC-8 Shape-widget factory vs. the run-loop tickler here), so
+# they apply cleanly in sequence.
 #
-# Root cause (spec CUESYNC-9 §2/§3, specs/CUESYNC-9-findings.md): the clean-PC GTE
-# reported the *whole* window inert (scrollbars, TextFields, everything) even after
-# CUESYNC-8's blanket can-target fix changed nothing observable — Fork W, a defect
-# below the widget tree. GtkBackend's `mainRunLoopTicklingLoop` (added upstream in
-# PR #141 to make `@MainActor`/`DispatchQueue.main` work under GtkBackend on non-Apple
-# platforms) ticks Foundation's `RunLoop.main` on Windows too. swift-corelibs-foundation
-# unconditionally binds `RunLoop.main` to this thread's Win32 message queue on Windows
+# Root cause (spec CUESYNC-9 §2/§3, specs/CUESYNC-9-findings.md §0/§2.5): Fork W — the
+# whole Windows window is inert (scrollbars, TextFields, close button) AND, per the
+# live click-probe evidence, renders essentially empty and size-collapsed. Both halves
+# are one defect: GtkBackend's `mainRunLoopTicklingLoop` (added upstream in PR #141 to
+# make `@MainActor`/`DispatchQueue.main` work under GtkBackend off-Apple) ticks
+# Foundation's `RunLoop.main` on Windows too. swift-corelibs-foundation unconditionally
+# binds `RunLoop.main` to this thread's Win32 message queue on Windows
 # (`_CFRunLoopSetWindowsMessageQueueMask(_, QS_ALLINPUT, ...)` in RunLoop.swift's
-# `_mainRunLoop` initializer, "similar to AppKit and UIKit") — the very same queue GDK's
-# own win32 backend drains for mouse/keyboard/close-button input via this same GLib main
-# loop. CoreFoundation's Windows run-loop wait (CFRunLoop.c) calls
-# `PeekMessage(NULL, ...)` + `DispatchMessage` for *any* window this thread owns on every
-# tick, making it a second, uncoordinated consumer of the one thread-global message
-# queue GDK relies on — an unspecified-ownership race between two independent message
-# pumps on the same thread, the textbook cause of "paints but no input."
+# `_mainRunLoop`, "similar to AppKit and UIKit") — the very same queue GDK's own win32
+# backend drains for input AND its frame-clock repaint/relayout via this GLib main loop.
+# CoreFoundation's Windows run-loop wait calls `PeekMessage(NULL, ...)` + `DispatchMessage`
+# on every tick, and the tickler busy-reschedules at 0 ms whenever `limitDate` returns a
+# past/now date (there is almost always a ready libdispatch item), so Foundation wakes
+# the GLib context continuously and monopolizes the one thread-global queue GDK needs to
+# BOTH paint and dispatch input — the empty, dead-input window the probe captured.
 #
-# Fix: keep ticking `RunLoop.main` on Windows (PR #141's fix must not regress — CueSync's
-# own `.task { state.loadPreferences() }` depends on it), but drain GLib's own default
-# `GMainContext` non-blockingly first, on every tick, `#if os(Windows)` only. This
-# guarantees GDK's own win32 backend gets deterministic first refusal on whatever input
-# is already queued before Foundation's competing `PeekMessage` drain ever runs, instead
-# of relying on incidental GSource registration-order luck. `g_main_context_iteration` is
-# GLib's own public C API — no new dependency, no dynamic load, no text-substitution
-# script (a real unified diff instead), no GtkFixed/absolute-positioning API added.
+# Fix (three coordinated hunks, all `#if os(Windows)`, all GLib's own public APIs — no
+# new dependency, no dynamic load, no text-substitution, no GtkFixed/absolute-position):
+#   1. Schedule the tickler's `g_timeout_add_full` at G_PRIORITY_DEFAULT_IDLE (200),
+#      BELOW GDK_PRIORITY_EVENTS (== G_PRIORITY_DEFAULT == 0) and GDK_PRIORITY_REDRAW
+#      (== G_PRIORITY_HIGH_IDLE + 20 == 120). GLib dispatches only sources at or above
+#      the highest-priority ready source each iteration, so whenever GDK has a pending
+#      input message or a queued repaint, the tickler is skipped that frame and GDK —
+#      not Foundation's competing PeekMessage/DispatchMessage — owns the win32 queue.
+#      This is the load-bearing fix: it structurally stops Foundation from ever
+#      preempting GDK's own queue drain, instead of racing it.
+#   2. Floor the reschedule delay at 8 ms (~120 Hz) so the tickler can never busy-loop
+#      at 0 ms and wake the GLib main context every iteration (100% CPU + starvation).
+#   3. Drain GLib's own default `GMainContext` non-blockingly first, every tick
+#      (`while g_main_context_iteration(nil, 0) != 0 {}`), so GDK processes whatever is
+#      already pending before Foundation's pass — belt-and-suspenders reinforcement of
+#      (1) within a single tick.
+# PR #141's `@MainActor`/`DispatchQueue.main` servicing is preserved (the tickler still
+# runs, just below GDK and off the 0 ms busy path) — CueSync's own
+# `.task { state.loadPreferences() }` depends on it. Linux/macOS behaviour is
+# byte-identical to upstream (the `#else` branches keep G_PRIORITY_DEFAULT and the
+# 0 ms floor; macOS never runs the tickler at all).
 #
-# Idempotency: `.github/workflows/swift-windows.yml` guards re-application with
-# `git apply --reverse --check` before applying, so a second run against an
-# already-patched checkout is a no-op rather than a failure.
+# Idempotency: `.github/workflows/swift-windows.yml` and scripts/patch-swift-cross-ui.sh
+# guard re-application with `git apply --reverse --check` before applying, so a second
+# run against an already-patched checkout is a no-op rather than a failure.
 diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
-index 01e2eab5..2593eae9 100644
+index d83bbefb..082f0491 100644
 --- a/Sources/GtkBackend/GtkBackend.swift
 +++ b/Sources/GtkBackend/GtkBackend.swift
-@@ -156,6 +156,24 @@ public final class GtkBackend:
+@@ -156,13 +156,41 @@ public final class GtkBackend:
  
      private static func mainRunLoopTicklingLoop(nextDelayMilliseconds: Int? = nil) {
          Self.runInMainThread(afterMilliseconds: nextDelayMilliseconds ?? 50) {
 +            #if os(Windows)
-+                // `RunLoop.main` is unconditionally bound to this thread's Win32
-+                // message queue on Windows (swift-corelibs-foundation's
-+                // `RunLoop._mainRunLoop` calls
-+                // `_CFRunLoopSetWindowsMessageQueueMask(_, QS_ALLINPUT, ...)`,
-+                // "similar to AppKit and UIKit") — the very same queue GDK's own
-+                // win32 backend drains for mouse/keyboard/close-button input via
-+                // this same GLib main loop. `limitDate` below is a second,
-+                // independent consumer of that one queue (CoreFoundation's
-+                // Windows run loop implementation calls `PeekMessage(NULL, ...)`
-+                // + `DispatchMessage` for *any* window owned by this thread), so
-+                // whichever of the two wins the next message is unspecified.
-+                // Draining GLib's own context first, every tick, guarantees GDK
-+                // always gets first refusal on whatever is already pending
-+                // before Foundation gets a turn.
++                // swift-corelibs-foundation unconditionally binds `RunLoop.main` to
++                // this thread's Win32 message queue on Windows
++                // (`_CFRunLoopSetWindowsMessageQueueMask(_, QS_ALLINPUT, ...)` in
++                // `RunLoop._mainRunLoop`, "similar to AppKit and UIKit") — the very
++                // same queue GDK's own win32 backend drains for mouse/keyboard/
++                // close-button input via this GLib main loop. The `limitDate` pass
++                // below is a second, independent consumer of that one queue
++                // (CoreFoundation's Windows run-loop wait calls `PeekMessage(NULL, ...)`
++                // + `DispatchMessage`). Drain GLib's own default context first, every
++                // tick, so GDK processes whatever is already pending before Foundation's
++                // competing drain gets a turn.
 +                while g_main_context_iteration(nil, 0) != 0 {}
 +            #endif
 +
              // This performs one pass through the run loop
              let nextDate = RunLoop.main.limitDate(forMode: .default)
  
+             // This isn't expected to be nil, but if it is we can just loop
+             // again quickly with the default delay.
+             let nextDelay = nextDate.map {
+-                return max(min(Int($0.timeIntervalSinceNow * 1000), 50), 0)
++                #if os(Windows)
++                    // Never reschedule at 0 ms on Windows. When `limitDate` returns a
++                    // past/now date (there is almost always a ready libdispatch item),
++                    // the unclamped `max(_, 0)` formula yields 0, turning the tickler
++                    // into a busy-loop that wakes the GLib main context every iteration
++                    // and starves GDK's win32 event + frame-clock sources of the thread
++                    // — the empty, size-collapsed window with dead input the click-probe
++                    // captured. Floor at one ~120 Hz frame so Foundation stays serviced
++                    // (upstream PR #141) without monopolizing the loop GDK needs to both
++                    // paint and dispatch input.
++                    return max(min(Int($0.timeIntervalSinceNow * 1000), 50), 8)
++                #else
++                    return max(min(Int($0.timeIntervalSinceNow * 1000), 50), 0)
++                #endif
+             }
+             mainRunLoopTicklingLoop(nextDelayMilliseconds: nextDelay)
+         }
+@@ -497,8 +525,24 @@ public final class GtkBackend:
+         action: @escaping @MainActor () -> Void
+     ) {
+         let action = ThreadActionContext(action: action)
++        // The run-loop tickler is the sole caller of this private overload. On
++        // Windows, schedule it BELOW GDK's own GLib sources — GDK_PRIORITY_EVENTS
++        // (== G_PRIORITY_DEFAULT == 0, mouse/keyboard/close messages) and
++        // GDK_PRIORITY_REDRAW (== G_PRIORITY_HIGH_IDLE + 20 == 120, frame-clock
++        // repaint/relayout). GLib dispatches only sources at or above the
++        // highest-priority ready source each iteration, so whenever GDK has a
++        // pending input message or a queued repaint, the tickler is skipped that
++        // frame and GDK — not Foundation's competing `PeekMessage`/`DispatchMessage`
++        // drain — owns the win32 queue. That is what lets input reach widgets and
++        // the window keep repainting. Elsewhere (Linux) keep the upstream
++        // G_PRIORITY_DEFAULT so behaviour is byte-identical.
++        #if os(Windows)
++            let ticklerPriority: CInt = 200  // G_PRIORITY_DEFAULT_IDLE
++        #else
++            let ticklerPriority: CInt = 0  // G_PRIORITY_DEFAULT (upstream)
++        #endif
+         g_timeout_add_full(
+-            0,
++            ticklerPriority,
+             guint(max(delay, 0)),
+             { context in
+                 guard let context else {

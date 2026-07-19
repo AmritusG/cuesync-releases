@@ -94,9 +94,29 @@ mouse/keyboard/close-button input via this same GLib main loop — two independe
 consumers racing for ownership of one thread-global queue. Neither the app's `.onTapGesture`
 wiring nor any `can-target` flag was involved; the defect was one layer below both.
 
+The live click-probe then made the signature sharper than "no input": before/after screenshots
+were byte-identical (center click changed 0 pixels) AND the window rendered essentially empty —
+only a scroll-bar, no header/buttons/accents, undersized below the requested 1200×800. Empty
+render *and* dead input together are one defect, not two: GDK was starved of the single thread
+message queue that drives both its win32 event delivery and its frame-clock repaint.
+
 The fix (`patches/swift-cross-ui-0.8.0-windows-input.patch`) keeps ticking `RunLoop.main` (PR
-#141's fix must not regress) but drains GLib's own default `GMainContext` non-blockingly first,
-`#if os(Windows)` only, every tick — giving GDK deterministic first refusal on whatever input is
-already queued before Foundation's competing drain ever runs. Kept as a separate patch file from
-CUESYNC-8's `can-target` fix, since the two are unrelated root causes at different layers
-(widget-picking vs. main-loop/event-source integration) that happen to share the same dependency.
+#141's fix must not regress) but makes GDK win the queue *structurally* rather than by luck, all
+`#if os(Windows)`: it schedules the tickler's `g_timeout_add_full` at `G_PRIORITY_DEFAULT_IDLE`
+(200) — below `GDK_PRIORITY_EVENTS` (0) and `GDK_PRIORITY_REDRAW` (120), so GLib skips the tickler
+in any main-loop iteration where GDK has a pending input message or a queued repaint — floors the
+reschedule at 8 ms so it can never busy-loop at 0 ms and wake the context every iteration, and
+still drains GLib's default `GMainContext` first each tick. (Round 1 shipped only that last drain
+and did not move the probe: a one-shot drain can't overcome a *same-priority* tickler that re-arms
+at 0 ms — the generalizable trap is that on Windows `RunLoop.main` is bound to the Win32 message
+queue, so anything pumping it competes with GDK for the same queue; lower it below GDK's sources,
+don't just race it.) Kept as a separate patch file from CUESYNC-8's `can-target` fix, since the two
+are unrelated root causes at different layers (widget-picking vs. main-loop/event-source
+integration) that happen to share the same dependency.
+
+**Generalized addition to the rule above:** when a GTK window on Windows both paints nothing and
+ignores input, suspect the *main loop*, not the renderer or the widgets — specifically any second
+consumer of the thread's Win32 message queue (Foundation's `RunLoop.main` is one, bound via
+`_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`). GLib source **priority** is the lever: GDK's
+event (0) and redraw (120) sources must out-prioritize whatever else pumps the queue, or GDK
+starves of both input and repaint at once.

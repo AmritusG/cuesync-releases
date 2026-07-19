@@ -1,5 +1,88 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.1 — ROUND 2 (2026-07-19, this session): the fix the drain should have been
+
+> This is the second CUESYNC-9 fix round. Round 1 (the GLib-drain `windows-input.patch`)
+> named the right suspect — **suspect (1)**, the run-loop tickler contending with GDK for the
+> one Win32 message queue — but shipped a mechanism too weak to move the probe. This section
+> records the current probe evidence, sharpens the mechanism, and REPLACES the round-1 fix
+> (per spec step 5: revert non-movers, do not stack). It does not re-open the fork; suspect (1)
+> stands, now with a stronger, GLib-priority-based fix.
+
+**Current probe evidence (this round).** `.factory/probe/before.png` and `after.png` are again
+**byte-identical** (`md5 = e165fe8e6e532e41d92d1dcbcf602c3d` for both) — the synthesized
+close-button click did **not** kill the process and the window-center click changed **zero**
+pixels. The image itself matches §0's earlier scan exactly: the CueSync window is a near-black
+content area with **only a scroll-bar** drawn (up/down arrows + a thumb near the top), **no**
+header, buttons, sections, labels, or accent colours, and it is **undersized** — the Windows
+desktop and its icons are visible below/right of it, where the window failed to fill the
+requested 1200×800. This is **Fork W** (window-level input dead) confirmed by a machine, with a
+**rendering+layout-collapse** signature, exactly as §0 first established. Round 1's fix was in
+the checkout when this was captured, so the GLib-drain alone is a confirmed **non-mover**.
+
+**Why the close-button click NOT killing the process points at starvation, not a bare renderer
+failure.** If the *only* defect were the GSK GL renderer failing on a headless/RDP build box
+(so the UI is merely unpainted), GDK would still be draining the win32 queue and a click on the
+CSD close button's location would still terminate the app even with the button invisible. It
+does not. Input is dead *together with* the render — the signature of GDK being **starved of the
+one thread message queue entirely**, which drives BOTH its win32 event delivery AND its
+frame-clock repaint/relayout. One cause, both symptoms.
+
+**The sharpened mechanism (why round 1 was too weak, in GLib terms).** The tickler is scheduled
+via `g_timeout_add_full` at **`G_PRIORITY_DEFAULT` (0)** — the *same* priority as GDK's own win32
+event source (`GDK_PRIORITY_EVENTS == G_PRIORITY_DEFAULT == 0`) and *above* nothing. Worse, it
+busy-reschedules at **0 ms** whenever `RunLoop.main.limitDate` returns a past/now date (there is
+almost always a ready libdispatch item), so it wakes the GLib main context on *every* iteration.
+Each wake runs a CoreFoundation Windows run-loop pass that `PeekMessage(NULL, …, PM_REMOVE)` +
+`DispatchMessage`es the queue — stealing messages GDK's equal-priority source would otherwise
+translate into `GdkEvent`s, and denying GDK's redraw source (`GDK_PRIORITY_REDRAW == 120`) the
+turns it needs to paint. Round 1's one-shot `g_main_context_iteration` drain gave GDK a head
+start *within* a single tick, but could not overcome a same-priority competitor that then runs
+`limitDate` and immediately re-arms at 0 ms — a one-shot drain against a continuous racer.
+
+**Round-2 fix (`patches/swift-cross-ui-0.8.0-windows-input.patch`, rewritten — same file, same
+one target `Sources/GtkBackend/GtkBackend.swift`, still `#if os(Windows)` only, still GLib's own
+APIs).** Three coordinated hunks that make GDK structurally win the queue instead of racing for
+it:
+1. **Priority.** Schedule the tickler at `G_PRIORITY_DEFAULT_IDLE` (200) — *below* both
+   `GDK_PRIORITY_EVENTS` (0) and `GDK_PRIORITY_REDRAW` (120). GLib's dispatcher only runs sources
+   at or above the highest-priority *ready* source in each iteration (`g_main_context_prepare`
+   returns that max priority; `dispatch` skips everything lower), so in **any** iteration where
+   GDK has a pending input message or a queued repaint, the tickler is **skipped** and GDK — not
+   Foundation's `PeekMessage`/`DispatchMessage` — owns the queue that frame. This is the
+   load-bearing change and the direct implementation of §0's Option (A) ("stop `RunLoop.main`
+   from consuming the Win32 input queue GDK owns").
+2. **Floor.** Clamp the reschedule to ≥ 8 ms so the tickler can never busy-loop at 0 ms and wake
+   the context every iteration (removes both the 100% CPU and the wake-storm amplifier §0 named).
+3. **Drain (retained).** Keep the round-1 `while g_main_context_iteration(nil, 0) != 0 {}`
+   before the `limitDate` pass — now redundant belt-and-suspenders, harmless, and it keeps the
+   patch's GLib-own-API contract explicit. `@MainActor`/`DispatchQueue.main` servicing (upstream
+   PR #141, which CueSync's `.task { state.loadPreferences() }` depends on) is preserved: the
+   tickler still runs, just below GDK and off the 0 ms path. Linux/macOS are byte-identical to
+   upstream (the `#else` branches; macOS never runs the tickler at all).
+
+**Verification available from this environment (macOS): compile + logic only.** The patched
+`GtkBackend.swift` was built on macOS with the Windows-guarded hunks temporarily un-guarded to
+prove they compile (`g_main_context_iteration`, the `CInt` priority, the floor all compile), then
+built again with both checked-in patches applied (whole `CueSync` executable links, exit 0). The
+priority semantics above are GLib ABI, stable across GTK4. What this box **cannot** produce is the
+live Windows behaviour — that is the click-probe gate's and the GTE's job.
+
+**If round 2 still does not move the probe — the ONE datum to capture next, and why it was not
+forced this round.** The remaining discriminator between (A) starvation (this fix's target) and
+(B) a gvsbuild GTK-runtime config defect (GSK GL renderer failing on the headless box → force
+`GSK_RENDERER=cairo`; or Pango/fontconfig finding no fonts) is still `CueSync.exe`'s **stderr**
+on the box, which no round has captured because the app ships `/SUBSYSTEM:WINDOWS` (no console)
+and the external probe harness does not redirect it. The clean next step is an **app-shell**
+change (spec step-4 contingency, not a source patch): at process start on Windows, `freopen` the
+CRT `stderr`/`stdout` to a log file next to the probe evidence so GTK/GLib/Pango/GSK diagnostics
+are retained, and — if that log shows GSK/GL errors — set `GSK_RENDERER=cairo`. It was **not**
+bundled into this round deliberately: it is Windows-only C interop this macOS box cannot
+compile-check, and a mis-typed `import`/module name would fail the Windows CI *compile* (a
+regression worse than the current red), whereas this round's fix is fully compile-verified. Per
+spec step 5 (one suspect per round) the priority fix is round 2's single suspect; the
+stderr-capture + `GSK_RENDERER` is the pre-scoped, de-risked round 3 **iff** this misses.
+
 ## §0 — CORRECTED DIAGNOSIS (2026-07-19, from the FIRST live probe evidence + a local macOS reproduction)
 
 > This section supersedes the framing of §1–§3 below. §1–§3 remain as the record of the
@@ -309,14 +392,26 @@ on-box evidence rather than stacked speculatively.
 
 ## Fix
 
-`Sources/GtkBackend/GtkBackend.swift`'s `mainRunLoopTicklingLoop` keeps ticking `RunLoop.main` on
-Windows (PR #141's `@MainActor`/`DispatchQueue.main` fix must not regress), but first drains GLib's
-own default `GMainContext` non-blockingly (`g_main_context_iteration(nil, 0)` in a loop until
-nothing is pending) on every tick, `#if os(Windows)` only. This guarantees GDK's own win32 backend
-gets deterministic first refusal on whatever is already queued before Foundation's competing
-`PeekMessage` drain ever runs, on every single tick, rather than relying on incidental GSource
-registration-order luck. No new dependency, no `sed`/text-substitution, no `GtkFixed`/absolute
-positioning — `g_main_context_iteration` is GLib's own public C API, already reachable from this
-file via the existing `CGtk`/`Gtk` imports (the file already calls `g_application_run`,
-`g_idle_add_full`, `g_timeout_add_full`, `g_object_unref` directly). See
-`patches/swift-cross-ui-0.8.0-windows-input.patch` for the full diff and rationale comment.
+> Superseded by **§0.1** (round 2). The round-1 description below is retained as the record of
+> why the drain alone was the right suspect but insufficient; the shipped
+> `patches/swift-cross-ui-0.8.0-windows-input.patch` now implements §0.1's priority + floor +
+> drain, not the drain alone.
+
+**Round 2 (shipped):** `Sources/GtkBackend/GtkBackend.swift`'s `mainRunLoopTicklingLoop` /
+`runInMainThread(afterMilliseconds:)` keep ticking `RunLoop.main` on Windows (PR #141's
+`@MainActor`/`DispatchQueue.main` fix must not regress), but (1) the tickler's `g_timeout_add_full`
+is scheduled at `G_PRIORITY_DEFAULT_IDLE` (200), below `GDK_PRIORITY_EVENTS` (0) and
+`GDK_PRIORITY_REDRAW` (120), so GLib skips it in any iteration where GDK has pending input or a
+queued repaint — GDK, not Foundation's `PeekMessage`/`DispatchMessage`, owns the win32 queue that
+frame; (2) the reschedule is floored at 8 ms so the tickler can never busy-loop at 0 ms; and
+(3) it still drains GLib's default `GMainContext` (`g_main_context_iteration(nil, 0)` until empty)
+before the `limitDate` pass. All `#if os(Windows)`; Linux/macOS byte-identical to upstream. No new
+dependency, no `sed`/text-substitution, no `GtkFixed`/absolute positioning — every symbol used
+(`g_timeout_add_full`, `g_main_context_iteration`) is GLib's own public C API already reachable from
+this file. See `patches/swift-cross-ui-0.8.0-windows-input.patch` for the full diff and rationale.
+
+**Round 1 (superseded):** `mainRunLoopTicklingLoop` kept ticking `RunLoop.main` on Windows but only
+drained GLib's own default `GMainContext` non-blockingly (`g_main_context_iteration(nil, 0)` in a
+loop until nothing is pending) on every tick, `#if os(Windows)` only — giving GDK first refusal
+*within* a tick but not overcoming a same-priority tickler that then runs `limitDate` and re-arms at
+0 ms. Confirmed a non-mover against the live probe (§0.1); replaced, not stacked.
