@@ -3133,7 +3133,9 @@ def test_both_patches_applied_preserve_can_target_and_add_the_glib_drain():
     )
 
     idx = backend.find("createPathWidget")
-    assert idx != -1, "createPathWidget vanished from the fully-patched GtkBackend.swift"
+    assert idx != -1, (
+        "createPathWidget vanished from the fully-patched GtkBackend.swift"
+    )
     nxt = backend.find("public func ", idx + len("public func createPathWidget"))
     factory_body = backend[idx:nxt] if nxt != -1 else backend[idx:]
     assert "canTarget = false" in factory_body, (
