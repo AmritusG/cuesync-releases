@@ -700,12 +700,25 @@ jobs:
       # gvsbuild placed in the extracted tree's bin/ rather than hand-curating
       # the list — the §D.18 closure check below is what tells us what's
       # actually required.
+      # CI-observed (this branch, run 29705225341): this step failed with
+      # "Copy-Item: ... The directory name is invalid. :
+      # 'D:\...\.build\release\'." — `.build\release` is an NTFS junction to
+      # `.build\<triple>\release` (same one the "Verify DLL closure" and
+      # "Bundle Swift runtime DLLs" steps below resolve via ResolveLinkTarget
+      # before touching), and pointing `Copy-Item -Destination` straight at
+      # the junction while piping multiple source files into it intermittently
+      # trips this OS-level error. Resolving to the real underlying directory
+      # first and copying there avoids the junction path entirely, same as
+      # every other step in this job that touches `.build\release`.
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
+          $artifactItem = Get-Item ".build\release"
+          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
           Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File |
             Where-Object { $_.Extension -eq '.dll' } |
-            Copy-Item -Destination .build\release\ -Force
+            Copy-Item -Destination $artifactDir -Force
 
       # spec §0.6/§D.18 — the dependency-checking tool: marcoesposito1988/
       # dependency_runner's `wldd` ("ldd for Windows"), corrected from the
