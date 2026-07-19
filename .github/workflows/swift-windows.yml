@@ -710,11 +710,37 @@ jobs:
       # trips this OS-level error. Resolving to the real underlying directory
       # first and copying there avoids the junction path entirely, same as
       # every other step in this job that touches `.build\release`.
+      #
+      # CI-observed (this branch, run 29705861291): with the resolve added,
+      # this step now fails one line earlier — "Exception calling
+      # 'ResolveLinkTarget' with '1' argument(s): "Access to the path
+      # 'D:\...\.build\release' is denied."" — and the identical call in
+      # "Resolve real build output directory" below throws the same exception
+      # in the same run, which is what starves "Upload build artifact" of its
+      # `path` input further down. `.build\release` was just written by
+      # "Build (release)" immediately before this step runs; on windows-latest
+      # runners a just-linked .exe is transiently held open by Defender/AV
+      # scanning, and `CreateFile` with `FILE_FLAG_OPEN_REPARSE_POINT` (what
+      # `ResolveLinkTarget` uses internally) surfaces that as access-denied
+      # rather than a sharing-violation retry the way plain file I/O would.
+      # Retrying the resolve a few times with a short pause rides out that
+      # window; if every attempt still throws, falling back to the
+      # unresolved (junction) path — same as the existing "not a reparse
+      # point" branch — lets the step degrade instead of hard-failing,
+      # since junctions are transparent to normal file I/O like Copy-Item.
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
           $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $resolvedTarget = $null
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+              break
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
           $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
           Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File |
             Where-Object { $_.Extension -eq '.dll' } |
@@ -843,8 +869,21 @@ jobs:
           # junction's final target first (falling back to the plain
           # resolved path when `.build\release` isn't a reparse point at all)
           # makes `$artifactDir` match the same canonical path wldd reports.
+          #
+          # Same retry-then-fall-back-to-unresolved-path treatment as the
+          # "Bundle GTK 4 runtime DLLs" step above — see its comment (CI run
+          # 29705861291) for why ResolveLinkTarget can transiently throw
+          # "Access ... is denied" on a just-built `.build\release`.
           $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $resolvedTarget = $null
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+              break
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
           $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
 
           # See the "Verify DLL closure" step comment above: only trust this
@@ -1008,9 +1047,19 @@ jobs:
 
           # `.build\release` is a junction to `.build\<triple>\release` on Windows;
           # resolve it to the same canonical path wldd reports (see the closure
-          # check's identical ResolveLinkTarget rationale).
+          # check's identical ResolveLinkTarget rationale, and the "Bundle GTK 4
+          # runtime DLLs" step's comment — CI run 29705861291 — for why the
+          # resolve is retried rather than called once).
           $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+          $resolvedTarget = $null
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+              break
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
           $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
 
           $copied = 0
@@ -1129,6 +1178,17 @@ jobs:
       # always()` so the resolution still runs (and degrades gracefully) even
       # when an earlier step in the job failed and `.build\release` was never
       # created.
+      # CI-observed (this branch, run 29705861291): this step (which runs
+      # `if: always()`, including right after "Bundle GTK 4 runtime DLLs"
+      # failed) itself threw the same "Exception calling 'ResolveLinkTarget'
+      # ... Access ... is denied" error described in that step's comment
+      # above, so `dir` was never written to $env:GITHUB_OUTPUT — which is
+      # exactly why "Upload build artifact" below then failed with "Input
+      # required and not supplied: path" (its `path:` reads that now-missing
+      # output). Same retry-then-fall-back-to-unresolved-path fix as the
+      # other two ResolveLinkTarget call sites in this job: this step's own
+      # `if: always()` contract — always producing SOME `dir` value even when
+      # earlier steps failed — must hold even when the resolve itself throws.
       - name: Resolve real build output directory (Windows junction workaround)
         id: resolve-artifact-dir
         if: always()
@@ -1136,7 +1196,15 @@ jobs:
         run: |
           if (Test-Path ".build\release") {
             $artifactItem = Get-Item ".build\release"
-            $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+            $resolvedTarget = $null
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              try {
+                $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+                break
+              } catch {
+                Start-Sleep -Seconds 2
+              }
+            }
             $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
           } else {
             $artifactDir = ".build\release"
