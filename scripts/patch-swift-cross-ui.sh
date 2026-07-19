@@ -38,6 +38,23 @@ fi
 
 cd "$CHECKOUT"
 
+# Start from PRISTINE v0.8.0 every run: evolving patch files (CUESYNC-9 went
+# through 7 revisions) must never land on a checkout still carrying an older
+# revision — rounds 1-5 of CUESYNC-9 were judged against a stale checkout for
+# exactly this reason. Reset, then reapply everything deterministically.
+echo "==> Resetting swift-cross-ui checkout to pristine before re-patching"
+chmod -R u+w Sources || true
+git checkout -- Sources
+
+# LLP64 gulong/gsize fixes (mirrors the PowerShell -replace step in
+# .github/workflows/swift-windows.yml — needed again after every reset;
+# idempotent because each pattern vanishes once replaced; perl for BSD/GNU
+# portability, \Q..\E for literal matching).
+perl -pi -e 's/\Qg_signal_handler_disconnect(gobjectPointer, id)\E/g_signal_handler_disconnect(gobjectPointer, .init(id))/' Sources/Gtk/GObject.swift
+perl -pi -e 's/\Qg_signal_handler_block(gobjectPointer, signalID)\E/g_signal_handler_block(gobjectPointer, .init(signalID))/' Sources/Gtk/GObject.swift
+perl -pi -e 's/\Qg_signal_handler_unblock(gobjectPointer, signalID)\E/g_signal_handler_unblock(gobjectPointer, .init(signalID))/' Sources/Gtk/GObject.swift
+perl -pi -e 's/\Qg_bytes_new(rgbaData, UInt(rgbaData.count))\E/g_bytes_new(rgbaData, .init(rgbaData.count))/' Sources/Gtk/MemoryTexture.swift
+
 # Dependency sources can check out read-only (observed on Windows; harmless
 # elsewhere) — clear it before attempting to patch, same rationale as the
 # existing gulong/gsize -replace step in swift-windows.yml.
