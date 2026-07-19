@@ -1,5 +1,102 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0 — CORRECTED DIAGNOSIS (2026-07-19, from the FIRST live probe evidence + a local macOS reproduction)
+
+> This section supersedes the framing of §1–§3 below. §1–§3 remain as the record of the
+> input-**dispatch** audit, but that audit targeted a **secondary** symptom. The first real
+> `.factory/probe/` evidence + a local macOS run of the same GtkBackend target prove the
+> **primary** failure is that the Windows window renders **empty**, not merely inert.
+
+**What the live probe actually shows (hard pixel facts, not theory).**
+`.factory/probe/before.png` and `after.png` (captured 2026-07-19T13:23, 1228×854) are
+**byte-identical** (`md5 = d3a753ec27608c1e53502aaabf610bb8` for both; `cmp` = identical).
+The synthesized close-button click did **not** kill the process and the center click changed
+**zero** pixels → **Fork W confirmed by a machine** (the classification in §1 was previously
+drawn only from the GTE's verbal report; now it is machine-confirmed).
+
+But the decisive new fact is *what* is on screen: a full-image scan of `before.png` finds the
+window content is a **uniform flat `RGB(12,12,12)` fill** plus only ~790 white pixels (the
+scroll-bar). **Zero** colored or text pixels anywhere — none of CueSync's accent colors
+(`#1ed760` green, `#ef288a` pink, gold, teal), no "CUE SYNC" header, no buttons, no labels, no
+section borders. The window is also only ~955×484, **below** the requested `1200×800`. So the
+Windows window is **rendering essentially nothing** and its layout has **collapsed** — this is
+**not** "the whole UI draws correctly but input is dead" (the premise §1 inherited from the GTE
+and from every CUESYNC-7/8 round). "Program opens, nothing can be clicked" was literally true:
+there is almost nothing drawn to click.
+
+**Local macOS reproduction rules out the app view-tree as the cause.** The `CueSync` executable
+target (`.define("CUESYNC_CROSSUI")`, pinned to `GtkBackend`) was built and **run on macOS**
+against Homebrew GTK 4.22.4 with the **pristine** (unpatched) checkout. It renders the **full,
+correct UI** at the requested `1200×832`: the `◈ CUE SYNC` header, every PROJECT control
+(Create Envelope, Resolume/Rekordbox/Serato/Engine DJ/ShowKontrol, Reset/Side-By-Side,
+Dark/Light, True/False), both empty-state sections, the footer, and all accent colors. (Screenshot
+retained during the session.) **Therefore the CueSync view tree, its swift-cross-ui layout, and
+GtkBackend's rendering are all correct** — an app-layout or hit-testing bug would fail on macOS
+too. The defect is **Windows-runtime-specific**, at exactly the layer §1 suspected (below the
+widget tree) but with a **rendering+layout** signature, not merely input.
+
+**Experiment — the tickler mechanism is not inherently destructive.** Forcing
+`mainRunLoopTicklingLoop()` to run on macOS as well (removing the `#if !os(macOS)` guard at
+`GtkBackend.swift:151`, rebuild+run) left the macOS render **fully intact**. So the tickler's
+*logic* does not break rendering; the destructive factor is **win32-specific** — `RunLoop.main`
+is unconditionally bound to the thread's Win32 message queue (`QS_ALLINPUT`, see §2.5), which it
+is **not** on macOS.
+
+**Upstream has no fix to backport.** `moreSwift/swift-cross-ui` `v0.8.0` (`a6d2063`) is the
+**latest tag**; `main` has only 17 commits since, and **none** touch Windows input, the main
+loop, the message pump, or `GtkBackend`'s run path (the two GtkBackend commits are Gtk3 sheet
+support + an SPI rename). A re-pin/backport is therefore **not** available.
+
+**Corrected root cause (suspect (1), CONFIRMED and SEVERE — total starvation, not occasional theft).**
+On Windows, `g_application_run`'s GLib loop and the `mainRunLoopTicklingLoop`'s `RunLoop.main`
+pass are two consumers of the **one** thread-global Win32 message queue. GDK's win32 backend
+drives **both** input **and** its frame-clock / relayout / redraw from that queue. The empty,
+size-collapsed window + dead close button together are the signature of GDK being **starved of
+the queue entirely** — after the initial partial paint it processes neither input **nor** any
+further layout/redraw. The starvation amplifier is concrete: `mainRunLoopTicklingLoop`
+reschedules with `nextDelay = max(min(Int(timeIntervalSinceNow*1000), 50), 0)`
+(`GtkBackend.swift:164-166`) → whenever `limitDate` returns a nil/past date (there is always a
+ready libdispatch item or timer), `nextDelay == 0` → `g_timeout_add_full(0, 0, …)`
+(`GtkBackend.swift:500`) → the RunLoop pump runs **continuously** at `G_PRIORITY_DEFAULT`,
+monopolizing the queue GDK needs.
+
+**Why the shipped `windows-input.patch` (GLib-drain) does not and cannot fix this.** (a) It only
+reorders *input* drainage — it does nothing for the empty-render half of the failure, which is
+the primary symptom. (b) Even for input, draining GDK's context **once** before each tick cannot
+overcome a RunLoop pump that then runs and busy-reschedules at 0 ms; the drain is a one-shot head
+start against a continuous competitor. This is consistent with the byte-identical probe (a
+non-mover, if the probe built the patched binary) **and** with the deeper truth that an
+input-only patch was aimed at the wrong symptom.
+
+**The remaining fork the box (not this macOS environment) must close before step-5 patching.**
+Two Windows-runtime causes both fit "empty + collapsed + dead," and they need **different** fixes:
+- **(A) main-loop starvation** (above) → fix in `mainRunLoopTicklingLoop`: stop the 0 ms
+  busy-reschedule (enforce a frame-paced floor) and/or stop `RunLoop.main` from consuming the
+  Win32 input queue GDK owns — a `patches/swift-cross-ui-0.8.0-windows-input.patch` rewrite for
+  the **same** suspect (1), replacing the drain, not stacked on it.
+- **(B) a gvsbuild GTK-runtime config defect** — e.g. Pango/fontconfig finding no fonts (every
+  text widget measures to 0 → whole tree collapses → empty, sub-min window) or the GSK GL
+  renderer failing on the headless/RDP build box (nothing composites). This is the spec step-4
+  **contingency** (an app-shell/launch fix: bundle fonts + set `FONTCONFIG_FILE`/`FONTCONFIG_PATH`,
+  or force `GSK_RENDERER=cairo`), **not** a swift-cross-ui source patch.
+
+**Decisive next datum (cheap, on-box, currently missing).** The probe must capture
+`CueSync.exe`'s **stderr/stdout** to a file when it launches it, and retain it next to
+`.factory/probe/*.png`. GTK/GLib/Pango/GSK print their diagnostics there and will immediately
+separate (A) from (B): font/fontconfig or `Pango-WARNING` lines ⇒ (B-fonts); `GSK`/GL/renderer
+errors ⇒ (B-renderer); a clean log ⇒ (A-starvation). Two 2-minute on-box launch experiments pin
+it outright: `set GSK_RENDERER=cairo & CueSync.exe` (if it now renders → renderer) and inspecting
+whether any bundled `fonts/` + `fonts.conf` reach the exe (if absent → fonts). **This macOS
+environment cannot produce that datum** (no win32 message queue, native Homebrew fonts/renderer),
+which is exactly why every prior round — reasoning from source alone — mis-scoped the failure as
+input-dispatch. Do **not** author the next patch until this log is read.
+
+---
+
+*(Original §1–§3 below — the input-dispatch audit, retained as record; note its "renders the
+whole UI correctly" premise is falsified by §0.)*
+
+
 Recorded per spec step 1/3 ("Do not change anything until this classification is written
 down"). Verified by running `swift package resolve` against this repo's pinned `Package.swift`
 (`exact: "0.8.0"`), applying the existing CUESYNC-8 interactivity patch first (so the audit
