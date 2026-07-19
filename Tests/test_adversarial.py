@@ -4385,6 +4385,574 @@ def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
         )
 
 
+# =============================================================================
+# Red-Team adversarial suite — CUESYNC-9 §4 UNCOVERED untrusted-value surfaces
+#
+# Everything above pins the exporters (ShowKontrol/Resolume), the two XML importers'
+# XXE/entity behaviour, `slugify`, `generateToken`, and the workflow/patch structure.
+# Three §4 trust boundaries had ZERO adversarial coverage before this block:
+#
+#   (A) `AudioDuration` — a hand-rolled WAV/AIFF (RIFF/FORM) binary HEADER parser that
+#       runs on every "Load Audio" of an untrusted file. It computes a duration from
+#       attacker-controlled chunk sizes, a 32-bit byte/sample-rate, and an 80-bit IEEE
+#       extended sample rate — every one of which can drive an `Int(...)`/division to a
+#       trap, a non-finite value, a negative value, or an unbounded scan. §5 lists it as
+#       the port's cross-platform duration path; §4 says untrusted-file values matter more
+#       now the whole Windows UI is live. These lock its finite/non-negative/terminating
+#       guarantees so a future refactor that drops `finiteOrNil`, the `rate > 0` guard, or
+#       the chunk-advance invariant turns red.
+#
+#   (B) Resolume PARSE -> convertToCuePoints -> Resolume EXPORT — the round trip a user
+#       drives by importing a Resolume envelope and re-exporting it. The single-function
+#       tests pin the exporter (ATTACK 63-65) and the parser (ATTACK 66) separately; this
+#       pins the COMPOSITION, where a preset name the parser DECODED (entities un-escaped)
+#       must be RE-escaped on export, and hostile point coordinates must survive the whole
+#       chain as bounded plain decimals. spec §4.
+#
+#   (C) RekordboxParser `Location` — a LIVE finding. The parser deliberately rejects a raw
+#       NUL up front (its own comment: libxml2 "can crash instead of returning a parse
+#       error"), then percent-DECODES the `Location` attribute — which re-materialises a
+#       `%00` into a real NUL AFTER that guard has run. The explicit NUL-safety invariant
+#       the parser sets for itself is bypassed. Expected to FAIL until the decoded location
+#       is re-checked (repo rule §E.24: fix the code, or retarget — never weaken — the test).
+#
+# Self-contained: crafts the binary/XML inputs in pure stdlib, compiles the REAL Swift
+# sources into one driver, runs the whole path. SkipTest (never a hard error) when no
+# Swift toolchain / source is present, so the pure-Python suite is unaffected.
+# =============================================================================
+
+import math  # noqa: E402  (section-local, stdlib)
+import struct  # noqa: E402  (section-local, stdlib)
+
+_AV_SOURCE_RELPATHS = [
+    ("CueSync", "CueSync", "Models", "CuePoint.swift"),
+    ("CueSync", "CueSync", "Models", "ParseError.swift"),
+    ("CueSync", "CueSync", "Models", "Track.swift"),
+    ("CueSync", "CueSync", "Models", "Playlist.swift"),
+    ("CueSync", "CueSync", "Models", "CurveType.swift"),
+    ("CueSync", "CueSync", "Parsers", "ResolumeParser.swift"),
+    ("CueSync", "CueSync", "Parsers", "RekordboxParser.swift"),
+    ("CueSync", "CueSync", "Exporters", "ResolumeExporter.swift"),
+    ("CueSync", "CueSync", "Support", "AudioDuration.swift"),
+]
+
+# Driver compiled against the real AudioDuration + ResolumeParser/Exporter + RekordboxParser.
+#   dur   <b64path>  -> b64("NIL" | "VAL\t<finite01>\t<nonneg01>")
+#         AudioDuration.duration(of:) on a crafted WAV/AIFF file at <path>.
+#   rbloc <b64xml>   -> b64("OK\t<b64 location-utf8-bytes>" | "NOTRACK" | "THREW")
+#         Rekordbox-import <xml>; report the first track's `location` as raw UTF-8 bytes
+#         (base64'd so an embedded NUL / control byte survives the line protocol intact).
+#   resx  <b64xml>   -> b64("OK\t<b64 parsedPresetName>\t<b64 resolume-xml>" | "THREW")
+#         Resolume-parse <xml>, convertToCuePoints(dur 60), then Resolume-EXPORT with the
+#         parser's own decoded preset name — the full import->export composition.
+_AV_HARNESS_MAIN = r"""
+import Foundation
+
+func b64dec(_ s: String) -> String { guard let d = Data(base64Encoded: s) else { return "" }; return String(decoding: d, as: UTF8.self) }
+func b64enc(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+func b64encBytes(_ b: [UInt8]) -> String { Data(b).base64EncodedString() }
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    switch f[0] {
+    case "dur":
+        let path = b64dec(f[1])
+        if let d = AudioDuration.duration(of: URL(fileURLWithPath: path)) {
+            print(b64enc("VAL\t\(d.isFinite ? 1 : 0)\t\(d >= 0 ? 1 : 0)"))
+        } else {
+            print(b64enc("NIL"))
+        }
+    case "rbloc":
+        let xml = b64dec(f[1])
+        do {
+            let r = try RekordboxParser.parse(xml: xml)
+            guard let t = r.tracks.first else { print(b64enc("NOTRACK")); break }
+            print(b64enc("OK\t\(b64encBytes(Array(t.location.utf8)))"))
+        } catch { print(b64enc("THREW")) }
+    case "resx":
+        let xml = b64dec(f[1])
+        do {
+            let r = try ResolumeParser.parse(xml: xml)
+            let cues = ResolumeParser.convertToCuePoints(points: r.points, duration: 60)
+            let out = ResolumeExporter.generate(cuePoints: cues, trackDuration: 60, presetName: r.presetName) ?? "<nil>"
+            print(b64enc("OK\t\(b64enc(r.presetName))\t\(b64enc(out))"))
+        } catch { print(b64enc("THREW")) }
+    default: print(b64enc("ERR"))
+    }
+}
+"""
+
+_AV_HARNESS = {"built": False, "bin": None, "err": None}
+_AV_TMPDIR = {"path": None}
+
+
+def _av_sources_or_none():
+    srcs = []
+    for parts in _AV_SOURCE_RELPATHS:
+        p = REPO_ROOT.joinpath(*parts)
+        if not p.is_file():
+            return None
+        srcs.append(str(p))
+    return srcs
+
+
+def _av_harness_binary():
+    """Compile AudioDuration + Resolume(parse/convert/export) + RekordboxParser + driver
+    once. SkipTest (never a hard error) when no Swift toolchain / source is available."""
+    st = _AV_HARNESS
+    if st["built"]:
+        if st["bin"] is None:
+            raise unittest.SkipTest(st["err"])
+        return st["bin"]
+    st["built"] = True
+    srcs = _av_sources_or_none()
+    if srcs is None:
+        st["err"] = (
+            "AudioDuration/Resolume/Rekordbox sources not found — cannot exercise them"
+        )
+        raise unittest.SkipTest(st["err"])
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        st["err"] = "swiftc not on PATH — skipping Swift untrusted-value red-team tests"
+        raise unittest.SkipTest(st["err"])
+    workdir = tempfile.mkdtemp(prefix="cuesync9_uncovered_")
+    atexit.register(shutil.rmtree, workdir, True)
+    main_swift = os.path.join(workdir, "main.swift")
+    with open(main_swift, "w", encoding="utf-8") as fh:
+        fh.write(_AV_HARNESS_MAIN)
+    binpath = os.path.join(workdir, "uncovered")
+    proc = subprocess.run(
+        [swiftc, *srcs, main_swift, "-o", binpath], capture_output=True, text=True
+    )
+    if proc.returncode != 0 or not os.path.exists(binpath):
+        st["err"] = "uncovered-surface harness build failed:\n" + proc.stderr
+        raise unittest.SkipTest(st["err"])
+    st["bin"] = binpath
+    return binpath
+
+
+def _run_av_batch(commands, timeout=180):
+    """Feed driver commands via stdin; return exactly one decoded (outer) line each. A
+    `timeout` bound turns an infinite parse loop into a test failure, not a hung CI job."""
+    binpath = _av_harness_binary()
+    try:
+        proc = subprocess.run(
+            [binpath],
+            input="\n".join(commands) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            "uncovered-surface harness did not terminate within %ss on %d commands — a "
+            "crafted header drove a parser into an unbounded loop (resource exhaustion)."
+            % (timeout, len(commands))
+        )
+    assert proc.returncode == 0, (
+        "uncovered-surface harness runtime error (a crafted input trapped a parser "
+        "instead of failing closed):\n" + proc.stderr
+    )
+    lines = proc.stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    assert len(lines) == len(commands), (
+        "uncovered-surface harness returned %d lines for %d commands (framing broke)"
+        % (len(lines), len(commands))
+    )
+    return [base64.b64decode(o).decode("utf-8") for o in lines]
+
+
+# ---- Crafted RIFF/WAVE + FORM/AIFF header builders (stdlib only) ----------
+
+
+def _av_tmpdir():
+    if _AV_TMPDIR["path"] is None:
+        d = tempfile.mkdtemp(prefix="cuesync9_audio_")
+        atexit.register(shutil.rmtree, d, True)
+        _AV_TMPDIR["path"] = d
+    return _AV_TMPDIR["path"]
+
+
+def _av_write(name, suffix, data):
+    p = os.path.join(_av_tmpdir(), name + suffix)
+    with open(p, "wb") as fh:
+        fh.write(data)
+    return p
+
+
+def _riff_wav(chunks):
+    body = b"WAVE" + chunks
+    return b"RIFF" + struct.pack("<I", len(body) & 0xFFFFFFFF) + body
+
+
+def _wav_fmt(byte_rate, fmt_len=16):
+    # PCM fmt: audioFormat, numChannels, sampleRate, byteRate, blockAlign, bitsPerSample.
+    # AudioDuration reads byteRate at fmt-data offset +8 (this field).
+    data = struct.pack("<HHIIHH", 1, 2, 44100, byte_rate & 0xFFFFFFFF, 4, 16)[:fmt_len]
+    return b"fmt " + struct.pack("<I", len(data)) + data
+
+
+def _wav_data(declared_size, actual_len=0):
+    return (
+        b"data" + struct.pack("<I", declared_size & 0xFFFFFFFF) + (b"\x00" * actual_len)
+    )
+
+
+def _wav_junk(declared_size, actual_len=0):
+    return (
+        b"JUNK" + struct.pack("<I", declared_size & 0xFFFFFFFF) + (b"\x00" * actual_len)
+    )
+
+
+def _ext80_raw(sign, raw_exp, mantissa):
+    """Craft a raw 80-bit IEEE extended (AIFF COMM sample-rate) from its fields."""
+    hi = ((sign & 1) << 15) | (raw_exp & 0x7FFF)
+    return bytes([(hi >> 8) & 0xFF, hi & 0xFF]) + (mantissa & ((1 << 64) - 1)).to_bytes(
+        8, "big"
+    )
+
+
+def _ext80(value):
+    """Encode a finite Python float as an 80-bit extended (integer-bit-explicit)."""
+    if value == 0:
+        return b"\x00" * 10
+    sign = 1 if value < 0 else 0
+    m, e = math.frexp(abs(value))  # abs = m * 2**e, 0.5 <= m < 1
+    mant = int(round(m * (1 << 64)))
+    if mant >> 64:
+        mant >>= 1
+        e += 1
+    return _ext80_raw(sign, e + 16382, mant)
+
+
+def _form_aiff(comm_data, form_type=b"AIFF"):
+    chunk = b"COMM" + struct.pack(">I", len(comm_data) & 0xFFFFFFFF) + comm_data
+    body = form_type + chunk
+    return b"FORM" + struct.pack(">I", len(body) & 0xFFFFFFFF) + body
+
+
+def _aiff_comm(num_frames, sr_bytes, comm_len=18):
+    # numChannels(2), numSampleFrames(4 BE), sampleSize(2), sampleRate(10 = 80-bit ext).
+    data = struct.pack(">HIH", 2, num_frames & 0xFFFFFFFF, 16) + sr_bytes
+    return data[:comm_len]
+
+
+def _assert_duration_ok(label, out):
+    """Every crafted header must fail closed to `nil` OR yield a finite, non-negative
+    duration — never NaN/Inf (would trap a downstream `Int(...)`) or a negative value."""
+    if out == "NIL":
+        return False
+    assert out.startswith("VAL\t"), "unexpected duration harness result for %s: %r" % (
+        label,
+        out,
+    )
+    _v, finite, nonneg = out.split("\t")
+    assert finite == "1", (
+        "spec §4/§5: AudioDuration returned a NON-FINITE duration for crafted header %r — "
+        "a NaN/Inf escaped `finiteOrNil` and would trap a downstream Int(...) conversion"
+        % label
+    )
+    assert nonneg == "1", (
+        "spec §4/§5: AudioDuration returned a NEGATIVE duration for crafted header %r — a "
+        "negative sample/byte-rate escaped the `rate > 0` guard" % label
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 75 (LOCK) — WAV (RIFF) header parsing on untrusted bytes. Attacker-chosen
+# chunk sizes and a 32-bit byteRate must never drive the duration to a non-finite or
+# negative value, and the chunk scan must terminate. Covers: a 4-GiB declared `data`
+# size over byteRate 1, a zero byteRate, byteRate/data both maxed, missing/truncated
+# `fmt `, a declared size far larger than the file, and a huge byteRate. spec §4/§5.
+# ---------------------------------------------------------------------------
+
+
+def test_audio_duration_wav_header_never_yields_nonfinite_or_negative():
+    cases = [
+        ("valid_10s", _riff_wav(_wav_fmt(176400) + _wav_data(1764000, 16))),
+        ("data_4gib_over_rate_1", _riff_wav(_wav_fmt(1) + _wav_data(0xFFFFFFFF))),
+        ("byterate_zero", _riff_wav(_wav_fmt(0) + _wav_data(1000, 1000))),
+        (
+            "byterate_and_data_maxed",
+            _riff_wav(_wav_fmt(0xFFFFFFFF) + _wav_data(0xFFFFFFFF)),
+        ),
+        ("no_data_chunk", _riff_wav(_wav_fmt(176400))),
+        ("no_fmt_chunk", _riff_wav(_wav_data(1000, 1000))),
+        (
+            "fmt_truncated_below_16",
+            _riff_wav(_wav_fmt(176400, fmt_len=10) + _wav_data(1000, 1000)),
+        ),
+        (
+            "declared_data_huge_actual_tiny",
+            _riff_wav(_wav_fmt(1000) + _wav_data(0xFFFFFFFF, 8)),
+        ),
+        (
+            "byterate_maxed_data_maxed",
+            _riff_wav(_wav_fmt(0xFFFFFFFF) + _wav_data(0xFFFFFFFF, 0)),
+        ),
+    ]
+    cmds = [
+        "dur %s" % _b64(_av_write("wav_%s" % lbl, ".wav", data)) for lbl, data in cases
+    ]
+    outs = _run_av_batch(cmds)
+    produced_a_value = False
+    for (label, _d), out in zip(cases, outs):
+        produced_a_value |= _assert_duration_ok(label, out)
+    assert produced_a_value, (
+        "no crafted WAV produced a finite duration — the parser path was never exercised "
+        "(the lock would be vacuous)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 76 (LOCK) — AIFF/AIFC `COMM` parsing, focused on the 80-bit IEEE extended
+# sample rate `parseExtended80` decodes by hand. A crafted exponent/mantissa can make
+# the rate +Inf (which still passes `> 0`), a tiny denormal, negative, or exactly zero;
+# combined with a maxed `numSampleFrames`, the quotient can overflow. None may surface a
+# non-finite or negative duration — each must be `nil` or finite & >= 0. spec §4/§5.
+# ---------------------------------------------------------------------------
+
+
+def test_audio_duration_aiff_extended_sample_rate_never_yields_nonfinite_or_negative():
+    cases = [
+        ("valid_10s_44100", _form_aiff(_aiff_comm(441000, _ext80(44100.0)))),
+        (
+            "rate_plus_inf_exponent",
+            _form_aiff(_aiff_comm(1000, _ext80_raw(0, 0x7FFF, (1 << 64) - 1))),
+        ),
+        (
+            "rate_near_max_exponent",
+            _form_aiff(_aiff_comm(0xFFFFFFFF, _ext80_raw(0, 0x7FFE, (1 << 64) - 1))),
+        ),
+        ("rate_zero_mantissa", _form_aiff(_aiff_comm(1000, b"\x00" * 10))),
+        ("rate_negative", _form_aiff(_aiff_comm(441000, _ext80(-44100.0)))),
+        ("tiny_rate_frames_maxed", _form_aiff(_aiff_comm(0xFFFFFFFF, _ext80(1e-300)))),
+        ("frames_maxed_rate_1", _form_aiff(_aiff_comm(0xFFFFFFFF, _ext80(1.0)))),
+        (
+            "aifc_variant_48000",
+            _form_aiff(_aiff_comm(441000, _ext80(48000.0)), form_type=b"AIFC"),
+        ),
+    ]
+    cmds = [
+        "dur %s" % _b64(_av_write("aiff_%s" % lbl, ".aiff", data))
+        for lbl, data in cases
+    ]
+    outs = _run_av_batch(cmds)
+    produced_a_value = False
+    for (label, _d), out in zip(cases, outs):
+        produced_a_value |= _assert_duration_ok(label, out)
+    assert produced_a_value, (
+        "no crafted AIFF produced a finite duration — the COMM/extended80 path was never "
+        "exercised (the lock would be vacuous)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 77 (LOCK) — chunk-scan TERMINATION. RIFF/FORM chunk walking advances by a
+# size field the file controls; a naive scanner that trusts a zero size (no forward
+# progress) or an unchecked size (backward jump) loops forever on hostile geometry.
+# The scan must always make progress. We pack many zero-size junk chunks, a size
+# larger than the whole file, and a truncated trailing chunk, and require the whole
+# battery to finish inside the runner's timeout. spec §4 (resource exhaustion).
+# ---------------------------------------------------------------------------
+
+
+def test_audio_duration_chunk_scan_terminates_on_adversarial_geometry():
+    zero_junk = _wav_junk(0) * 4000  # 4000 zero-size chunks before any usable chunk
+    cases = [
+        (
+            "wav_many_zero_size_chunks",
+            ".wav",
+            _riff_wav(zero_junk + _wav_fmt(176400) + _wav_data(1000)),
+        ),
+        (
+            "wav_chunk_size_exceeds_file",
+            ".wav",
+            _riff_wav(_wav_junk(0xFFFFFFF0) + _wav_fmt(176400) + _wav_data(1000)),
+        ),
+        (
+            "wav_truncated_trailing_size",
+            ".wav",
+            _riff_wav(
+                _wav_fmt(176400) + b"data" + struct.pack("<I", 0xFFFFFFFF) + b"\x00\x00"
+            ),
+        ),
+        (
+            "aiff_many_zero_size_chunks",
+            ".aiff",
+            _form_aiff(
+                b"JUNK\x00\x00\x00\x00" * 4000 + _aiff_comm(441000, _ext80(44100.0))
+            ),
+        ),
+        (
+            "aiff_size_exceeds_file",
+            ".aiff",
+            _form_aiff(
+                b"JUNK"
+                + struct.pack(">I", 0xFFFFFFF0)
+                + _aiff_comm(441000, _ext80(44100.0))
+            ),
+        ),
+    ]
+    cmds = ["dur %s" % _b64(_av_write(lbl, sfx, data)) for lbl, sfx, data in cases]
+    # A short, explicit bound: if any header drives an unbounded loop this fails fast
+    # with the resource-exhaustion message rather than hanging CI.
+    outs = _run_av_batch(cmds, timeout=60)
+    for (label, _s, _d), out in zip(cases, outs):
+        _assert_duration_ok(label, out)  # terminated AND stayed finite/non-negative
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 78 (LOCK) — Resolume PARSE -> convert -> EXPORT preset-name round trip. The
+# parser DECODES XML entities in the `Preset@name`, so a name that arrived as escaped
+# markup becomes raw `<`/`&`/`"` in memory; re-exporting MUST re-escape it. We feed
+# hostile names (attribute breakout, element injection, CDATA close, all five
+# metacharacters), then strict-parse the re-exported XML and require the name to
+# round-trip as DATA with no injected element and a stable point count. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def _xml_attr_escape(s):
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def test_resolume_parse_to_export_preset_name_roundtrip_neutralises_injection():
+    payloads = [
+        "plain envelope",
+        '"/><Malicious a="',  # attribute/quote breakout
+        "']]>",  # CDATA close
+        "A&B<C>D\"E'F",  # all five XML metacharacters
+        'x"/><point x="9" y="9" curve="9"/><Preset name="',  # element injection
+        "&xxe; &amp; &#x41;",  # entity-looking text (must survive as literal data)
+    ]
+    xmls = [
+        '<?xml version="1.0"?><Preset name="%s">'
+        '<point x="0" y="0" curve="1"/><point x="1" y="0" curve="1"/></Preset>'
+        % _xml_attr_escape(p)
+        for p in payloads
+    ]
+    outs = _run_av_batch(["resx %s" % _b64(x) for x in xmls])
+    for payload, out in zip(payloads, outs):
+        assert out.startswith("OK\t"), (
+            "Resolume parse->export chain failed for payload %r: %r"
+            % (payload, out[:80])
+        )
+        _ok, parsed_b64, xml_b64 = out.split("\t")
+        parsed_name = base64.b64decode(parsed_b64).decode("utf-8")
+        exported = base64.b64decode(xml_b64).decode("utf-8")
+        # Must stay well-formed and re-escape the decoded name back to plain data.
+        root = ET.fromstring(exported)
+        assert root.attrib.get("name") == parsed_name, (
+            "spec §4: the parser-decoded preset name %r did not round-trip through export "
+            "as data — payload %r broke out of the attribute (exported name %r)"
+            % (parsed_name, payload, root.attrib.get("name"))
+        )
+        # Injection would add elements or extra points; the input carried exactly two.
+        assert root.tag.endswith("Preset"), "unexpected root element %r" % root.tag
+        assert len(list(root.iter("point"))) == 2, (
+            "spec §4: preset-name payload %r injected extra <point> elements into the "
+            "re-exported Resolume XML (%d found, expected 2)"
+            % (payload, len(list(root.iter("point"))))
+        )
+        assert not list(root.iter("Malicious")), (
+            "spec §4: preset-name payload %r injected a <Malicious> element on re-export"
+            % payload
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 79 (LOCK) — Resolume PARSE -> convert -> EXPORT coordinate round trip. The
+# parser reads `x`/`y`/`curve` with unclamped `Double(...)`/`Int(...)`; a hostile
+# envelope can carry NaN/Inf/scientific/negative/out-of-1..23 there. `convertToCuePoints`
+# runs `.sanitized()` and the exporter clamps to [0,1] — so the RE-EXPORTED XML must
+# only ever hold plain-decimal x/y in [0,1] and curve in 1..23, never a `nan`/`inf`/
+# `1e-05` coordinate a strict Resolume reader would reject. spec §4 (import->export chain).
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_parse_convert_export_never_emits_nonfinite_or_out_of_range_coords():
+    hostile_points = [
+        ("nan", "0", "1"),
+        ("inf", "1", "1"),
+        ("1e400", "-5", "0"),
+        ("-0.5", "2", "999"),
+        ("0.5", "0.5", "12"),
+        ("1e18", "1e18", "-3"),
+    ]
+    xml_in = (
+        '<?xml version="1.0"?><Preset name="p">'
+        + "".join('<point x="%s" y="%s" curve="%s"/>' % pt for pt in hostile_points)
+        + "</Preset>"
+    )
+    out = _run_av_batch(["resx %s" % _b64(xml_in)])[0]
+    assert out.startswith("OK\t"), "Resolume parse->export chain failed: %r" % out[:80]
+    exported = base64.b64decode(out.split("\t")[2]).decode("utf-8")
+    root = ET.fromstring(exported)
+    points = list(root.iter("point"))
+    assert points, "Resolume export produced no <point> elements"
+    for p in points:
+        cv = int(p.attrib["curve"])
+        assert 1 <= cv <= 23, (
+            "spec §4: curve %d escaped the 1..23 clamp across the Resolume import->export chain"
+            % cv
+        )
+        for axis in ("x", "y"):
+            v = p.attrib[axis]
+            assert _PLAIN_DECIMAL_RE.fullmatch(v), (
+                "spec §4: a hostile Resolume %s coordinate leaked as %r (non-finite/scientific) "
+                "through the parse->convert->export chain" % (axis, v)
+            )
+            assert 0.0 <= float(v) <= 1.0, (
+                "coordinate %s=%s left [0,1] after the Resolume import->export chain"
+                % (axis, v)
+            )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 80 (LIVE FINDING — expected to FAIL until hardened) — RekordboxParser rejects a
+# raw NUL byte in its XML up front (line ~24), its own comment explaining that the
+# Windows/Linux libxml2 path "can crash instead of returning a parse error" on a NUL.
+# But `parseCollectionTrack` then runs `location.removingPercentEncoding` on the
+# `Location` attribute — so a percent-encoded `%00` sails past the up-front guard and is
+# DECODED back into a real NUL byte inside `track.location`. The parser's own NUL-safety
+# invariant is defeated by its second decode. A hostile Rekordbox XML thus lands a NUL in
+# a parsed field (poison-NUL: truncates any later C-string path use, and re-crosses the
+# very libxml2 crash surface on a project round-trip). Fix: strip/reject NUL (and control
+# bytes) from the decoded location, or re-run the NUL guard after percent-decoding.
+# spec §4 (Rekordbox XML is an enumerated untrusted source; NUL handling on the divergent
+# libxml2 path is called out explicitly).
+# ---------------------------------------------------------------------------
+
+
+def test_rekordbox_location_percent_encoding_cannot_smuggle_a_nul_byte_past_the_guard():
+    xml_in = (
+        '<?xml version="1.0"?><DJ_PLAYLISTS><COLLECTION>'
+        '<TRACK TrackID="1" Name="t" Location="file://localhost/a%00b.wav"/>'
+        "</COLLECTION></DJ_PLAYLISTS>"
+    )
+    out = _run_av_batch(["rbloc %s" % _b64(xml_in)])[0]
+    assert out.startswith("OK\t"), (
+        "Rekordbox import unexpectedly produced no track for a %%00-in-Location XML: %r"
+        % out[:80]
+    )
+    location_bytes = base64.b64decode(out.split("\t", 1)[1])
+    assert b"\x00" not in location_bytes, (
+        "spec §4: a percent-encoded %%00 in a Rekordbox `Location` was decoded into a real "
+        "NUL byte inside track.location (bytes=%r), bypassing the parser's own up-front "
+        "NUL-rejection guard — the guard runs before removingPercentEncoding re-creates the "
+        "NUL. Poison-NUL: truncates any later C-string path use and re-crosses the libxml2 "
+        "crash surface on a project round-trip. Fix the decode, don't weaken this test."
+        % location_bytes
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
