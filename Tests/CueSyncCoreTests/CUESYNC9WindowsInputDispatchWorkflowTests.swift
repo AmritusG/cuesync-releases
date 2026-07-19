@@ -185,8 +185,20 @@ final class CUESYNC9PatchFileTests: XCTestCase {
         XCTAssertTrue(patch.contains("#if os(Windows)"),
             "the fix must be guarded to Windows only — the message-queue-ownership race is Windows-specific " +
             "(findings §2.5), Linux has no Win32 message queue to race for")
+        // Only ADDED lines ('+', excluding the '+++' file header) are bytes this patch
+        // injects into GtkBackend.swift. Context lines and the `@@ … @@` hunk headers
+        // reproduce unchanged upstream source — round 7's `@_silgen_name` insertion
+        // point sits directly below the existing `import SwiftCrossUI` / `import
+        // GtkCHelpers`, so those imports appear as diff context and must NOT trip a
+        // "no new dependency" guard. Scoped to added lines, mirroring the Python
+        // adversarial suite's ATTACK 48 (`_win_input_added_lines`), which already
+        // scanned only added lines here.
+        let addedLines = patch
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }
+            .joined(separator: "\n")
         for banned in ["import ", "dlopen", "Process(", "URLSession", "http://", "https://"] {
-            XCTAssertFalse(patch.contains(banned),
+            XCTAssertFalse(addedLines.contains(banned),
                 "the patch must not introduce '\(banned)' — no new dependency, no network, no dynamic load " +
                 "(spec CUESYNC-9 threat model)")
         }

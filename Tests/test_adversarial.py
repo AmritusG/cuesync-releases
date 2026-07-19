@@ -2530,37 +2530,58 @@ def test_windows_input_patch_is_a_real_unified_diff_touching_only_gtkbackend_and
 # tickler waiting for an event that may never come — a trivially reachable UI
 # freeze that also starves RunLoop.main (regressing PR #141), the opposite of the
 # fix. findings §2.5/Fix demand exactly `g_main_context_iteration(nil, 0)`.
+#
+# Updated for round 7's restructuring: the patch now adds THREE separate
+# `#if os(Windows)` guards (the top-of-file `@_silgen_name` declaration, the
+# tickler's `#if os(Windows) … #else … #endif`, and the tickler-priority guard),
+# not one. A naive "first `#if` … first `#endif` after it" pairing (as this test
+# originally did) matches the drain against the WRONG guard's boundaries once a
+# second, unrelated guard precedes it in the added-lines stream. The fix below
+# walks a directive stack so it finds each guard's OWN enclosing `#if`/`#else`/
+# `#endif`, regardless of how many separate Windows guards exist in the file.
 # ---------------------------------------------------------------------------
+
+
+def _enclosing_directive_is_windows_true_branch(added, idx):
+    """Whether added[idx] sits in the TRUE branch of its nearest enclosing
+    `#if os(Windows)` guard, tracking a stack of #if/#else/#endif directives so
+    multiple, sequential (non-nested) Windows guards elsewhere in the same
+    added-lines stream cannot cross-contaminate the check."""
+    stack = []  # each entry: [is_windows_guard: bool, branch: "if"|"else"]
+    for line in added[:idx]:
+        if re.search(r"#if\b", line):
+            stack.append(["#if os(Windows)" in line, "if"])
+        elif re.search(r"#else\b", line):
+            if stack:
+                stack[-1][1] = "else"
+        elif re.search(r"#endif\b", line):
+            if stack:
+                stack.pop()
+    if not stack:
+        return False
+    is_windows_guard, branch = stack[-1]
+    return is_windows_guard and branch == "if"
 
 
 def test_windows_input_patch_drain_is_scoped_windows_only_and_nonblocking():
     _win_input_or_skip()
     added = _win_input_added_lines()
 
-    if_idx = next(
-        (i for i, line in enumerate(added) if "#if os(Windows)" in line), None
-    )
-    endif_idx = next(
-        (i for i, line in enumerate(added) if i > (if_idx or -1) and "#endif" in line),
-        None,
+    assert any("#if os(Windows)" in line for line in added), (
+        "the windows-input patch must add a `#if os(Windows)` guard — the "
+        "message-queue-ownership race is Windows-only (findings §2.5)"
     )
     drain_idxs = [
         i for i, line in enumerate(added) if "g_main_context_iteration" in line
     ]
-    assert if_idx is not None, (
-        "the windows-input patch must add a `#if os(Windows)` guard — the "
-        "message-queue-ownership race is Windows-only (findings §2.5)"
-    )
-    assert endif_idx is not None, (
-        "the `#if os(Windows)` guard is never closed with `#endif`"
-    )
     assert drain_idxs, "the patch must add a `g_main_context_iteration` drain call"
     for d in drain_idxs:
-        assert if_idx < d < endif_idx, (
+        assert _enclosing_directive_is_windows_true_branch(added, d), (
             "spec §5: the `g_main_context_iteration` drain (added line %d) must live "
-            "STRICTLY inside the `#if os(Windows)` … `#endif` block (added lines %d…%d). "
-            "Outside it, the drain runs on the macOS GtkBackend leg (which must stay "
-            "green) and needlessly changes Linux behaviour." % (d, if_idx, endif_idx)
+            "in the TRUE branch of a `#if os(Windows)` guard. Outside it, the drain "
+            "runs on the macOS GtkBackend leg (which must stay green) and needlessly "
+            "changes Linux behaviour, or (if in an `#else`) runs on every OTHER "
+            "platform instead of Windows." % d
         )
 
     # Non-blocking: every drain call's may_block argument must be 0/false/FALSE.
@@ -2632,14 +2653,21 @@ def test_windows_input_patch_applies_cleanly_in_the_real_ci_sequence_and_its_rev
 
 
 # ---------------------------------------------------------------------------
-# ATTACK 52 (BEHAVIORAL) — after applying both patches, the tickler must ACTUALLY
-# drain GLib's own context BEFORE it ticks RunLoop.main, on Windows only. It is
-# not enough that the patch mentions `g_main_context_iteration`: findings §Fix is
-# explicit that GDK's win32 backend must get "deterministic first refusal … before
-# Foundation's competing `PeekMessage` drain ever runs." If a future edit reordered
-# the drain to AFTER `RunLoop.main.limitDate`, or dropped it out of the Windows
-# guard, every text test still passes but the race the fix exists to end is back.
-# Verified against the real applied bytes of mainRunLoopTicklingLoop.
+# ATTACK 52 (BEHAVIORAL) — after applying both patches, on Windows the tickler
+# must drain GLib's own context and service libdispatch DIRECTLY — and must
+# NEVER pump `RunLoop.main` at all. findings §3/§Fix (round 7) is explicit that
+# `RunLoop.main.limitDate` is itself the race: swift-corelibs-foundation binds
+# it to the SAME Win32 message queue GDK needs for input, so calling it on
+# Windows AT ALL — even after a drain — reopens the theft the whole patch exists
+# to end. `RunLoop.main.limitDate` may only run in the `#else` (non-Windows)
+# branch. If a future edit moved it back outside the `#else`, or dropped the
+# drain/libdispatch calls out of the Windows branch, every text-only test still
+# passes but the fix is reverted in substance. Verified against the real
+# applied bytes of mainRunLoopTicklingLoop.
+#
+# (Originally written for round 5/6's shape — drain-then-unconditional-tick —
+# which round 7 deliberately superseded; updated to match the round-7 fix this
+# ticket's own patch header and findings document.)
 # ---------------------------------------------------------------------------
 
 
@@ -2665,32 +2693,45 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
 
     pos_if = region.find("#if os(Windows)")
     pos_drain = region.find("g_main_context_iteration")
-    pos_endif = region.find("#endif", pos_if if pos_if != -1 else 0)
+    pos_dispatch = region.find("scui_dispatchMainQueueCallback4CF")
+    pos_else = region.find("#else", pos_if if pos_if != -1 else 0)
+    pos_endif = region.find("#endif", pos_else if pos_else != -1 else (pos_if if pos_if != -1 else 0))
     # Anchor on the real code token, not bare "limitDate" — the patch's rationale
     # comment mentions "`limitDate` below" ABOVE the drain, which would otherwise
     # match first and invert the ordering check.
     pos_limit = region.find("RunLoop.main.limitDate")
 
-    assert pos_if != -1 and pos_drain != -1 and pos_endif != -1 and pos_limit != -1, (
-        "mainRunLoopTicklingLoop after apply is missing one of {#if os(Windows), "
-        "g_main_context_iteration, #endif, limitDate}:\n%s" % region
+    positions = {
+        "#if os(Windows)": pos_if,
+        "g_main_context_iteration": pos_drain,
+        "scui_dispatchMainQueueCallback4CF": pos_dispatch,
+        "#else": pos_else,
+        "#endif": pos_endif,
+        "RunLoop.main.limitDate": pos_limit,
+    }
+    missing = [name for name, pos in positions.items() if pos == -1]
+    assert not missing, (
+        "mainRunLoopTicklingLoop after apply is missing %r:\n%s" % (missing, region)
     )
-    assert pos_if < pos_drain < pos_endif, (
-        "the GLib drain must sit inside the `#if os(Windows)` guard within the applied "
-        "mainRunLoopTicklingLoop body (findings §Fix)"
+    assert pos_if < pos_drain < pos_else, (
+        "findings §3/§Fix (round 7): the GLib drain (`g_main_context_iteration`) must "
+        "sit in the TRUE branch of `#if os(Windows)` — BEFORE the `#else` — within the "
+        "applied mainRunLoopTicklingLoop body"
     )
-    assert pos_drain < pos_limit, (
-        "findings §Fix: on Windows the tickler must drain GLib's own GMainContext "
-        "(`g_main_context_iteration`) BEFORE ticking `RunLoop.main` "
-        "(`RunLoop.main.limitDate`), so GDK's win32 backend gets first refusal on "
-        "queued input before Foundation's competing PeekMessage drain. In the applied "
-        "bytes the drain (offset %d) comes AFTER limitDate (offset %d) — the race is "
-        "back." % (pos_drain, pos_limit)
+    assert pos_drain < pos_dispatch < pos_else, (
+        "round 7: the GLib drain must run BEFORE servicing libdispatch's main queue "
+        "(`scui_dispatchMainQueueCallback4CF`), and both must stay inside the Windows "
+        "branch — PR #141's actual requirement (@MainActor/DispatchQueue.main work) "
+        "is met by the libdispatch call, not by pumping RunLoop.main"
     )
-    assert pos_endif < pos_limit, (
-        "the `#if os(Windows)` drain block must close (`#endif`) BEFORE the "
-        "unconditional `RunLoop.main.limitDate` tick — otherwise the tick itself is "
-        "wrongly Windows-gated."
+    assert pos_else < pos_limit < pos_endif, (
+        "findings §3/§Fix (round 7): on Windows, `RunLoop.main` must NEVER be pumped — "
+        "swift-corelibs-foundation binds it to the SAME Win32 message queue GDK needs "
+        "for mouse/keyboard/close input, so `RunLoop.main.limitDate` running on Windows "
+        "at all (even after a drain) reopens the message-queue race this patch exists "
+        "to end. `RunLoop.main.limitDate` must live ONLY in the `#else` (non-Windows) "
+        "branch — found at offset %d, expected strictly between `#else` (%d) and "
+        "`#endif` (%d)." % (pos_limit, pos_else, pos_endif)
     )
 
 
@@ -3157,6 +3198,201 @@ def test_both_patches_applied_preserve_can_target_and_add_the_glib_drain():
     assert "g_main_context_iteration" in backend, (
         "spec CUESYNC-9: the windows-input GLib drain must be present in the "
         "fully-patched bytes CI compiles — both fixes must coexist."
+    )
+
+
+# ===========================================================================
+# ATTACKS 63-66 — the round-4 GSK-renderer patch
+# (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) has NO Python
+# coverage at all before this section: it is named only as one of the three
+# "expected" GtkBackend-touching files (test_dev_script_and_every_ci_leg_apply_
+# the_one_checked_in_patch). Its own Swift compliance suite
+# (CUESYNC9WindowsGskRendererWorkflowTests) scans the WHOLE patch text for a
+# short banned-token list rather than just its added lines — the same class of
+# bug ATTACK 48 closed for the windows-input patch (fixed alongside this suite).
+# These attacks give the GSK patch the same supply-chain/behavioral floor the
+# other two patches already have, scoped to what a single `g_setenv` hunk
+# actually needs (no drain-loop/blocking concerns apply here).
+# ---------------------------------------------------------------------------
+
+WINDOWS_GSK_PATCH_PATH = REPO_ROOT / "patches" / WINDOWS_GSK_PATCH_NAME
+WINDOWS_GSK_PATCH_TEXT = (
+    WINDOWS_GSK_PATCH_PATH.read_text(encoding="utf-8")
+    if WINDOWS_GSK_PATCH_PATH.is_file()
+    else ""
+)
+
+
+def _gsk_or_skip():
+    if not WINDOWS_GSK_PATCH_TEXT:
+        raise unittest.SkipTest("%s not found" % WINDOWS_GSK_PATCH_NAME)
+    return WINDOWS_GSK_PATCH_TEXT
+
+
+def _gsk_added_lines():
+    """Content of every added (`+`) line of the GSK-renderer patch, excluding the
+    `+++` header — exactly the bytes `git apply` injects into GtkBackend. Mirrors
+    _win_input_added_lines() for the same reason: header/comment prose legitimately
+    names things (`Package.swift`, `RustDesk`, …) that are not added dependency
+    lines."""
+    return [
+        ln[1:]
+        for ln in WINDOWS_GSK_PATCH_TEXT.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    ]
+
+
+def test_gsk_patch_added_lines_are_pure_glib_setenv_no_exec_network_or_new_import():
+    _gsk_or_skip()
+    added = _gsk_added_lines()
+    assert added, "the GSK-renderer patch adds no lines at all — nothing to review"
+
+    forbidden = [
+        "http://",
+        "https://",
+        "ftp://",
+        "URLSession",
+        "getaddrinfo",
+        "socket(",
+        "Process(",
+        "NSTask",
+        "posix_spawn",
+        "system(",
+        "popen(",
+        "ShellExecute",
+        "execve",
+        "execvp",
+        "/bin/sh",
+        "cmd.exe",
+        "Invoke-WebRequest",
+        "Invoke-Expression",
+        "eval(",
+        "dlopen",
+        "dlsym",
+        "LoadLibrary",
+        "GetProcAddress",
+        "Data(contentsOf:",
+        "FileHandle",
+        "fopen(",
+        "mmap(",
+        "VirtualAlloc",
+    ]
+    for content in added:
+        for token in forbidden:
+            assert token not in content, (
+                "spec CUESYNC-9 §4/§0.3: the GSK-renderer patch must be a pure "
+                "GLib g_setenv call — no network, subprocess, dynamic load, or "
+                "arbitrary file/memory I/O. An added line contains `%s`:\n    %s"
+                % (token, content.strip())
+            )
+        assert not content.strip().startswith("import "), (
+            "spec CUESYNC-9 §4 (no new dependency): the GSK-renderer patch must not "
+            "add an `import` — the fix uses only GLib's own `g_setenv`, already "
+            "reachable in GtkBackend.swift. Found:\n    %s" % content.strip()
+        )
+
+
+def test_gsk_patch_is_a_real_unified_diff_touching_only_gtkbackend_and_repins_nothing():
+    text = _gsk_or_skip()
+    assert (
+        "diff --git a/Sources/GtkBackend/GtkBackend.swift "
+        "b/Sources/GtkBackend/GtkBackend.swift" in text
+    ), "expected a real `diff --git` unified-diff header for GtkBackend.swift"
+
+    added = _gsk_added_lines()
+    joined = "\n".join(added)
+    for tool in ["-replace", "sed -i", "sed 's", "perl -pi", "awk '"]:
+        assert tool not in joined, (
+            'spec CUESYNC-9 §4 ("never sed/-replace"): the checked-in fix must be a '
+            "real diff, not a `%s` text-substitution script. Found in an added line."
+            % tool
+        )
+    # A bare shell redirect (`command > file`), NOT the `->` call-chain arrow the
+    # patch's own rationale comment legitimately uses (e.g. "g_application_run ->
+    # activate -> window realize") to describe GTK's init sequence.
+    redirect = re.search(r"(?<!-)>\s", joined)
+    assert redirect is None, (
+        'spec CUESYNC-9 §4 ("never sed/-replace"): the checked-in fix must be a real '
+        "diff, not a shell-redirect text-substitution. Found in an added line: %r"
+        % joined[max(0, redirect.start() - 20) : redirect.start() + 20]
+    )
+
+    targets = sorted(set(re.findall(r"diff --git a/(\S+) b/\S+", text)))
+    assert targets == ["Sources/GtkBackend/GtkBackend.swift"], (
+        "spec CUESYNC-9 acceptance: the GSK-renderer patch must touch ONLY "
+        "GtkBackend.swift (runMainLoop) — a second `diff --git` is an out-of-scope "
+        "edit to another dependency file, a supply-chain smuggling surface. Found "
+        "targets: %r" % targets
+    )
+
+    for repin in ["Package.swift", "Package.resolved", "exact:", ".package(", "from:"]:
+        offenders = [c for c in added if repin in c]
+        assert not offenders, (
+            'spec CUESYNC-9 acceptance: swift-cross-ui stays pinned `exact: "0.8.0"` '
+            "and Package.swift/Package.resolved are UNCHANGED — the GSK-renderer diff "
+            "body must not touch the manifest or re-pin. An added line contains "
+            "`%s`:\n    %s" % (repin, offenders[0].strip())
+        )
+
+
+def test_gsk_patch_setenv_call_is_scoped_inside_the_windows_only_guard():
+    """The Swift compliance test only checks that `#if os(Windows)` and
+    `g_setenv` each appear SOMEWHERE in the patch, never that the call sits
+    INSIDE the guard. If `g_setenv("GSK_RENDERER", "cairo", 1)` leaked outside
+    `#if os(Windows) ... #endif` it would force the software renderer on
+    macOS/Linux too — the macOS GtkBackend CI leg must stay green with its
+    working default renderer (spec §5)."""
+    text = _gsk_or_skip()
+    guard_start = text.find("#if os(Windows)")
+    assert guard_start != -1, "no #if os(Windows) guard found in the GSK patch"
+    guard_end = text.find("#endif", guard_start)
+    assert guard_end != -1, "no matching #endif found for the GSK patch's Windows guard"
+    setenv_pos = text.find("g_setenv(", guard_start)
+    assert setenv_pos != -1, "no g_setenv( call found after the Windows guard opens"
+    assert setenv_pos < guard_end, (
+        "spec CUESYNC-9 §5: the g_setenv(\"GSK_RENDERER\", \"cairo\", ...) call must "
+        "sit INSIDE the #if os(Windows) ... #endif guard, not after it closes — "
+        "otherwise it would force the software renderer on macOS/Linux too"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 64 (BEHAVIORAL) — all three patches must apply cleanly IN SEQUENCE
+# against the real pinned checkout, in the exact order CI/the dev script use
+# (gesture, then windows-input, then GSK). Every text-only test above can pass
+# on a GSK patch whose `@@` hunk offsets have gone stale relative to the
+# ALREADY-patched tree (the state it actually applies against in CI), while
+# `git apply` fails for real and the whole GtkBackend build dies. Skips (never
+# errors) if no git toolchain / resolved checkout at the audited commit is
+# present, mirroring ATTACK 22/51/62.
+# ---------------------------------------------------------------------------
+
+
+def test_all_three_patches_apply_cleanly_in_the_real_ci_sequence_gesture_then_input_then_gsk():
+    _gsk_or_skip()
+    _win_input_or_skip()
+    git, tree = _pristine_tree_or_skip()
+    assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, (
+        "gesture (CUESYNC-8) apply failed against the pristine checkout"
+    )
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input (CUESYNC-9) apply failed after the gesture patch"
+    )
+    r = _apply_patch(git, tree, WINDOWS_GSK_PATCH_PATH)
+    assert r.returncode == 0, (
+        "spec CUESYNC-9 §0.3/acceptance: the GSK-renderer patch must apply "
+        "cleanly via `git apply` after the gesture and windows-input patches, "
+        "the exact real CI/dev-script order. stderr:\n%s" % r.stderr
+    )
+
+    backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
+        encoding="utf-8"
+    )
+    assert "GSK_RENDERER" in backend and "g_main_context_iteration" in backend, (
+        "spec CUESYNC-9: after all three patches apply, the fully-patched "
+        "GtkBackend.swift must contain both the GSK_RENDERER=cairo fix and the "
+        "windows-input GLib drain — all three fixes must coexist in the exact "
+        "bytes CI compiles"
     )
 
 

@@ -167,8 +167,17 @@ final class CUESYNC9GskRendererPatchFileTests: XCTestCase {
             "the fix must force GTK's software Cairo renderer via GSK_RENDERER=cairo")
         XCTAssertTrue(patch.contains("#if os(Windows)"),
             "the fix must be guarded to Windows only — Linux/macOS keep their working default renderers")
+        // Scoped to ADDED lines only, same rationale as the sibling windows-input
+        // patch's equivalent guard (CUESYNC9WindowsInputDispatchWorkflowTests /
+        // ATTACK 48's `_win_input_added_lines`): unchanged diff context and the
+        // header's prose commentary reproduce/describe surrounding upstream source,
+        // not bytes this patch injects, and must not trip a "no new dependency" scan.
+        let addedLines = patch
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }
+            .joined(separator: "\n")
         for banned in ["import ", "dlopen", "Process(", "URLSession", "http://", "https://"] {
-            XCTAssertFalse(patch.contains(banned),
+            XCTAssertFalse(addedLines.contains(banned),
                 "the patch must not introduce '\(banned)' — no new dependency, no network, no dynamic load")
         }
     }
