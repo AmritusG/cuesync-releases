@@ -179,3 +179,36 @@ the software renderer before touching anything else.** GL-over-remote is the sin
 `GSK_RENDERER=cairo` is a one-line, framework-native, always-available workaround. Read the *environment*
 (remote-desktop tooling on the desktop, VM chrome, session type) as evidence — it is as diagnostic as the
 window title.
+
+## When N blind rounds all yield byte-identical probes, ship the instrument, not round N+1's guess (CUESYNC-9, round 5)
+
+Rounds 1–4 each shipped one Windows-only fix reasoned purely from source (main-loop drain, GLib
+priority, DLL bundling, `GSK_RENDERER=cairo`) and each came back with a **byte-identical**
+`before.png`/`after.png`. Round 4's cairo fix did move the needle — a real GTK window (with a
+GTK-drawn close button) now paints where before there was only the launcher console — but the window
+renders **empty + size-collapsed** and input is dead. That combination is the tell that **you have
+two symptoms, not one**: an empty/collapsed *render* is not something pure input-starvation can
+produce (starvation freezes a fully-painted UI). So the remaining causes fork — main-loop starvation
+(A) vs. a runtime font/DPI/renderer layout collapse (B) — and they need **different** fixes.
+
+The lesson: **when you cannot see the box and every blind fix returns an identical probe, the
+highest-value change is not another candidate fix — it is the missing measurement.** Here that was
+`CueSync.exe`'s own `stderr`, which every prior round *named* as decisive and then deferred as
+"Windows C interop I can't compile-check." Discharge that objection instead of inheriting it:
+
+- Redirect `stderr` to a log file next to the exe at `App.init()` (before the GLib loop starts), so a
+  `/SUBSYSTEM:WINDOWS` (console-less) app still retains GTK/GLib/Pango/GSK diagnostics. GTK
+  WARNING/CRITICAL go to `stderr` by default — no `G_MESSAGES_DEBUG` needed.
+- Keep it compile-checkable on your own box: use **only ISO-C `freopen`/`setvbuf`/`fputs` + Foundation
+  `URL`**, compile the redirect body on every platform and guard only the *call site* with
+  `#if os(Windows)`, so `Darwin` type-checks the exact shipped call. Settle the one Windows-only
+  unknown (does `stderr` exist in Swift's Windows module?) from **code already proven to compile on
+  the Windows runner** — swift-cross-ui's `WinUIBackend/Console.swift` uses `freopen_s(_,_,_,stderr)`
+  — not from memory.
+- Write the log **next to the exe** and hand the box/gate owner an explicit decision tree: no
+  log/banner ⇒ the exe never ran (packaging/launch); `Pango`/font lines ⇒ font-collapse; `GSK`/GL
+  lines ⇒ renderer; clean log + empty window ⇒ starvation confirmed. Then round N+1 fixes a *named*
+  cause instead of guessing. CUESYNC-9 §0.4, `CueSync/CueSync/UI/CueSyncApp.swift`.
+
+Generalized: **a fix you cannot verify is a guess; after two of them miss, stop guessing and
+instrument.** One well-placed, compile-safe log redirect is worth more than a fifth plausible patch.

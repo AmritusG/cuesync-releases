@@ -1,5 +1,83 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.4 — ROUND 5 (2026-07-19, this session): stop guessing — capture CueSync.exe's own stderr, the one datum every prior round named decisive and deferred
+
+> This is the fifth CUESYNC-9 round, and it deliberately BREAKS the pattern of rounds 1–4: each
+> shipped a single Windows-only source/config fix reasoned from source alone, and each produced a
+> **byte-identical** `before.png`/`after.png` because nobody on a macOS box could see *why* the box
+> fails. Round 5 ships **no** new blind swift-cross-ui patch. It ships the instrument — the exact
+> datum §0, §0.1, §0.2 and §0.3 each ended by naming as the decisive next step and then punting:
+> **`CueSync.exe`'s own `stderr`**, suppressed because the app links `/SUBSYSTEM:WINDOWS` (no console).
+
+**What the current gate feedback actually tells us (progress, then the real remaining fork).** The
+gate now reports "a REAL mouse click on the window's own **(GTK-drawn) close button** did not
+terminate the app … renders, ignores the mouse," with `changed_ratio=0` on the centre click. That a
+*GTK-drawn* window with a close button is now on screen means **round 4's `GSK_RENDERER=cairo` fix
+moved the needle**: the "no window / only the `cmd.exe` launcher" state of §0.3 is gone — a real
+CueSync GTK window now paints. The current `.factory/probe/before.png`/`after.png` (byte-identical)
+show that window: a near-black (`≈RGB(12,12,12)`, CueSync's `#0a0a0f` background) content area with
+**only a vertical scrollbar**, **undersized** (desktop icons visible below/right, well under the
+`.frame(minWidth: 1200, minHeight: 700)` in `CueSync/CueSync/UI/CueSyncApp.swift`). So two symptoms
+coexist: (i) the window **renders essentially empty / layout-collapsed**, and (ii) **input is dead**.
+
+**Why this is not closeable by another input-only patch.** Symptom (i) — an empty, size-collapsed
+render — is **not** a signature pure input-starvation can produce: if the only defect were the
+run-loop stealing the Win32 queue (rounds 1–2's suspect (1)), the **full** UI would paint and then
+freeze, not render blank. Rounds 1–2 already shipped the priority/floor fix for suspect (1) and the
+probe did not move. So at least one of the remaining causes is a **runtime layout/paint** failure
+that a run-loop patch cannot touch, and the two live suspects need **different** fixes:
+- **(A) main-loop starvation** → a `GtkBackend` run-loop fix (stop `RunLoop.main` draining the Win32
+  queue GDK owns; round 2's GLib-priority attempt was too weak / did not move it).
+- **(B) a runtime layout/paint collapse** → app-shell/launch config: Pango/fontconfig finding no
+  usable font (every text widget measures to 0 → tree collapses → empty, sub-min window), or a DPI/
+  scale query returning a degenerate value over the remote session, or the cairo renderer still not
+  actually selected. None of these is a swift-cross-ui source bug.
+
+The **only** cheap, on-box datum that separates (A) from (B) — GTK/GLib/Pango/GSK all print their
+diagnostics to `stderr` — has never been captured, because the shipped exe has no console.
+
+**Round-5 change (one file, app-shell, NOT a swift-cross-ui patch).**
+`CueSync/CueSync/UI/CueSyncApp.swift` gains an `init()` that, `#if os(Windows)`, redirects the
+process `stderr` to `CueSync-startup.log` **next to the executable** (argv[0] dir; CWD fallback),
+unbuffered, and writes a banner (argv + a "CueSync.exe itself launched" marker). `App.main()` runs
+this `init()` **before** `_app.run()` starts GtkBackend's GLib main loop, so GTK's first realize/
+paint — and every warning it emits — lands in the log. GTK/GLib **WARNING/CRITICAL** go to `stderr`
+by default (no `G_MESSAGES_DEBUG` needed), so the payload is captured without extra env.
+
+**How the compile-safety objection that deferred this for 4 rounds is discharged.** Rounds 2–4 each
+refused to add this because "Windows-only C interop this macOS box cannot compile-check." Round 5
+uses **only** ISO-C `freopen`/`setvbuf`/`fputs` plus Foundation `URL`/`CommandLine` — whose
+signatures are **type-checked on macOS via `Darwin`** (the redirect body is compiled on every
+platform; only its *call site* is `#if os(Windows)`). The one Windows-specific unknown — whether the
+`stderr` symbol exists in Swift's Windows module — is settled **from proven-on-CI code**, not guessed:
+swift-cross-ui's own `Sources/WinUIBackend/Console.swift` (compiled on the windows-latest runner)
+calls `freopen_s(&fp, "CONOUT$", "w", stderr)`, so `stderr` is available under `import WinSDK`.
+**Verified in this environment:** `swift build -c release --product CueSync` links CueSync with all
+three checked-in patches applied (interactivity + windows-input + gsk-renderer); the CI macOS
+grep-guard (no forbidden imports / no NS-prefixed symbols under `UI/`) passes on the edited file. No
+NS-prefixed symbol is used (path built with `URL`, not `NSString`).
+
+**The decision tree to read from `CueSync-startup.log` after the next probe (this ENDS the guessing).**
+> **Box / gate owner: retrieve `CueSync-startup.log` from the CueSync.exe directory after the next
+> probe run and attach it. Do NOT author round 6 until it is read.** Then:
+- **No log file, or a log with no banner** → `CueSync.exe` never reached Swift: the probe is
+  screenshotting/clicking the **launcher**, not the app (revives §0.2's premise), OR the exe crashes
+  pre-`init`. Cause is packaging/launch, not the window — hand the runner owner the launch path.
+- **Banner present, then `Pango-*`/`fontconfig`/`couldn't load font` lines** → **(B-fonts)**: text
+  measures to 0, layout collapses. Fix = bundle fonts + point Pango/fontconfig at them (app-shell).
+- **Banner present, then `Gsk`/`GSK`/GL/`renderer` errors** → **(B-renderer)**: cairo not actually in
+  effect / another paint failure. Fix = confirm/force the software renderer earlier.
+- **Banner present, log otherwise clean, window visible-but-empty + dead** → **(A) starvation
+  confirmed**: the real fix is a `GtkBackend` run loop that stops `RunLoop.main` consuming the Win32
+  queue (replace round 2's priority hack with a non-`.default`-mode pump, or equivalent) — now
+  targetable against evidence instead of blind.
+
+**One-suspect discipline (spec step 5).** Round 5 changes exactly one file (`CueSyncApp.swift`),
+touches **no** swift-cross-ui source, adds no dependency, no network, no dynamic load, and no
+`GtkFixed`/absolute positioning. The three prior patches (interactivity, windows-input, gsk-renderer)
+are **retained unchanged** — each remains independently revertable. This round's "suspect" is not a
+cause at all; it is the measurement that will let round 6 name the cause with certainty.
+
 ## §0.3 — ROUND 4 (2026-07-19, this session): the window never paints because GTK's GL renderer can't run over the remote desktop
 
 > This is the fourth CUESYNC-9 round. It KEEPS round 3's decisive machine-read — the current
