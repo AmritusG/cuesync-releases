@@ -346,6 +346,88 @@ final class CUESYNC9NoLinuxOrArmRunnerRegressionTests: XCTestCase {
     }
 }
 
+final class CUESYNC9FindingsRulesOutOtherSuspectsTests: XCTestCase {
+
+    /// spec CUESYNC-9 §3/acceptance: "names one root cause with file:line citations,
+    /// ruling out the other suspects." "Rule out the other two with evidence, not
+    /// vibes." Behavioural check that the findings doc actually disposes of suspect
+    /// (2), not merely mentions it in passing.
+    func testFindingsRulesOutSuspectTwoModalOrInvisibleGrabWithEvidence() throws {
+        let text = try String(contentsOf: RepoPaths9.findings, encoding: .utf8)
+        guard let suspectLine = text.range(of: #"Suspect \(2\)"#, options: .regularExpression) else {
+            XCTFail("specs/CUESYNC-9-findings.md must name suspect (2) — modal/invisible grab")
+            return
+        }
+        let tail = text[suspectLine.lowerBound...].prefix(400)
+        XCTAssertTrue(tail.contains("ruled out"),
+            "specs/CUESYNC-9-findings.md must rule out suspect (2) with evidence near where it is named, " +
+            "not just assert the winning suspect (spec §3: \"rule out the other two with evidence\")")
+    }
+
+    /// Same as above for suspect (3) — window-level flags.
+    func testFindingsRulesOutSuspectThreeWindowLevelFlagsWithEvidence() throws {
+        let text = try String(contentsOf: RepoPaths9.findings, encoding: .utf8)
+        guard let suspectLine = text.range(of: #"Suspect \(3\)"#, options: .regularExpression) else {
+            XCTFail("specs/CUESYNC-9-findings.md must name suspect (3) — window-level flags")
+            return
+        }
+        let tail = text[suspectLine.lowerBound...].prefix(400)
+        XCTAssertTrue(tail.contains("ruled out"),
+            "specs/CUESYNC-9-findings.md must rule out suspect (3) with evidence near where it is named " +
+            "(spec §3: \"rule out the other two with evidence\")")
+    }
+}
+
+final class CUESYNC9WindowsInputPatchReadOnlyScopeTests: XCTestCase {
+
+    /// spec CUESYNC-9 §4/acceptance: "clears the Windows read-only flag first on
+    /// EXACTLY the file(s) it patches." The windows-input patch touches only
+    /// GtkBackend.swift (not Widget.swift, which is the CUESYNC-8 patch's file) —
+    /// the read-only clear on both Windows legs must be scoped to that one file,
+    /// never widened to also cover Widget.swift or a blanket `-Recurse`.
+    func testWindowsInputPatchStepClearsReadOnlyOnExactlyGtkBackendSwiftNotOtherFiles() throws {
+        for jobName in ["windows-build", "windows-test"] {
+            let job = try JobBlocks9.require(jobName)
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows input dispatch"#)
+            XCTAssertTrue(block.contains("GtkBackend.swift"),
+                "\(jobName)'s Windows input-dispatch patch step must clear the read-only flag naming " +
+                "GtkBackend.swift specifically")
+            XCTAssertFalse(block.contains("Widget.swift"),
+                "\(jobName)'s Windows input-dispatch patch step must not touch Widget.swift — that is the " +
+                "CUESYNC-8 interactivity patch's file, out of scope for this step (spec §4: \"exactly the " +
+                "file(s) it patches\")")
+            XCTAssertFalse(block.contains("-Recurse"),
+                "\(jobName)'s read-only clear must target the one named file, not recurse over the checkout")
+        }
+    }
+}
+
+final class CUESYNC9PatchFilePlatformQuirkTests: XCTestCase {
+
+    /// Platform-quirk edge case: `git apply` is sensitive to line-ending corruption,
+    /// and this exact patch is applied on Windows runners (windows-build/windows-test)
+    /// where a checkout-time autocrlf setting could silently rewrite a checked-in LF
+    /// patch to CRLF, breaking `git apply` on precisely the platform this ticket
+    /// targets. The checked-in patch bytes must stay LF-only.
+    func testWindowsInputPatchFileContainsNoCarriageReturns() throws {
+        let data = try Data(contentsOf: RepoPaths9.windowsInputPatch)
+        XCTAssertFalse(data.contains(0x0D),
+            "\(windowsInputPatchRelativePath) must be LF-only (no \\r) — a CRLF-corrupted unified diff can " +
+            "fail `git apply` on the Windows legs this patch exists to fix")
+    }
+
+    /// Empty-input/stub-file edge case: guards against a placeholder patch file that
+    /// satisfies the string-content assertions above via a minimal/degenerate diff
+    /// (e.g. a single near-empty hunk) rather than the real fix.
+    func testWindowsInputPatchFileHasSubstantiveContentNotAnEmptyStub() throws {
+        let patch = try String(contentsOf: RepoPaths9.windowsInputPatch, encoding: .utf8)
+        let lineCount = patch.split(separator: "\n", omittingEmptySubsequences: false).count
+        XCTAssertGreaterThan(lineCount, 20,
+            "\(windowsInputPatchRelativePath) is suspiciously small (\(lineCount) lines) for a real, " +
+            "documented unified diff with rationale comments")
+    }
+}
+
 // MARK: - Helpers (deliberately file-local — see the file header rationale)
 
 private enum RepoPaths9 {
