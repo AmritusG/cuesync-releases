@@ -3911,6 +3911,445 @@ def test_every_checked_in_swift_cross_ui_patch_is_lf_only():
     )
 
 
+# =============================================================================
+# Red-Team adversarial suite — CUESYNC-9 §4 value-CHAIN attacks
+#
+# Everything above pins single functions or the workflow text. This block attacks
+# the *chained* value paths a hostile file actually traverses end-to-end — the legs
+# the existing Swift-execution harness (`_CS_HARNESS`: sk-export / res-export /
+# res-parse only) never wires. Here we RE-PARSE exported ShowKontrol back through the
+# real `ShowKontrolParser`, drive the Serato-GEOB and Rekordbox importers at runtime,
+# and feed one parser's output straight into another's exporter. CUESYNC-9 is what
+# makes every one of these live on Windows (§4: "value-handling paths that were
+# previously unreachable on Windows now actually run, so their existing guards matter
+# *more*").
+#
+# A hostile cue name / coordinate crossing TWO trust boundaries (import -> export, or
+# export -> re-import) is exactly where a single-function guard can look fine yet the
+# composed pipeline still injects a record, shifts a column, or leaks a file. Each
+# test compiles the REAL parsers + exporters into one driver and runs the whole chain;
+# a PASS is a durable regression lock on the *composed* guarantee, a FAIL reproduces a
+# live chained gap (repo rule §E.24: fix the code or retarget the test, never weaken
+# it). Skips (never hard-errors) when no Swift toolchain / source is present, so the
+# pure-Python suite is unaffected.
+#
+# Framing: the driver base64-encodes its whole tab-joined result line (so a hostile
+# name carrying tabs/newlines/NULs can never break the one-line-per-command framing),
+# and any free-form field inside it (export text, XML, a parsed name) is itself
+# base64'd — decode the outer line, split on TAB, `_rt_inner()` the nested fields.
+# =============================================================================
+
+_RT_SOURCE_RELPATHS = [
+    ("CueSync", "CueSync", "Models", "CuePoint.swift"),
+    ("CueSync", "CueSync", "Models", "ParseError.swift"),
+    ("CueSync", "CueSync", "Models", "Track.swift"),
+    ("CueSync", "CueSync", "Models", "Playlist.swift"),
+    ("CueSync", "CueSync", "Models", "CurveType.swift"),
+    ("CueSync", "CueSync", "Parsers", "ResolumeParser.swift"),
+    ("CueSync", "CueSync", "Parsers", "RekordboxParser.swift"),
+    ("CueSync", "CueSync", "Parsers", "SeratoParser.swift"),
+    ("CueSync", "CueSync", "Parsers", "ShowKontrolParser.swift"),
+    ("CueSync", "CueSync", "Exporters", "ShowKontrolExporter.swift"),
+    ("CueSync", "CueSync", "Exporters", "ResolumeExporter.swift"),
+]
+
+# Driver compiled against the real parsers + exporters. One command per line:
+#   skrt <b64name> <startStr>  -> b64("records\treCount\tfields\thasCR\thasLF\tmaxMs\t<b64 sk-text>")
+#         export one cue(name,start) with ShowKontrolExporter, then RE-PARSE the text
+#         through ShowKontrolParser. records = #\r-split records; fields = #comma-columns
+#         of the first record; reCount/maxMs describe the cues the parser reads BACK.
+#   sersk <b64name>            -> b64("cueCount\t<b64 sk-text>")
+#         decode a Serato Markers2 GEOB whose CUE name = <name>, then ShowKontrol-export it.
+#   rbres <b64xml>             -> b64("OK\tcueCount\t<b64 resolume-xml>" | "THREW\t<b64 err>")
+#         Rekordbox-import the XML, then Resolume-export the first track's cues (dur 60).
+#   rbparse <b64xml>           -> b64("OK\ttrackCount\tcueCount\t<b64 firstTrackName>" | "THREW\t<b64 err>")
+_RT_HARNESS_MAIN = r'''
+import Foundation
+
+func b64dec(_ s: String) -> String { guard let d = Data(base64Encoded: s) else { return "" }; return String(decoding: d, as: UTF8.self) }
+func b64enc(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+// Build a minimal well-formed Serato Markers2 payload carrying exactly one CUE entry
+// whose null-terminated UTF-8 name is `name` (position fixed at 5000 ms).
+func seratoBlob(name: String, ms: UInt32 = 5000, index: UInt8 = 1) -> Data {
+    var payload: [UInt8] = [0x00, index,
+        UInt8((ms >> 24) & 0xFF), UInt8((ms >> 16) & 0xFF), UInt8((ms >> 8) & 0xFF), UInt8(ms & 0xFF),
+        0x00, 0xCC, 0x00, 0x00, 0x00]
+    payload += Array(name.utf8); payload.append(0)
+    var s: [UInt8] = [0x01, 0x01]
+    s += Array("CUE".utf8); s.append(0)
+    let len = UInt32(payload.count)
+    s += [UInt8((len >> 24) & 0xFF), UInt8((len >> 16) & 0xFF), UInt8((len >> 8) & 0xFF), UInt8(len & 0xFF)]
+    s += payload
+    return Data(s)
+}
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    switch f[0] {
+    case "skrt":
+        let name = b64dec(f[1]); let start = Double(f[2]) ?? 0
+        let cue = CuePoint(id: "c", start: start, name: name, color: "#fff", yValue: 0, curve: 1, enabled: true)
+        let out = ShowKontrolExporter.generate(cuePoints: [cue]) ?? "<nil>"
+        if out == "<nil>" { print(b64enc("NIL")); break }
+        let records = out.components(separatedBy: "\r")
+        let fields = records[0].components(separatedBy: ",").count
+        let hasCR = out.contains("\r") ? "1" : "0"
+        let hasLF = out.contains("\n") ? "1" : "0"
+        let parsed = try? ShowKontrolParser.parse(content: out)
+        let reCount = parsed?.cuePoints.count ?? -1
+        let reStarts = parsed?.cuePoints.map { $0.start } ?? []
+        let maxStart = reStarts.max() ?? -0.001
+        let maxStartMs = Int((maxStart * 1000).rounded())
+        print(b64enc("\(records.count)\t\(reCount)\t\(fields)\t\(hasCR)\t\(hasLF)\t\(maxStartMs)\t\(b64enc(out))"))
+    case "sersk":
+        let name = b64dec(f[1])
+        let cues = SeratoParser.parseSeratoMarkers2(data: seratoBlob(name: name))
+        guard let c = cues.first else { print(b64enc("0\t")); break }
+        let out = ShowKontrolExporter.generate(cuePoints: [c]) ?? "<nil>"
+        print(b64enc("\(cues.count)\t\(b64enc(out))"))
+    case "rbres":
+        let xml = b64dec(f[1])
+        do {
+            let r = try RekordboxParser.parse(xml: xml)
+            let cues = r.tracks.first?.cuePoints ?? []
+            let out = ResolumeExporter.generate(cuePoints: cues, trackDuration: 60, presetName: "n") ?? "<nil>"
+            print(b64enc("OK\t\(cues.count)\t\(b64enc(out))"))
+        } catch { print(b64enc("THREW\t\(b64enc("\(error)"))")) }
+    case "rbparse":
+        let xml = b64dec(f[1])
+        do {
+            let r = try RekordboxParser.parse(xml: xml)
+            let nm = r.tracks.first?.name ?? ""
+            let cc = r.tracks.first?.cuePoints.count ?? 0
+            print(b64enc("OK\t\(r.tracks.count)\t\(cc)\t\(b64enc(nm))"))
+        } catch { print(b64enc("THREW\t\(b64enc("\(error)"))")) }
+    default: print(b64enc("ERR"))
+    }
+}
+'''
+
+_RT_HARNESS = {"built": False, "bin": None, "err": None}
+
+
+def _rt_sources_or_none():
+    srcs = []
+    for parts in _RT_SOURCE_RELPATHS:
+        p = REPO_ROOT.joinpath(*parts)
+        if not p.is_file():
+            return None
+        srcs.append(str(p))
+    return srcs
+
+
+def _rt_harness_binary():
+    """Compile the real parsers + exporters + driver once. SkipTest (never a hard
+    error) when no Swift toolchain / source is available."""
+    st = _RT_HARNESS
+    if st["built"]:
+        if st["bin"] is None:
+            raise unittest.SkipTest(st["err"])
+        return st["bin"]
+    st["built"] = True
+    srcs = _rt_sources_or_none()
+    if srcs is None:
+        st["err"] = "CueSyncCore parser/exporter sources not found — cannot exercise chains"
+        raise unittest.SkipTest(st["err"])
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        st["err"] = "swiftc not on PATH — skipping Swift value-chain red-team tests"
+        raise unittest.SkipTest(st["err"])
+    workdir = tempfile.mkdtemp(prefix="cuesync9_valuechain_")
+    atexit.register(shutil.rmtree, workdir, True)
+    main_swift = os.path.join(workdir, "main.swift")
+    with open(main_swift, "w", encoding="utf-8") as fh:
+        fh.write(_RT_HARNESS_MAIN)
+    binpath = os.path.join(workdir, "chain")
+    proc = subprocess.run(
+        [swiftc, *srcs, main_swift, "-o", binpath], capture_output=True, text=True
+    )
+    if proc.returncode != 0 or not os.path.exists(binpath):
+        st["err"] = "value-chain harness build failed:\n" + proc.stderr
+        raise unittest.SkipTest(st["err"])
+    st["bin"] = binpath
+    return binpath
+
+
+def _run_rt_batch(commands):
+    """Feed driver commands via stdin; return exactly one decoded (outer) line each."""
+    binpath = _rt_harness_binary()
+    proc = subprocess.run(
+        [binpath], input="\n".join(commands) + "\n", capture_output=True, text=True
+    )
+    assert proc.returncode == 0, "value-chain harness runtime error:\n" + proc.stderr
+    lines = proc.stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    assert len(lines) == len(commands), (
+        "value-chain harness returned %d lines for %d commands (framing broke)"
+        % (len(lines), len(commands))
+    )
+    return [base64.b64decode(o).decode("utf-8") for o in lines]
+
+
+def _rt_inner(field):
+    """Decode a nested-base64 field (export text / XML / parsed name)."""
+    return base64.b64decode(field).decode("utf-8")
+
+
+# A cue name is untrusted (Rekordbox/Serato/Engine DJ/ShowKontrol/Resolume, or a
+# now-typeable Windows field). Every one of these tries to inject a ShowKontrol .cue
+# COLUMN (a comma) or ROW (any newline/record separator the format or a re-importer
+# honours), including the full UAX-14 / CharacterSet.newlines class the project treats
+# as newlines on import.
+_RT_HOSTILE_NAMES = [
+    "clean name",
+    "a,b,c,EXTRA",  # comma = ShowKontrol field separator
+    "row1\rrow2",  # CR = the .cue record separator
+    "row1\nrow2",  # LF
+    "row1\r\nrow2",  # CRLF
+    "x,\r00:00:05:00,00000500,5000,FORGED,TAG,,,,,,",  # a whole forged trailing record
+    "vt\x0bff\x0c",  # U+000B VT / U+000C FF (both in CharacterSet.newlines)
+    "nel\x85ls ps ",  # U+0085 NEL / U+2028 LS / U+2029 PS
+    ",,,,,,,,,,",  # nothing but separators
+]
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 69 (LOCK) — ShowKontrol EXPORT -> real RE-IMPORT round trip. A hostile cue
+# name must survive `ShowKontrolExporter.generate` AND a subsequent
+# `ShowKontrolParser.parse` without ever spawning a phantom record (a row the
+# re-importer reads as an extra cue) or shifting the numeric timecode out of its
+# column. Single-function tests above pin the exporter TEXT; this pins the composed
+# export->reparse guarantee against the actual parser. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_export_reimport_roundtrip_cannot_inject_records_or_shift_columns():
+    outs = _run_rt_batch(["skrt %s 5.0" % _b64(n) for n in _RT_HOSTILE_NAMES])
+    for name, out in zip(_RT_HOSTILE_NAMES, outs):
+        assert out != "NIL", "one enabled cue must still export (name %r)" % name
+        records, re_count, fields, has_cr, has_lf, max_ms, _sk = out.split("\t")
+        assert records == "1", (
+            "spec §4: a single exported cue split into %s CR-records — name %r injected "
+            "a record separator that the .cue format's own CR/LF re-import honours" % (records, name)
+        )
+        assert has_cr == "0" and has_lf == "0", (
+            "name %r leaked a CR/LF into the exported .cue (hasCR=%s hasLF=%s)" % (name, has_cr, has_lf)
+        )
+        assert int(fields) == _SK_FIELD_COUNT, (
+            "ShowKontrol row is %d comma-columns; name %r produced %s — a comma survived "
+            "into the name field and injected extra columns" % (_SK_FIELD_COUNT, name, fields)
+        )
+        assert re_count == "2", (
+            "spec §4: re-parsing the exported .cue yielded %s cues (expected 2 = the one "
+            "data cue + the auto-inserted Start cue). name %r injected a phantom cue on "
+            "real re-import." % (re_count, name)
+        )
+        assert max_ms == "5000", (
+            "spec §4: the cue's 5.000 s position did not round-trip (re-parsed max start "
+            "= %s ms, expected 5000). name %r shifted the numeric timecode into another "
+            "column." % (max_ms, name)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 70 (LOCK) — cross-parser chain: a CUE name decoded from an untrusted Serato
+# Markers2 GEOB flows straight into `ShowKontrolExporter`. The name is raw
+# null-terminated UTF-8 from the file — it can carry a comma or any record separator.
+# The exporter's sanitiser must neutralise it no matter which importer sourced the
+# name. spec §4 (Serato GEOB is an enumerated untrusted source).
+# ---------------------------------------------------------------------------
+
+
+def test_serato_geob_cue_name_cannot_inject_into_showkontrol_export():
+    attacks = [
+        "nasty,cue\r\nINJECT",
+        "a b c",
+        "x,\r00:00:00:00,00000000,0,FORGED,TAG,,,,,,",
+        "plain",
+    ]
+    outs = _run_rt_batch(["sersk %s" % _b64(a) for a in attacks])
+    for a, out in zip(attacks, outs):
+        count, sk_b64 = out.split("\t", 1)
+        assert count == "1", (
+            "the crafted Serato GEOB must decode to exactly one cue (name %r) — got %s" % (a, count)
+        )
+        sk = _rt_inner(sk_b64)
+        assert "\r" not in sk, (
+            "spec §4: a Serato cue name injected a CR record separator into the ShowKontrol "
+            "export (name %r): %r" % (a, sk)
+        )
+        assert "\n" not in sk, "Serato cue name %r leaked a LF into the .cue export" % a
+        assert len(sk.split(",")) == _SK_FIELD_COUNT, (
+            "Serato cue name %r injected extra columns into the .cue export (%d fields)" % (a, len(sk.split(",")))
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 71 (LOCK) — cross-parser chain: hostile POSITION_MARK coordinates from an
+# untrusted Rekordbox XML flow into `ResolumeExporter`. A NaN/Inf/overflow `Start` or
+# an out-of-range colour must never reach the Resolume XML as a non-finite/scientific
+# coordinate or an out-of-1..23 curve. We check the point ATTRIBUTE VALUES precisely
+# (never a whole-document substring scan — "versionInfo" contains "inf"). spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_rekordbox_import_to_resolume_export_never_emits_nonfinite_coords():
+    marks = "".join(
+        '<POSITION_MARK Name="m%d" Start="%s" Red="%s" Green="%s" Blue="%s"/>' % (i, s, r, g, b)
+        for i, (s, r, g, b) in enumerate(
+            [
+                ("nan", "99999", "-40", "abc"),
+                ("inf", "255", "0", "0"),
+                ("1e400", "0", "999", "0"),
+                ("-99", "0", "0", "0"),
+                ("1e18", "0", "0", "0"),
+            ]
+        )
+    )
+    xml_in = (
+        '<?xml version="1.0"?><DJ_PLAYLISTS><COLLECTION>'
+        '<TRACK TrackID="1" Name="t">' + marks + "</TRACK></COLLECTION></DJ_PLAYLISTS>"
+    )
+    out = _run_rt_batch(["rbres %s" % _b64(xml_in)])[0]
+    assert out.startswith("OK\t"), "Rekordbox import chain unexpectedly failed: %r" % out[:120]
+    _ok, count, xml_b64 = out.split("\t")
+    assert count == "5", "expected 5 imported cues, got %s" % count
+    root = ET.fromstring(_rt_inner(xml_b64))
+    points = list(root.iter("point"))
+    assert points, "Resolume export produced no <point> elements"
+    for p in points:
+        cv = int(p.attrib["curve"])
+        assert 1 <= cv <= 23, "curve %d escaped the 1..23 clamp on the import->export chain" % cv
+        for axis in ("x", "y"):
+            v = p.attrib[axis]
+            assert _PLAIN_DECIMAL_RE.fullmatch(v), (
+                "spec §4: a hostile Rekordbox Start leaked a non-finite/scientific %s=%r into "
+                "the Resolume XML across the import->export chain" % (axis, v)
+            )
+            assert 0.0 <= float(v) <= 1.0, "coordinate %s=%s outside [0,1] after the chain" % (axis, v)
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 72 (LOCK on Darwin) — the Rekordbox XML importer (the port's PRIMARY hostile
+# XML source) must not resolve an external SYSTEM entity (XXE local-file read / SSRF).
+# ATTACK 66 exercised this for ResolumeParser at runtime; this runs the identical
+# probe through the SECOND, larger XML parser. A runtime-created secret referenced via
+# a SYSTEM entity in a TRACK Name must never surface in the parsed track name. The
+# source-grep ATTACK 67 pins that `shouldResolveExternalEntities = false` is set on
+# both; this proves the runtime behaviour. spec §4 (§4: Rekordbox XML is untrusted).
+# ---------------------------------------------------------------------------
+
+
+def test_rekordbox_xml_importer_does_not_resolve_external_entities():
+    secret_dir = tempfile.mkdtemp(prefix="cuesync9_rbxxe_")
+    atexit.register(shutil.rmtree, secret_dir, True)
+    secret_path = os.path.join(secret_dir, "secret.txt")
+    token = "TOPSECRET_RB_XXE_5c1d9a"
+    with open(secret_path, "w", encoding="utf-8") as fh:
+        fh.write(token)
+    uri = "file://" + secret_path.replace("\\", "/")
+    xxe = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE DJ_PLAYLISTS [ <!ENTITY xxe SYSTEM "%s"> ]>\n'
+        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&xxe;"/></COLLECTION></DJ_PLAYLISTS>' % uri
+    )
+    out = _run_rt_batch(["rbparse %s" % _b64(xxe)])[0]
+    # Safe either way: the parser rejects the DTD outright, OR it parses but leaves the
+    # external entity unresolved. What it must NOT do is inline the file's contents.
+    if out.startswith("OK\t"):
+        _ok, _tc, _cc, name_b64 = out.split("\t")
+        name = _rt_inner(name_b64)
+        assert token not in name, (
+            "XXE: RekordboxParser resolved an external SYSTEM entity and leaked local file "
+            "contents into the parsed track name: %r" % name
+        )
+    else:
+        assert out.startswith("THREW\t"), "unexpected rbparse result: %r" % out[:120]
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 73 (LOCK on Darwin) — internal-entity expansion bomb ("billion laughs").
+# `shouldResolveExternalEntities = false` disables EXTERNAL entities only; it does NOT
+# bound INTERNAL general-entity expansion, a distinct DoS. Both XML importers must
+# refuse to expand a nested-entity bomb into a multi-megabyte value — either reject the
+# document or leave the reference unexpanded — never inline the exponential blow-up.
+# Bounded to ~1e7 chars if unprotected so the test itself can't OOM. spec §4
+# (resource exhaustion / unbounded input on the divergent libxml2 path this port targets).
+# ---------------------------------------------------------------------------
+
+
+def test_xml_importers_do_not_expand_internal_entity_bombs():
+    ents = '<!ENTITY a0 "AAAAAAAAAA">'
+    for i in range(1, 8):
+        ents += '<!ENTITY a%d "%s">' % (i, ("&a%d;" % (i - 1)) * 10)
+    big_run = "A" * 5000  # a genuine expansion would contain a run far longer than this
+
+    rb_bomb = (
+        '<?xml version="1.0"?><!DOCTYPE DJ_PLAYLISTS [ %s ]>'
+        '<DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="&a7;"/></COLLECTION></DJ_PLAYLISTS>' % ents
+    )
+    rb_out = _run_rt_batch(["rbparse %s" % _b64(rb_bomb)])[0]
+    if rb_out.startswith("OK\t"):
+        name = _rt_inner(rb_out.split("\t")[3])
+        assert big_run not in name and len(name) < 200_000, (
+            "billion-laughs: RekordboxParser expanded a nested internal entity into a "
+            "%d-char track name — an unbounded-expansion DoS" % len(name)
+        )
+    else:
+        assert rb_out.startswith("THREW\t"), "unexpected rbparse result: %r" % rb_out[:120]
+
+    # Resolume importer via the existing value-path harness (its `parse` returns the
+    # presetName): the same bomb targeted at the preset name attribute.
+    res_bomb = (
+        '<?xml version="1.0"?><!DOCTYPE Preset [ %s ]>'
+        '<Preset name="&a7;"><point x="0" y="0" curve="1"/><point x="1" y="0" curve="1"/></Preset>' % ents
+    )
+    res_out = _run_cs_batch(["parse %s" % _b64(res_bomb)])[0]
+    assert big_run not in res_out and len(res_out) < 200_000, (
+        "billion-laughs: ResolumeParser expanded a nested internal entity into a "
+        "%d-char result — an unbounded-expansion DoS" % len(res_out)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 74 (LOCK) — ShowKontrol EXPORT -> real RE-IMPORT with a hostile NUMERIC start
+# (NaN / Inf / overflow / negative from a corrupt project or parser). The exported
+# timecode must be finite and well-formed, AND the value the re-importer reads back
+# must stay finite, non-negative, and inside the exporter's 100-hour clamp. This
+# composes `secondsToTimecode` with `ShowKontrolParser` — the round trip, not just the
+# emitted text (ATTACK 62 pins the text alone). spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
+    starts = ["nan", "inf", "-inf", "1e308", "1e400", "1e18", "-5", "359999", "5.0", "0"]
+    outs = _run_rt_batch(["skrt %s %s" % (_b64("nm"), _numarg(s)) for s in starts])
+    for s, out in zip(starts, outs):
+        assert out != "NIL", "one enabled cue must still export (start %r)" % s
+        records, re_count, fields, has_cr, has_lf, max_ms, sk_b64 = out.split("\t")
+        # Re-import stays finite / non-negative / within the 100h clamp.
+        assert 0 <= int(max_ms) <= 359_999_000, (
+            "spec §4: hostile start %r round-tripped to %s ms on re-import — outside the "
+            "[0, 359_999_000] clamp (a non-finite/overflowing start escaped)" % (s, max_ms)
+        )
+        assert 1 <= int(re_count) <= 2, (
+            "hostile start %r yielded %s re-parsed cues (expected 1 or 2)" % (s, re_count)
+        )
+        # The emitted timecode is well-formed and never a nan/inf token.
+        sk = _rt_inner(sk_b64)
+        timecode = sk.split(",")[0]
+        assert _TC_RE.fullmatch(timecode), (
+            "start %r produced a malformed .cue timecode %r" % (s, timecode)
+        )
+        low = sk.lower()
+        assert "nan" not in low and "inf" not in low, (
+            "start %r leaked a non-finite token into the round-tripped .cue: %r" % (s, sk)
+        )
+        assert has_cr == "0" and has_lf == "0", "start %r perturbed the record framing" % s
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
