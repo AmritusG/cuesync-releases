@@ -3871,6 +3871,47 @@ def test_xml_parsers_explicitly_disable_external_entity_resolution():
 
 
 # ---------------------------------------------------------------------------
+# ATTACK 68 (platform quirk / no-regression) — EVERY checked-in swift-cross-ui
+# patch, not just the two CUESYNC-9 added, must be LF-only. The Swift suite
+# added a `contains(0x0D)` CRLF guard for the windows-input and
+# windows-gsk-renderer patches (CUESYNC9PatchFilePlatformQuirkTests /
+# CUESYNC9GskRendererPatchFileTests) because `git apply` is sensitive to
+# line-ending corruption and both patches apply on the Windows runners this
+# ticket targets. Neither that suite nor this one ever wrote the same guard for
+# the FIRST patch in the apply order — the CUESYNC-8 gtk-interactivity patch —
+# even though it applies on the identical two Windows legs, ahead of the other
+# two (scripts/patch-swift-cross-ui.sh and swift-windows.yml both apply
+# interactivity -> windows-input -> gsk-renderer). A CRLF-corrupted
+# interactivity patch (e.g. from a careless checkout/editor `autocrlf` setting)
+# would fail `git apply` before the other two patches are even attempted,
+# breaking all three Windows-touching legs — a gap this ticket's own
+# no-regression requirement ("CUESYNC-8 interactivity patch is unchanged")
+# should have caught. Parametrised over all three patch files (pytest style)
+# instead of one test per file, since the assertion and rationale are identical.
+# ---------------------------------------------------------------------------
+
+
+def test_every_checked_in_swift_cross_ui_patch_is_lf_only():
+    patches = {
+        GESTURE_PATCH_NAME: PATCH_PATH,
+        WINDOWS_INPUT_PATCH_NAME: WINDOWS_INPUT_PATCH_PATH,
+        WINDOWS_GSK_PATCH_NAME: WINDOWS_GSK_PATCH_PATH,
+    }
+    offenders = []
+    for name, path in patches.items():
+        if not path.is_file():
+            raise unittest.SkipTest("%s not present in this checkout" % name)
+        if b"\r" in path.read_bytes():
+            offenders.append(name)
+    assert not offenders, (
+        "these checked-in swift-cross-ui patch(es) contain a carriage return "
+        "(CRLF-corrupted): %s. Every patch here is applied via `git apply` on "
+        "windows-build/windows-test — a CRLF-rewritten LF patch fails to apply "
+        "on exactly the platform these patches exist to fix." % ", ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
 

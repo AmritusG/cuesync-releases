@@ -1,5 +1,85 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.6 — ROUND 7 (2026-07-19): the round-6 log came back branch (A); stop pumping `RunLoop.main` on Windows entirely
+
+> This is the seventh CUESYNC-9 round and the first **evidence-driven** input patch — it acts on
+> the datum round 5 captured and round 6 finally routed to a channel the gate returns
+> (`<repo>/.factory/probe/CueSync-startup.log`). Round 7 is committed as `c8d1d1b`
+> (`patches/swift-cross-ui-0.8.0-windows-input.patch`, rewritten; `scripts/patch-swift-cross-ui.sh`,
+> pristine-reset added). This section documents that shipped fix — the doc had recorded round 6
+> (which shipped no input patch) as the latest, leaving round 7 undocumented here.
+
+**The round-6 startup log, per round 7's commit body / patch header, resolved the (A)/(B) fork to
+(A).** The log showed: the `CueSync.exe`-launched banner **present** (so the exe reached Swift
+`App.init()` — not a packaging/loader failure), **zero** `Pango-*`/`fontconfig`/`couldn't load font`
+lines (rules out **B-fonts**), **zero** `Gsk`/`GSK`/GL/`renderer` error lines (rules out
+**B-renderer**), and a **real, full-size** window that is nonetheless click-dead. Per the round-5/6
+decision trees, banner-present + clean-of-font-and-renderer-lines + window-real-but-inert is exactly
+**(A) main-loop starvation confirmed** — pure Win32-message-queue theft, no paint/layout defect.
+
+> **Evidence-provenance caveat (honest).** The `.factory/probe/` payload (including
+> `CueSync-startup.log`) is gitignored and is **not** retained in this repo, so the branch-(A)
+> reading above is recorded from round 7's commit message and the patch header, **not**
+> independently re-auditable from the checked-in tree. It is treated as the working evidence because
+> round 6 was engineered specifically to deliver that log and round 7's description is specific and
+> consistent with §0.5's decision tree — but if a future round finds the probe still dead, re-pull
+> the actual log before trusting this classification.
+
+**Root cause (unchanged from §2.5/§3, now the *confirmed* one of the two live suspects): suspect
+(1), the run-loop tickler.** `GtkBackend.mainRunLoopTicklingLoop` (upstream PR #141, added so
+`@MainActor`/`DispatchQueue.main` work off-Apple) ticks Foundation's `RunLoop.main` on every
+non-macOS platform. swift-corelibs-foundation binds `RunLoop.main` to this thread's Win32 message
+queue (`_CFRunLoopSetWindowsMessageQueueMask(_, QS_ALLINPUT, ...)`), and every `.default`-mode pass
+runs CoreFoundation's `PeekMessage(NULL, …, PM_REMOVE)`/`DispatchMessage` drain — a second,
+uncoordinated consumer of the ONE queue GDK's win32 backend needs for mouse/keyboard/close input.
+Two consumers, one queue: Foundation eats the input; GTK renders a window that never feels a click.
+
+**Why rounds 1–2 (priority + floor) could not close it, and round 7's mechanism.** Lowering the
+tickler to `G_PRIORITY_DEFAULT_IDLE` (200) below GDK's event (0)/redraw (120) sources makes the
+theft *rarer*, not impossible: in any iteration where GDK has nothing ready, the tickler still runs
+a `.default`-mode `RunLoop.main` pass, and that pass *itself* PeekMessage-drains the queue. You
+cannot out-prioritize a competitor you keep inviting to run. Round 7's structural fix: on Windows,
+**never tick `RunLoop.main`**. PR #141's actual requirement is only that `@MainActor`/
+`DispatchQueue.main` jobs run — on non-Darwin that means draining **libdispatch's** main queue — so
+the tickler calls libdispatch's own CoreFoundation-integration hook
+`_dispatch_main_queue_callback_4CF` directly (`@_silgen_name`, `#if os(Windows)` only) after a
+non-blocking GLib `g_main_context_iteration` drain. Foundation then never touches the Win32 queue;
+GDK is its sole owner. The `G_PRIORITY_DEFAULT_IDLE` + 8 ms floor stay as belt-and-suspenders.
+**Accepted cost** (grep-verified absent from both swift-cross-ui and CueSync): Foundation `Timer` /
+`RunLoop.main.perform` work scheduled on `RunLoop.main` will not fire on Windows — GLib timeouts are
+this backend's timing mechanism.
+
+**Second, unrelated defect round 7's commit also fixed: the box never ran the apply script.** Rounds
+1–5 were judged against a **stale** checkout because nothing on the box invoked
+`scripts/patch-swift-cross-ui.sh` — an evolving patch file (CUESYNC-9 went through seven revisions)
+was landing on a checkout still carrying an older revision. Round 7 made the script **reset the
+checkout to pristine** and reapply everything (gulong/gsize LLP64 fixes + all three patches)
+deterministically each run; a companion Factory change wires a prepare step into the
+ci-local/click-probe gates so the script actually runs before the probe builds.
+
+**Machine-verifiable state as of this audit (macOS, against the resolved checkout at the pinned
+`a6d2063`):** all three patches apply cleanly in order to a pristine checkout; the patched
+`GtkBackend.swift` compiles/links in the `CueSync` GtkBackend build on macOS (the `#if os(Windows)`
+block is excluded there, so this proves the file is well-formed and the non-Windows path unbroken,
+**not** the Windows runtime behaviour); all 470 XCTest + 76 Python adversarial tests green; the input
+patch step is wired on all three legs after resolve/interactivity and before build/test. What this
+box **cannot** prove is the live Windows outcome — the click-probe gate on the box remains the only
+instrument that can, and it has not been re-run against round 7 in a form returned to this tree.
+
+**Round-8 decision tree (if the probe is still click-dead against round 7).** Not another blind
+priority tweak — the two remaining possibilities are distinct and evidence-separable:
+- **`_dispatch_main_queue_callback_4CF` does not actually service the main queue on Windows** (the
+  symbol no-ops, asserts, or the queue was never bound because CF never ran) → `.task { }`/`@MainActor`
+  work silently never runs. Tell: the app launches but preference-load / any `.task` side effect never
+  fires (add a one-line banner to the startup log from inside a `.task` and check the returned log).
+  If so, the direct-drain hook is the wrong primitive and the durable answer is below.
+- **The theft was never the whole story / GtkBackend-on-Windows input is structurally unmaintained.**
+  §0.5 established that *every* post-v0.8.0 Windows commit upstream targets **WinUIBackend**, not
+  GtkBackend — upstream actively maintains its native Windows backend and leaves GtkBackend-on-Windows
+  input unmaintained. If round 7's structural fix still returns a byte-identical probe, the durable fix
+  is likely a **backend decision** (WinUIBackend), not a further GtkBackend patch — out of this agent's
+  view-layer lane, flagged here for whoever owns the port strategy, exactly as §0.5 flagged it.
+
 ## §0.5 — ROUND 6 (2026-07-19, this session): round 5's measurement was RIGHT but delivered to a dead channel — route it back, don't guess again
 
 > This is the sixth CUESYNC-9 round. It ships **no** new swift-cross-ui input patch. Round 5's

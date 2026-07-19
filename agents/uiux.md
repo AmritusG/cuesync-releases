@@ -100,26 +100,35 @@ only a scroll-bar, no header/buttons/accents, undersized below the requested 120
 render *and* dead input together are one defect, not two: GDK was starved of the single thread
 message queue that drives both its win32 event delivery and its frame-clock repaint.
 
-The fix (`patches/swift-cross-ui-0.8.0-windows-input.patch`) keeps ticking `RunLoop.main` (PR
-#141's fix must not regress) but makes GDK win the queue *structurally* rather than by luck, all
-`#if os(Windows)`: it schedules the tickler's `g_timeout_add_full` at `G_PRIORITY_DEFAULT_IDLE`
-(200) — below `GDK_PRIORITY_EVENTS` (0) and `GDK_PRIORITY_REDRAW` (120), so GLib skips the tickler
-in any main-loop iteration where GDK has a pending input message or a queued repaint — floors the
-reschedule at 8 ms so it can never busy-loop at 0 ms and wake the context every iteration, and
-still drains GLib's default `GMainContext` first each tick. (Round 1 shipped only that last drain
-and did not move the probe: a one-shot drain can't overcome a *same-priority* tickler that re-arms
-at 0 ms — the generalizable trap is that on Windows `RunLoop.main` is bound to the Win32 message
-queue, so anything pumping it competes with GDK for the same queue; lower it below GDK's sources,
-don't just race it.) Kept as a separate patch file from CUESYNC-8's `can-target` fix, since the two
-are unrelated root causes at different layers (widget-picking vs. main-loop/event-source
-integration) that happen to share the same dependency.
+The fix went through two mechanisms, and the difference is the lesson. **Rounds 1–2** kept
+ticking `RunLoop.main` (PR #141's fix must not regress) but tried to make GDK win the queue by
+*priority*, all `#if os(Windows)`: schedule the tickler's `g_timeout_add_full` at
+`G_PRIORITY_DEFAULT_IDLE` (200) — below `GDK_PRIORITY_EVENTS` (0) and `GDK_PRIORITY_REDRAW` (120) —
+floor its reschedule at 8 ms so it can never busy-loop at 0 ms, and drain GLib's default
+`GMainContext` first each tick. The probe did not move: lowering priority makes the theft *rarer*,
+not impossible — in any iteration where GDK has nothing ready, the tickler still runs a
+`.default`-mode `RunLoop.main` pass, and *that pass itself* `PeekMessage(NULL, …, PM_REMOVE)`-drains
+the one Win32 queue GDK owns. You cannot out-prioritize a competitor you keep inviting to run.
+**Round 7** (the shipped `patches/swift-cross-ui-0.8.0-windows-input.patch`) is the structural fix:
+on Windows, *never* tick `RunLoop.main` at all. PR #141's real requirement is only that
+`@MainActor`/`DispatchQueue.main` jobs run — which on non-Darwin means draining libdispatch's main
+queue — so the tickler calls libdispatch's own CoreFoundation-integration hook
+`_dispatch_main_queue_callback_4CF` directly (via `@_silgen_name`) instead of routing through
+Foundation's run loop. Foundation then never touches the Win32 queue and GDK is its sole owner; the
+GLib drain plus the priority/floor stay as belt-and-suspenders. (Accepted cost, grep-verified absent
+from swift-cross-ui and CueSync: Foundation `Timer`/`RunLoop.main.perform` work will not fire on
+Windows.) Kept as a separate patch file from CUESYNC-8's `can-target` fix, since the two are
+unrelated root causes at different layers (widget-picking vs. main-loop/event-source integration)
+that share one dependency.
 
 **Generalized addition to the rule above:** when a GTK window on Windows both paints nothing and
 ignores input, suspect the *main loop*, not the renderer or the widgets — specifically any second
-consumer of the thread's Win32 message queue (Foundation's `RunLoop.main` is one, bound via
-`_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`). GLib source **priority** is the lever: GDK's
-event (0) and redraw (120) sources must out-prioritize whatever else pumps the queue, or GDK
-starves of both input and repaint at once.
+consumer of the thread's Win32 message queue. Foundation's `RunLoop.main` is one, bound via
+`_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`; *every* `.default`-mode pass `PeekMessage`-drains
+that queue. GLib source **priority** lowers the collision rate but cannot eliminate it while you keep
+pumping the run loop at all — the durable answer is to stop pumping `RunLoop.main` on Windows
+entirely and service `DispatchQueue.main`/`@MainActor` through libdispatch directly, leaving GDK the
+queue's only owner. (Not yet machine-confirmed on the box — see `specs/CUESYNC-9-findings.md` §0.6.)
 
 ## Before you debug input, prove the window is even yours (CUESYNC-9, round 3)
 

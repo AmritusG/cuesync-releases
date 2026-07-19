@@ -438,6 +438,26 @@ final class CUESYNC9PatchFilePlatformQuirkTests: XCTestCase {
             "\(windowsInputPatchRelativePath) is suspiciously small (\(lineCount) lines) for a real, " +
             "documented unified diff with rationale comments")
     }
+
+    /// Platform-quirk edge case, extended to the FIRST patch in the apply order.
+    /// The windows-input and windows-gsk-renderer patches (this class and
+    /// CUESYNC9GskRendererPatchFileTests) both guard against CRLF corruption, but
+    /// neither this suite nor CUESYNC8GtkInteractivityWorkflowTests ever wrote the
+    /// same guard for the CUESYNC-8 gtk-interactivity patch — even though it applies
+    /// on the identical two Windows legs, and applies FIRST (interactivity ->
+    /// windows-input -> gsk-renderer, per scripts/patch-swift-cross-ui.sh and
+    /// swift-windows.yml). A CRLF-corrupted interactivity patch would fail `git
+    /// apply` before the other two are even attempted, breaking every
+    /// GtkBackend-compiling leg — exactly the failure mode this ticket's own
+    /// no-regression requirement ("the CUESYNC-8 interactivity patch is unchanged")
+    /// exists to catch.
+    func testCUESYNC8InteractivityPatchFileContainsNoCarriageReturns() throws {
+        let data = try Data(contentsOf: RepoPaths9.interactivityPatch)
+        XCTAssertFalse(data.contains(0x0D),
+            "\(interactivityPatchRelativePath) must be LF-only (no \\r) — a CRLF-corrupted unified diff " +
+            "would fail `git apply` on the Windows legs, ahead of the windows-input and gsk-renderer " +
+            "patches this suite already guards")
+    }
 }
 
 // MARK: - Helpers (deliberately file-local — see the file header rationale)
