@@ -3396,6 +3396,474 @@ def test_all_three_patches_apply_cleanly_in_the_real_ci_sequence_gesture_then_in
     )
 
 
+# =============================================================================
+# CUESYNC-9 Red-Team — the now-LIVE untrusted VALUE paths (exporters + XML import)
+#
+# Spec CUESYNC-9 §4 threat model: "making the *whole* UI live means value-handling
+# paths that were previously unreachable on Windows now actually run, so their
+# existing guards matter *more*." The suite above locks the FILENAME boundary
+# (slugify) and the scalar field guards (StepperField.isFinite, CuePoint.sanitized).
+# These attacks target the two trust boundaries that had ZERO Python-runtime
+# coverage: the bytes the exporters EMIT from an untrusted cue/preset name
+# (Resolume XML, ShowKontrol .cue) and the bytes the Resolume XML importer INGESTS.
+# Every one of those values originates from a hostile file the §4 model enumerates
+# (Rekordbox XML, Serato GEOB, Engine DJ SQLite, ShowKontrol/Resolume) or from a
+# text field that CUESYNC-8/9 just made typeable on Windows.
+#
+# Each test compiles the REAL shared source (CuePoint + ParseError + the two
+# Exporters + ResolumeParser) into a batched driver and drives adversarial input
+# through it — the logic under test is never mocked. Tests that PASS are durable
+# regression locks on a §4 guarantee; tests that FAIL reproduce a live, un-mitigated
+# gap (per repo rule §E.24: fix the code or retarget the test, never weaken it).
+# Skips (never hard-errors) when no Swift toolchain / source is present.
+# =============================================================================
+
+import xml.etree.ElementTree as ET  # noqa: E402  (section-local, stdlib)
+
+_CS_SOURCE_RELPATHS = [
+    ("CueSync", "CueSync", "Models", "CuePoint.swift"),
+    ("CueSync", "CueSync", "Models", "ParseError.swift"),
+    ("CueSync", "CueSync", "Exporters", "ResolumeExporter.swift"),
+    ("CueSync", "CueSync", "Exporters", "ShowKontrolExporter.swift"),
+    ("CueSync", "CueSync", "Parsers", "ResolumeParser.swift"),
+]
+
+# ShowKontrol row: formatted , compact , ms , name , TAG , then 6 trailing empties.
+_SK_FIELD_COUNT = 11
+_TC_RE = re.compile(r"^\d{2}:\d{2}:\d{2}:\d{2}$")
+_PLAIN_DECIMAL_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+# Batched driver compiled against the real exporters/parser. One command per line,
+# one base64'd result line each (base64 both ways keeps the framing intact even when
+# a hostile name contains newlines / NULs / the field separator itself):
+#   sk    <b64name> <startStr>                         -> b64(ShowKontrol .cue text)
+#   res   <b64presetName> <startStr> <curveStr> <durStr> -> b64(Resolume XML)
+#   parse <b64xml>                                       -> b64("OK\t<name>\t<n>" | "THREW\t<e>")
+_CS_HARNESS_MAIN = r"""
+import Foundation
+
+func b64dec(_ s: String) -> String {
+    guard let d = Data(base64Encoded: s) else { return "" }
+    return String(decoding: d, as: UTF8.self)
+}
+func b64enc(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+func makeCue(name: String, start: Double, curve: Int) -> CuePoint {
+    CuePoint(id: "cue", start: start, name: name, color: "#1ed760",
+             yValue: 50, curve: curve, enabled: true)
+}
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    switch f[0] {
+    case "sk":
+        let name = b64dec(f[1])
+        let start = Double(f[2]) ?? 0
+        let cue = makeCue(name: name, start: start, curve: 1)
+        print(b64enc(ShowKontrolExporter.generate(cuePoints: [cue]) ?? "<nil>"))
+    case "res":
+        let presetName = b64dec(f[1])
+        let start = Double(f[2]) ?? 0
+        let curve = Int(f[3]) ?? 1
+        let dur = Double(f[4]) ?? 10
+        let cue = makeCue(name: "pt", start: start, curve: curve)
+        print(b64enc(ResolumeExporter.generate(cuePoints: [cue], trackDuration: dur,
+                                               presetName: presetName) ?? "<nil>"))
+    case "parse":
+        let xml = b64dec(f[1])
+        do {
+            let r = try ResolumeParser.parse(xml: xml)
+            print(b64enc("OK\t\(r.presetName)\t\(r.points.count)"))
+        } catch {
+            print(b64enc("THREW\t\(error)"))
+        }
+    default:
+        print(b64enc("ERR"))
+    }
+}
+"""
+
+_CS_HARNESS = {"built": False, "bin": None, "err": None}
+
+
+def _cs_sources_or_none():
+    srcs = []
+    for parts in _CS_SOURCE_RELPATHS:
+        p = REPO_ROOT.joinpath(*parts)
+        if not p.is_file():
+            return None
+        srcs.append(str(p))
+    return srcs
+
+
+def _cs_harness_binary():
+    """Compile CuePoint + ParseError + both exporters + ResolumeParser + driver once.
+
+    Raises unittest.SkipTest (never a hard error) when no Swift toolchain / source is
+    available, so the pure-Python suite is unaffected.
+    """
+    st = _CS_HARNESS
+    if st["built"]:
+        if st["bin"] is None:
+            raise unittest.SkipTest(st["err"])
+        return st["bin"]
+    st["built"] = True
+    srcs = _cs_sources_or_none()
+    if srcs is None:
+        st["err"] = "CueSyncCore exporter/parser sources not found — cannot exercise them"
+        raise unittest.SkipTest(st["err"])
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        st["err"] = "swiftc not on PATH — skipping Swift-execution red-team tests"
+        raise unittest.SkipTest(st["err"])
+    workdir = tempfile.mkdtemp(prefix="cuesync9_value_redteam_")
+    atexit.register(shutil.rmtree, workdir, True)
+    main_swift = os.path.join(workdir, "main.swift")
+    with open(main_swift, "w", encoding="utf-8") as fh:
+        fh.write(_CS_HARNESS_MAIN)
+    binpath = os.path.join(workdir, "harness")
+    proc = subprocess.run(
+        [swiftc, *srcs, main_swift, "-o", binpath],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not os.path.exists(binpath):
+        st["err"] = "value-path harness build failed:\n" + proc.stderr
+        raise unittest.SkipTest(st["err"])
+    st["bin"] = binpath
+    return binpath
+
+
+def _run_cs_batch(commands):
+    """Feed driver commands via stdin; return exactly one decoded output line each."""
+    binpath = _cs_harness_binary()
+    proc = subprocess.run(
+        [binpath],
+        input="\n".join(commands) + "\n",
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, "value-path harness runtime error:\n" + proc.stderr
+    lines = proc.stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    assert len(lines) == len(commands), (
+        "value-path harness returned %d lines for %d commands (framing broke)"
+        % (len(lines), len(commands))
+    )
+    return [base64.b64decode(o).decode("utf-8") for o in lines]
+
+
+def _numarg(v):
+    """A space-free numeric token for the line protocol. A str is passed verbatim to
+    Swift's `Double(_:)` (so callers can send "nan"/"inf"/"-inf"/"1e308"); a number
+    is repr'd."""
+    s = v if isinstance(v, str) else repr(v)
+    assert " " not in s, "numeric protocol arg must be space-free, got %r" % (s,)
+    return s
+
+
+def _strip_swift_line_comments(src):
+    """Drop `// …` tails so a "// should disable X" note can't green a source guard."""
+    out = []
+    for ln in src.splitlines():
+        i = ln.find("//")
+        out.append(ln[:i] if i >= 0 else ln)
+    return "\n".join(out)
+
+
+def _cs_read_source_or_skip(*parts):
+    p = REPO_ROOT.joinpath(*parts)
+    if not p.is_file():
+        raise unittest.SkipTest("source not found: %s" % p)
+    return p.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 60 (LOCK) — ShowKontrol .cue is a comma/CR delimited record format. A
+# hostile cue name (from a parsed file or a now-typeable field) must not be able
+# to inject an extra COLUMN (a comma) or an extra ROW (the format's own CR record
+# separator, or a LF). ShowKontrolExporter.swift's own comment promises exactly
+# this. spec §4 (untrusted values now reach the exporter window-wide on Windows).
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_export_cannot_inject_rows_or_columns_from_a_hostile_cue_name():
+    attacks = [
+        "clean name",
+        "a,b,c,EXTRA,COLUMN",                 # comma = field separator
+        "row1\rrow2",                          # CR = the .cue record separator
+        "row1\nrow2",                          # LF
+        "row1\r\nrow2",                        # CRLF
+        "x,\r00:00:00:00,00000000,0,FORGED,TAG,,,,,,",  # a full forged trailing record
+        ",,,,,,,,,,",                          # nothing but separators
+    ]
+    outs = _run_cs_batch(["sk %s 1.0" % _b64(a) for a in attacks])
+    for a, out in zip(attacks, outs):
+        assert out != "<nil>", "one enabled cue must still export (name %r)" % a
+        assert "\r" not in out, (
+            "spec §4: ShowKontrolExporter split a single cue into %d records — name %r "
+            "injected a CR record separator into the .cue output"
+            % (out.count("\r") + 1, a)
+        )
+        assert "\n" not in out, "name %r leaked a LF into the .cue output" % a
+        fields = out.split(",")
+        assert len(fields) == _SK_FIELD_COUNT, (
+            "ShowKontrol row is %d comma-fields; name %r produced %d — a comma in the "
+            "name injected extra columns" % (_SK_FIELD_COUNT, a, len(fields))
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 61 (LIVE FINDING — expected to FAIL until hardened) — the anti-row-
+# injection strip in ShowKontrolExporter removes only ',', CR and LF. But CR and
+# LF are two of at least SEVEN characters that Unicode line-breaking (UAX #14) and
+# Swift's own CharacterSet.newlines classify as MANDATORY line boundaries:
+#   U+000B VT, U+000C FF, U+0085 NEL, U+2028 LS, U+2029 PS (+ CR, LF).
+# The project ALREADY treats this whole set as newlines — ShowKontrolParser trims
+# `.whitespacesAndNewlines` (which is exactly this set) off every field. So any
+# consumer that splits records with the standard newline set — including an
+# idiomatic `.components(separatedBy: .newlines)` re-import — reads a cue name that
+# embeds U+2028 as TWO rows. The exporter's "a cue name can't inject extra rows"
+# guarantee (its own comment) is incomplete: it denylists 2 of the 7 separators.
+# Fix: normalise the full newline class, not just CR/LF.
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_export_neutralises_every_record_separator_not_just_cr_and_lf():
+    seps = {
+        "U+000B VT": "",
+        "U+000C FF": "",
+        "U+0085 NEL": "",
+        "U+2028 LS": " ",
+        "U+2029 PS": " ",
+    }
+    labels = list(seps.keys())
+    names = ["evil%sINJECTED" % seps[k] for k in labels]
+    outs = _run_cs_batch(["sk %s 1.0" % _b64(n) for n in names])
+    survived = [labels[i] for i, out in enumerate(outs) if seps[labels[i]] in out]
+    assert not survived, (
+        "spec §4 (record injection): ShowKontrolExporter's name sanitiser strips only "
+        "',', CR and LF, so these Unicode/UAX-14 line separators survive verbatim into "
+        "the .cue output and split one cue into multiple records for any consumer using "
+        "the standard newline set — the SAME set the project's own ShowKontrolParser "
+        "trims with `.whitespacesAndNewlines`: %s. Fix: normalise the full newline "
+        "class in the exporter, not just CR/LF." % ", ".join(survived)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 62 (LOCK) — a hostile cue `start` (NaN/Inf/negative/overflow from a
+# corrupt project or parser) must never reach the .cue timecode as "nan"/"inf" or
+# an out-of-range/overflowing value. secondsToTimecode clamps to [0, 359999];
+# this pins that the emitted record is always a well-formed, bounded timecode.
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_timecode_is_bounded_and_wellformed_for_hostile_start_values():
+    attacks = ["nan", "inf", "-inf", "-5", "1e18", "1e308", "359999", "0"]
+    outs = _run_cs_batch(["sk %s %s" % (_b64("Cue"), _numarg(s)) for s in attacks])
+    for s, out in zip(attacks, outs):
+        assert out != "<nil>"
+        fields = out.split(",")
+        assert len(fields) == _SK_FIELD_COUNT
+        formatted, compact, ms = fields[0], fields[1], fields[2]
+        numeric = (formatted + " " + compact + " " + ms).lower()
+        assert "nan" not in numeric and "inf" not in numeric, (
+            "hostile start %r leaked a non-finite token into the .cue timecode: %r"
+            % (s, out)
+        )
+        assert _TC_RE.fullmatch(formatted), (
+            "timecode %r is not HH:MM:SS:FF for start %r" % (formatted, s)
+        )
+        assert 0 <= int(formatted[:2]) <= 99, "hours out of range for start %r" % (s,)
+        assert compact.isdigit() and len(compact) == 8, (
+            "compact timecode %r malformed for start %r" % (compact, s)
+        )
+        assert ms.isdigit(), (
+            "milliseconds field %r is not a non-negative integer (start %r)" % (ms, s)
+        )
+        assert 0 <= int(ms) <= 359_999_000, (
+            "milliseconds %s exceeds the 100h clamp (start %r)" % (ms, s)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 63 (LOCK) — Resolume export is XML: the untrusted preset name lands in an
+# attribute value. An injection attempt (quote/element/CDATA/entity breakout) must
+# be neutralised to plain data, and the document must stay well-formed. We parse
+# the REAL output with a strict XML parser and require the name to round-trip
+# exactly — proving markup was escaped, not interpreted. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_export_neutralises_xml_injection_in_the_preset_name():
+    attacks = [
+        "plain",
+        '"/><Malicious a="',                                    # attribute/quote breakout
+        "']]>",                                                 # CDATA close
+        "A&B<C>D\"E'F",                                         # all five metacharacters
+        'x"/><point x="9" y="9" curve="9"/><Preset name="',    # element injection
+        "&xxe; &amp; &#x41;",                                   # entity-looking text
+        "emoji\U0001f39b️ accént",                        # legal non-ASCII passes through
+    ]
+    outs = _run_cs_batch(["res %s 1.0 1 10" % _b64(a) for a in attacks])
+    for a, out in zip(attacks, outs):
+        assert out != "<nil>"
+        try:
+            root = ET.fromstring(out)
+        except ET.ParseError as e:
+            raise AssertionError(
+                "ResolumeExporter emitted MALFORMED XML for preset name %r: %s\n%s"
+                % (a, e, out[:200])
+            )
+        assert root.tag == "Preset"
+        assert root.attrib.get("name") == a, (
+            "spec §4: preset name did not round-trip — emitted %r, expected %r. The "
+            "escaper mangled or under-escaped the untrusted name."
+            % (root.attrib.get("name"), a)
+        )
+        curves = [p.attrib.get("curve") for p in root.iter("point")]
+        assert all(c == "1" for c in curves), (
+            "injected markup created rogue <point> elements (curves=%s) for name %r"
+            % (curves, a)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 64 (LOCK) — XML 1.0 forbids most C0 control bytes outright (no character
+# reference exists), so a control scalar in the untrusted preset name would make
+# ResolumeParser (and Resolume itself) reject the file. stripIllegalXmlScalars must
+# drop them while keeping the legal tab/newline/CR. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_export_strips_c0_control_scalars_xml_forbids():
+    controls = "".join(chr(c) for c in [0x00, 0x01, 0x02, 0x08, 0x0B, 0x0C, 0x0E, 0x1F])
+    name = "a" + controls + "b"
+    out = _run_cs_batch(["res %s 1.0 1 10" % _b64(name)])[0]
+    assert out != "<nil>"
+    root = ET.fromstring(out)  # must be well-formed
+    assert root.attrib.get("name") == "ab", (
+        "spec §4: XML-illegal C0 control scalars survived into the Resolume name "
+        "attribute (%r) — the emitted preset would be rejected by a strict XML reader"
+        % root.attrib.get("name")
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 65 (LOCK) — a hostile `curve` (out of 1..23) or non-finite `start` from a
+# corrupt cue must never reach the Resolume XML as an out-of-range curve id or a
+# "nan"/"inf"/scientific coordinate a strict Resolume parser would reject. Pins the
+# curve clamp and the formatDouble/normalized coordinate guards. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_export_clamps_hostile_curve_and_neutralises_nonfinite_position():
+    curves = [0, -1, 24, 999, -2147483648, 2147483647]
+    starts = ["nan", "inf", "-inf", "1e308", "-5"]
+    cmds, keys = [], []
+    for c in curves:
+        for s in starts:
+            cmds.append("res %s %s %d 10" % (_b64("pt"), _numarg(s), c))
+            keys.append((c, s))
+    outs = _run_cs_batch(cmds)
+    for (c, s), out in zip(keys, outs):
+        assert out != "<nil>", "curve=%d start=%r produced nil" % (c, s)
+        root = ET.fromstring(out)
+        # Check the attribute VALUES precisely (a whole-document substring scan would
+        # false-match the "versionInfo" boilerplate) — a leaked NaN/Inf shows up as a
+        # coordinate that fails the finite-plain-decimal regex or a curve out of range.
+        for p in root.iter("point"):
+            cv = int(p.attrib["curve"])
+            assert 1 <= cv <= 23, (
+                "curve %d not clamped to 1..23 (hostile curve=%d)" % (cv, c)
+            )
+            for axis in ("x", "y"):
+                v = p.attrib[axis]
+                assert _PLAIN_DECIMAL_RE.fullmatch(v), (
+                    "non-finite/scientific coordinate %s=%r leaked into Resolume XML "
+                    "(hostile start=%r)" % (axis, v, s)
+                )
+                assert 0.0 <= float(v) <= 1.0, (
+                    "coordinate %s=%s outside [0,1] (start=%r)" % (axis, v, s)
+                )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 66 (LOCK on Darwin) — the Resolume XML importer must not resolve an
+# external SYSTEM entity (classic XXE file-read/SSRF). We craft a DOCTYPE with a
+# SYSTEM entity pointing at a runtime-created secret file (§4: no hardcoded paths),
+# reference it in the preset name, and require the secret to NOT appear in the
+# parse result. On Darwin the default is safe; this pins that it stays safe. The
+# Linux/Windows FoundationXML path — the port's actual target — is guarded by the
+# explicit-disable finding below (ATTACK 67), since it can't be exercised here.
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_parser_does_not_resolve_external_entities_into_the_preset_name():
+    secret_dir = tempfile.mkdtemp(prefix="cuesync9_xxe_")
+    atexit.register(shutil.rmtree, secret_dir, True)
+    secret_path = os.path.join(secret_dir, "secret.txt")
+    token = "TOPSECRET_XXE_LEAK_9f3ac1"
+    with open(secret_path, "w", encoding="utf-8") as fh:
+        fh.write(token)
+    uri = "file://" + secret_path.replace("\\", "/")
+    xxe = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE Preset [ <!ENTITY xxe SYSTEM "%s"> ]>\n'
+        '<Preset name="&xxe;"><point x="0" y="0" curve="1"/>'
+        '<point x="1" y="0" curve="1"/></Preset>' % uri
+    )
+    out = _run_cs_batch(["parse %s" % _b64(xxe)])[0]
+    assert token not in out, (
+        "XXE: ResolumeParser resolved an external SYSTEM entity and leaked local file "
+        "contents into the parsed preset name: %r" % out
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 67 (LIVE FINDING — expected to FAIL until hardened) — both XML importers
+# construct `XMLParser(data:)` and never set `shouldResolveExternalEntities = false`,
+# relying on an undocumented parser default. OWASP's XXE Prevention Cheat Sheet is
+# explicit: do NOT rely on the default; disable it. This matters most on exactly the
+# platform this whole port targets: RekordboxParser's OWN comment already warns that
+# "XMLParser's Linux/Windows implementation (libxml2 via FoundationXML) does not
+# reliably [behave] the way Darwin's Foundation does". A resolved SYSTEM entity there
+# is an XXE local-file read / SSRF against an untrusted Rekordbox/Resolume file. The
+# one-line fix (`parser.shouldResolveExternalEntities = false`) is defence-in-depth
+# against parser-default drift on the divergent path the code itself flags.
+# ---------------------------------------------------------------------------
+
+
+def test_xml_parsers_explicitly_disable_external_entity_resolution():
+    subjects = [
+        ("Parsers", "ResolumeParser.swift"),
+        ("Parsers", "RekordboxParser.swift"),
+    ]
+    pat = re.compile(r"shouldResolveExternalEntities\s*=\s*false")
+    missing = []
+    for sub in subjects:
+        code = _strip_swift_line_comments(
+            _cs_read_source_or_skip("CueSync", "CueSync", *sub)
+        )
+        assert "XMLParser(" in code, (
+            "%s no longer constructs an XMLParser — re-locate the XML trust boundary "
+            "before trusting this test" % sub[-1]
+        )
+        if not pat.search(code):
+            missing.append(sub[-1])
+    assert not missing, (
+        "XXE hardening (spec §4 — untrusted XML crosses a trust boundary): these XML "
+        "importers construct XMLParser but never set `shouldResolveExternalEntities = "
+        "false`, relying on an undocumented default. OWASP XXE Prevention: never rely on "
+        "the parser default. RekordboxParser's own comment already flags that the "
+        "Linux/Windows FoundationXML (libxml2) path diverges from Darwin — the exact "
+        "platform this port targets and where a resolved SYSTEM entity is an XXE "
+        "file-read/SSRF. Set it explicitly on: %s" % ", ".join(missing)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
