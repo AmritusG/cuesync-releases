@@ -1683,7 +1683,9 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME, WINDOWS_GSK_PATCH_NAME])
+    expected = sorted(
+        [GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME, WINDOWS_GSK_PATCH_NAME]
+    )
     assert gtk_patches == expected, (
         "spec §4/§0.3: expected exactly the three named checked-in patches touching "
         "GtkBackend.swift (" + repr(expected) + "); a FOURTH file or a divergent "
