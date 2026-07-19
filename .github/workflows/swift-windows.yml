@@ -1106,12 +1106,36 @@ jobs:
           Write-Host "===================== end diagnostics ========================="
           exit 0
 
+      # CI-observed (this branch, run 29704695613): "Upload build artifact" failed
+      # with "EPERM: operation not permitted, stat 'D:\...\.build\release'" —
+      # actions/upload-artifact's Node-based file walker can't stat the
+      # `.build\release` path directly because on Windows it's an NTFS junction
+      # to `.build\<triple>\release` (same one every earlier step in this job
+      # resolves via ResolveLinkTarget before touching it, e.g. the closure
+      # check and DLL-bundling steps above), not a plain directory. `if:
+      # always()` so the resolution still runs (and degrades gracefully) even
+      # when an earlier step in the job failed and `.build\release` was never
+      # created.
+      - name: Resolve real build output directory (Windows junction workaround)
+        id: resolve-artifact-dir
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path ".build\release") {
+            $artifactItem = Get-Item ".build\release"
+            $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
+            $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+          } else {
+            $artifactDir = ".build\release"
+          }
+          Add-Content $env:GITHUB_OUTPUT "dir=$artifactDir"
+
       - name: Upload build artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cuesync-windows
-          path: .build/release/
+          path: ${{ steps.resolve-artifact-dir.outputs.dir }}
           if-no-files-found: ignore
 
   windows-test:
