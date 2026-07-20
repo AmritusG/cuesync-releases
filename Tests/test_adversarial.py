@@ -5530,8 +5530,7 @@ def _inflate_many(items):
     assert proc.returncode == 0, "zlib harness runtime error:\n" + proc.stderr
     lines = [ln for ln in proc.stdout.split("\n") if ln != ""]
     assert len(lines) == len(cmds), (
-        "zlib harness framing broke: %d lines for %d commands"
-        % (len(lines), len(cmds))
+        "zlib harness framing broke: %d lines for %d commands" % (len(lines), len(cmds))
     )
     out = []
     for ln in lines:
@@ -5613,8 +5612,7 @@ def test_zlib_inflate_cap_boundary_is_exact_and_slack_byte_disambiguates():
     assert at is not None and len(at) == n, (
         "a stream decoding to exactly %d bytes must be accepted at cap=%d "
         "(the one-byte slack buffer proves it is a genuine cap-sized result, "
-        "not a truncated overflow) — got %r"
-        % (n, n, None if at is None else len(at))
+        "not a truncated overflow) — got %r" % (n, n, None if at is None else len(at))
     )
     assert under is None, (
         "a stream decoding to %d bytes must be rejected at cap=%d (one over the "
@@ -5637,7 +5635,9 @@ def test_zlib_inflate_cap_boundary_is_exact_and_slack_byte_disambiguates():
 
 def test_zlib_inflate_rejects_empty_source_and_nonpositive_cap():
     good = _raw_deflate(b"payload")
-    results = _inflate_many([(b"", 1024), (good, 0), (good, -5), (good, len(b"payload"))])
+    results = _inflate_many(
+        [(b"", 1024), (good, 0), (good, -5), (good, len(b"payload"))]
+    )
     empty_src, zero_cap, neg_cap, sane = results
     assert empty_src is None, "empty source must return nil (guard `!src.isEmpty`)"
     assert zero_cap is None, "cap=0 must return nil (guard `cap > 0`)"
@@ -5795,7 +5795,9 @@ def test_enginedj_quickcues_declared_size_gate_and_cap_bound_every_allocation():
     # A real 8-cue payload (each cue at 1s = 44100 samples), padded past the 1 MB
     # gate so the gate — not the cap — is the only thing that can refuse it.
     slots = b"".join(
-        _engine_cue_slot("cue%d" % i, struct.unpack(">Q", struct.pack(">d", 44100.0))[0])
+        _engine_cue_slot(
+            "cue%d" % i, struct.unpack(">Q", struct.pack(">d", 44100.0))[0]
+        )
         for i in range(8)
     )
     real_payload = b"\x00" * 8 + slots
@@ -5901,7 +5903,9 @@ def _hex_binary():
 
 def _parse_colors(strings):
     binpath = _hex_binary()
-    cmds = ["color " + base64.b64encode(s.encode("utf-8")).decode("ascii") for s in strings]
+    cmds = [
+        "color " + base64.b64encode(s.encode("utf-8")).decode("ascii") for s in strings
+    ]
     proc = subprocess.run(
         [binpath],
         input="\n".join(cmds) + "\n",
@@ -5948,7 +5952,8 @@ def test_css_color_parser_always_returns_finite_clamped_components_for_hostile_i
         for name, v in (("r", r), ("g", g), ("b", b)):
             assert v == v, (
                 "parseCSSColor(%r) returned a NaN %s component — the doc promises "
-                "finite output; a later Int(%s) in the renderer would trap." % (s, name, name)
+                "finite output; a later Int(%s) in the renderer would trap."
+                % (s, name, name)
             )
             assert v not in (float("inf"), float("-inf")), (
                 "parseCSSColor(%r) returned a non-finite %s component." % (s, name)
