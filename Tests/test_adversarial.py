@@ -4953,6 +4953,314 @@ def test_rekordbox_location_percent_encoding_cannot_smuggle_a_nul_byte_past_the_
     )
 
 
+# ===========================================================================
+# CUESYNC-9 (input-death spec, specs/CUESYNC-9.md) — RED-TEAM ADDITIONS
+#
+# The suite above is deep on the *mechanics* of each swift-cross-ui patch (real
+# diff, disjoint hunks, read-only clears, reverse-guard, purity). These attacks
+# go after the *acceptance criteria and the root-cause logic* of the input-death
+# ticket itself — the places the spec's own §2 (plan step 5), §3, and §4 threat
+# model are violated or under-guarded even though every existing test is green.
+#
+# Two of these are LIVE FINDINGS (expected to FAIL today, reproducing a real
+# un-mitigated gap); three are durable regression LOCKS on an acceptance
+# criterion no prior test pins. Each cites the spec clause it defends so a
+# maintainer who trips one knows to fix the artifact, never the test.
+# ===========================================================================
+
+FINDINGS_9_PATH = REPO_ROOT / "specs" / "CUESYNC-9-findings.md"
+FINDINGS_9_TEXT = (
+    FINDINGS_9_PATH.read_text(encoding="utf-8") if FINDINGS_9_PATH.is_file() else ""
+)
+
+WINDOWS_GSK_STEP_NAME = "Patch swift-cross-ui Windows GSK renderer"
+
+
+def _gsk_step_blocks():
+    """(job, name_line_idx, block_text) for every gsk-renderer patch step — one
+    per GtkBackend-compiling leg. Mirrors `_win_input_step_blocks`."""
+    blocks = []
+    for job, (jstart, jend) in JOBS.items():
+        i = jstart
+        while i < jend:
+            m = STEP_NAME_RE.match(LINES[i])
+            if m and m.group(1).startswith(WINDOWS_GSK_STEP_NAME):
+                j = i + 1
+                while j < jend and not STEP_NAME_RE.match(LINES[j]):
+                    j += 1
+                blocks.append((job, i, "\n".join(LINES[i:j])))
+                i = j
+            else:
+                i += 1
+    return blocks
+
+
+GSK_BLOCKS = _gsk_step_blocks()
+
+
+def _gsk_bodies():
+    """job -> de-indented `run:` script body of that job's gsk-renderer step."""
+    return {job: _gesture_run_body(block) for job, _i, block in GSK_BLOCKS}
+
+
+def _findings_paragraphs():
+    return re.split(r"\n\s*\n", FINDINGS_9_TEXT)
+
+
+def _windows_input_patch_marked_disproven_non_mover():
+    """The findings paragraph (if any) that names `windows-input.patch` AND marks
+    its root-cause premise disproven AND treats it as a non-mover / candidate
+    revert. Returns the paragraph text, or None. This is exactly the round-8
+    (§0.7) disposition of round 7's patch."""
+    for para in _findings_paragraphs():
+        if "windows-input.patch" not in para:
+            continue
+        low = para.lower()
+        disproven = "disprove" in low  # "disproven" / "disproves"
+        non_mover = ("candidate revert" in low) or (
+            "load-bearing" in low and "not" in low
+        )
+        if disproven and non_mover:
+            return para.strip()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# ATTACK A (LIVE FINDING — expected to FAIL) — a disproven-premise patch is
+# still mutating the pinned dependency on every leg.
+#
+# spec CUESYNC-9 §2 step 5: "Apply ONE suspect per round: if a round's fix does
+# not move the probe, REVERT that hunk before trying the next suspect — never
+# stack speculative patches." spec §4 (supply chain): every byte-change to the
+# pinned dependency must be a justified, audited patch so "the code we audited"
+# and "the code we build" stay identical.
+#
+# Round 8 (specs/CUESYNC-9-findings.md §0.7) proved, from the app's own auditable
+# Windows stderr, that the input death is an unsatisfiable-window-minimum
+# relayout loop — NOT the Win32-message-queue starvation that round 7's
+# `windows-input.patch` rewrites `mainRunLoopTicklingLoop` to fix. The findings
+# doc itself records the patch's "premise is now disproven … candidate revert …
+# do not treat it as load-bearing." Yet that patch is STILL git-applied on all
+# three GtkBackend legs and by the dev script — a speculative, disproven
+# modification of a pinned dependency left stacked, precisely what step 5 forbids.
+#
+# Satisfiable either way: revert the patch from the apply set, OR re-confirm it as
+# load-bearing in the findings (removing the disproven / candidate-revert
+# language). It must not ship as a disproven mutation of an audited dependency.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_premise_is_disproven_yet_it_is_still_applied_on_every_leg():
+    legs = sorted(job for job, _i, _b in WINDOWS_INPUT_BLOCKS)
+    still_in_ci = legs == ["macos", "windows-build", "windows-test"]
+
+    dev = DEV_PATCH_SCRIPT.read_text(encoding="utf-8") if DEV_PATCH_SCRIPT.is_file() else ""
+    still_in_dev = WINDOWS_INPUT_PATCH_NAME in dev and "git apply" in dev
+
+    if not (still_in_ci or still_in_dev):
+        return  # patch was reverted per step 5 — nothing left to flag
+
+    if not FINDINGS_9_TEXT:
+        raise unittest.SkipTest("specs/CUESYNC-9-findings.md not found")
+
+    marked = _windows_input_patch_marked_disproven_non_mover()
+    assert marked is None, (
+        "spec CUESYNC-9 §2 step 5 / §4: `%s` still mutates the pinned "
+        "swift-cross-ui checkout on legs %r (dev script: %s), but the findings doc "
+        "records its root-cause premise as DISPROVEN and the patch as a non-mover / "
+        "candidate revert. Step 5 requires reverting a non-mover, not leaving a "
+        "speculative, disproven patch stacked on the audited dependency (§4: "
+        "'the code we audited' must equal 'the code we build', justified). Resolve "
+        "by reverting the patch from every apply site, or re-confirm it as "
+        "load-bearing in the findings. Offending disposition:\n\n%s"
+        % (WINDOWS_INPUT_PATCH_NAME, legs, bool(still_in_dev), marked)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK B (LIVE FINDING — expected to FAIL) — the input patch reaches outside
+# the sanctioned toolkit API into an undocumented private libdispatch symbol.
+#
+# spec CUESYNC-9 §2 step 4 / §3 / §4: the fix must use "GTK/GLib's own APIs …
+# no new dependency, no network, no dynamic load." The windows-input patch binds
+# `@_silgen_name("_dispatch_main_queue_callback_4CF")` — a raw linker binding to
+# an UNDOCUMENTED, leading-underscore libdispatch↔CoreFoundation bridge internal
+# (`_4CF`), which is neither GTK nor GLib and carries no stable-ABI guarantee.
+# `@_silgen_name` bypasses Swift's import visibility entirely; if a future Swift
+# toolchain renames or drops that private symbol, the whole Windows build fails
+# to LINK — the exact supply-chain fragility the "GTK/GLib's own APIs" constraint
+# exists to prevent. The existing purity test (ATTACK 48) bans dlopen/import but
+# never inspects `@_silgen_name`, so nothing catches this.
+# ---------------------------------------------------------------------------
+
+
+def test_windows_input_patch_binds_no_undocumented_private_symbol_via_silgen_name():
+    _win_input_or_skip()
+    added = "\n".join(_win_input_added_lines())
+    symbols = re.findall(r'@_silgen_name\(\s*"([^"]+)"\s*\)', added)
+    assert not symbols, (
+        "spec CUESYNC-9 §3/§4 (fix uses GTK/GLib's own APIs, no fragile external "
+        "coupling): the windows-input patch adds `@_silgen_name` binding(s) to %r — "
+        "a raw linker binding to a non-GTK/GLib symbol. `_dispatch_main_queue_"
+        "callback_4CF` is an undocumented, underscore-prefixed libdispatch/CF-bridge "
+        "internal with no stable-ABI guarantee; a Swift-toolchain rename/removal "
+        "breaks the Windows link. Service DispatchQueue.main via a public/supported "
+        "mechanism, or drop the hook with the (disproven-premise) patch it belongs to."
+        % symbols
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK C (REGRESSION LOCK) — the layout-thrash guard is axis-incomplete; the
+# WIDTH axis of the root cause is unguarded on the window-content root.
+#
+# spec CUESYNC-9 §3 no-regression: round 8's root cause is a hard
+# `.frame(minWidth: 1200, minHeight: 700)` on the WindowGroup content becoming
+# swift-cross-ui's `minimumWindowSize` (findings §0.7). The resolved checkout's
+# `WindowReference.update` clamps BOTH axes symmetrically —
+# `max(minimumWindowSize.width, proposed.x)` and `max(…height, proposed.y)`, one
+# restart on ANY disagreement — so a chrome-level `.frame(minWidth: N)` drives the
+# identical infinite relayout loop on the width axis whenever the display grants
+# less than N (a narrow remote-desktop/headless session).
+#
+# But the durable guards only cover the HEIGHT axis on ContentView.swift (the
+# actual WindowGroup content): CUESYNC9WindowMinimumSizeRegressionTests scans
+# top-level UI files for `minHeight:` only, and PortComplianceTests' `.frame(min`
+# scan is scoped to CueSyncApp.swift, not its sibling ContentView.swift. A
+# chrome-level `minWidth:` re-added to ContentView's outer VStack (outside the
+# ScrollView, which absorbs only in-flow overflow) would be caught by nothing.
+#
+# This lock closes that gap: no `.frame(min…)` on ContentView's window chrome —
+# on EITHER axis — outside the ScrollView (the two `.frame(minWidth: 500)` on the
+# side-by-side columns live INSIDE the ScrollView and are correctly excluded).
+# ---------------------------------------------------------------------------
+
+CONTENTVIEW_PATH = REPO_ROOT / "CueSync" / "CueSync" / "UI" / "ContentView.swift"
+
+
+def _lines_inside_scrollview(lines):
+    """0-based indices of source lines that sit inside a `ScrollView { … }` block,
+    by brace-depth counting from each `ScrollView {` opener."""
+    inside = set()
+    i = 0
+    while i < len(lines):
+        if re.search(r"\bScrollView\b", lines[i]) and "{" in lines[i]:
+            depth = lines[i].count("{") - lines[i].count("}")
+            j = i + 1
+            while j < len(lines) and depth > 0:
+                inside.add(j)
+                depth += lines[j].count("{") - lines[j].count("}")
+                j += 1
+            i = j
+        else:
+            i += 1
+    return inside
+
+
+def test_contentview_window_chrome_imposes_no_hard_minimum_on_either_axis():
+    if not CONTENTVIEW_PATH.is_file():
+        raise unittest.SkipTest("CueSync/CueSync/UI/ContentView.swift not found")
+    lines = CONTENTVIEW_PATH.read_text(encoding="utf-8").split("\n")
+    inside = _lines_inside_scrollview(lines)
+    offenders = [
+        (idx + 1, ln.strip())
+        for idx, ln in enumerate(lines)
+        if ".frame(min" in ln
+        and not ln.strip().startswith("//")
+        and idx not in inside
+    ]
+    assert not offenders, (
+        "spec CUESYNC-9 §3 / findings §0.7: ContentView.swift is the WindowGroup "
+        "content; a hard `.frame(min…)` on its chrome (outside the ScrollView) "
+        "becomes swift-cross-ui's `minimumWindowSize`. WindowReference clamps width "
+        "AND height symmetrically, so a chrome `minWidth:` reproduces the round-8 "
+        "infinite-relayout input death on the width axis when the display grants "
+        "less — a case NO existing guard covers (the round-8 scan is minHeight-only; "
+        "PortComplianceTests' scan is CueSyncApp.swift-only). Express size via "
+        "`.defaultSize`/`.frame(maxWidth:)` and let the ScrollView absorb overflow. "
+        "Chrome min-frame(s): %r" % offenders
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK D (REGRESSION LOCK) — the gsk-renderer patch is a full supply-chain
+# surface but its CI-step hygiene is thinner than the input/gesture patches.
+#
+# spec CUESYNC-9 §4: each patch's `git apply` step clears the Windows read-only
+# flag on EXACTLY the file(s) it patches (same rationale as the gulong/gsize
+# step). The gsk-renderer patch touches only GtkBackend.swift, so each Windows
+# leg must clear read-only on that one file and must NOT reach into
+# Widget.swift (the CUESYNC-8 interactivity file) — clearing a sibling's flag
+# signals scope creep across patch boundaries. No prior test pins this for gsk.
+# ---------------------------------------------------------------------------
+
+
+def test_gsk_renderer_patch_step_clears_read_only_on_exactly_gtkbackend_on_both_windows_legs():
+    bodies = _gsk_bodies()
+    for job in ("windows-build", "windows-test"):
+        assert job in bodies, (
+            "spec §3: the gsk-renderer patch step is missing on %s" % job
+        )
+        body = bodies[job]
+        ro = [
+            ln
+            for ln in body.splitlines()
+            if "Set-ItemProperty" in ln and "IsReadOnly" in ln
+        ]
+        assert len(ro) == 1, (
+            "spec CUESYNC-9 §4: the gsk-renderer patch modifies only "
+            "GtkBackend.swift, so its %s step must clear the Windows read-only flag "
+            "on exactly ONE file; found %d IsReadOnly clear(s):\n%s"
+            % (job, len(ro), "\n".join(ro) or "(none)")
+        )
+        assert "GtkBackend.swift" in body and (
+            "$gtkBackend" in ro[0] or "GtkBackend.swift" in ro[0]
+        ), (
+            "spec §4: the gsk-renderer %s step must clear read-only on "
+            "GtkBackend.swift specifically; got: %s" % (job, ro[0].strip())
+        )
+        assert "Widget.swift" not in body, (
+            "spec §4 / invariants: the gsk-renderer %s step references Widget.swift "
+            "— it must stay confined to GtkBackend.swift and never touch the "
+            "CUESYNC-8 interactivity file's flag or bytes." % job
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK E (REGRESSION LOCK) — the gsk-renderer patch step must be idempotent
+# and fail LOUD on every GtkBackend-compiling leg, exactly like the input/gesture
+# patch steps. A silent `git apply` failure would build/test/ship against an
+# UNPATCHED dependency — the Windows window would never paint (the very defect
+# §0.3 fixes) while CI stays green. spec §3 (idempotency) / §4 (fail-loud posture).
+# ---------------------------------------------------------------------------
+
+
+def test_gsk_renderer_patch_step_is_reverse_guarded_and_fails_loud_on_every_leg():
+    bodies = _gsk_bodies()
+    legs = sorted(bodies)
+    assert legs == ["macos", "windows-build", "windows-test"], (
+        "spec CUESYNC-9 §3: the gsk-renderer patch step must exist on all three "
+        "GtkBackend-compiling legs (it applies before build on each); found: %r"
+        % legs
+    )
+    for job, body in bodies.items():
+        assert "--reverse --check" in body, (
+            "spec §3 idempotency: the gsk-renderer %s step must guard "
+            "re-application with `git apply --reverse --check`" % job
+        )
+        if job == "macos":
+            assert "set -e" in body, (
+                "the macos gsk-renderer step must fail loud on a bad `git apply` "
+                "(`set -euo pipefail`), not continue with an unpatched dependency"
+            )
+        else:
+            assert "Write-Error" in body and "exit 1" in body, (
+                "the %s gsk-renderer step must fail loud on a bad `git apply` "
+                "(Write-Error + exit 1) — a silent failure ships an unpatched, "
+                "never-painting Windows window while CI stays green (§4)" % job
+            )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
