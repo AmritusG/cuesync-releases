@@ -417,14 +417,23 @@ symptom the whole saga chased as "input death."
   `window.present()` — the identical call `activate` already makes — is GTK's own public API, compiles on the
   macOS authoring box (it did: release build green), and closes a real gap. Windows-guarded so macOS/Linux
   are untouched.
-- **Still governed by step 5.** Whether `present()` beats the console's foreground-lock on the box is the
-  open question — but a console-launched child gets a one-time startup `SetForegroundWindow` grant, so the
-  never-taken present has a real chance. Judge the next probe by its **pixels** (does the frame now show your
-  app's accent colors?), not the red/green boolean; if it doesn't move, revert.
+- **Step-5 outcome (round 14): the gate fired, and `present()` lost — necessary was not sufficient.** The
+  fresh post-patch probe (`before.png`, judged by pixels as pre-registered) still shows console gray
+  `(12,12,12)` + bare desktop `(0,0,0)` with **zero** matches for all four accent colors, `changed_ratio: 0`;
+  the window merely cascaded further off-screen (offset 52→104→156 px across the last three runs, a textbook
+  Windows default-placement cascade of a fresh, screen-sized top-level). Decisively, even the window's
+  **on-screen** top-left corner (from offset `(156,156)`) shows no accents — so this is a z-order/foreground
+  failure `present()` did **not** beat, not mere off-screen clipping. `gtk_window_present()` from a
+  non-foreground process cannot steal activation from the console that owns the Windows foreground; the
+  one-time startup grant did not materialize here. Per spec step 5 the hunk was **reverted** (round 14),
+  tree back to the two-patch verified-green state.
 
-Generalized: **"there's no fix to make" is a claim about what the code actually *does at runtime*, not about
-what methods are *defined*. Before you escalate past the view layer, trace the real call-graph for the exact
-object (here: the initial window) — a present that exists but is never invoked for that object is a fixable
-gap, and closing it with the framework's own API is in-lane, not the native-interop hack you were right to
-avoid.** CUESYNC-9 §0.12; `patches/swift-cross-ui-0.8.0-windows-window-present.patch`, one suspect,
-gate-to-verify.
+Generalized: **the call-graph audit was still worth doing — "no fix exists" was genuinely a runtime claim
+rounds 11–12 asserted without tracing — but closing the `show`/`present` gap was *necessary, not sufficient*.
+A present that is finally invoked can still be refused: on Windows a background process's `gtk_window_present()`
+does not defeat another process's foreground-lock. So the fixable in-lane gap was real AND the escalation past
+the view layer still stands — the durable blocker (foreground-lock / WinUIBackend, or a harness that raises +
+repositions the window before probing) is below the Swift layer, exactly where §0.11 put it. Verify your
+call-graph claims (round 13 was right to), but don't assume the newly-reached call *succeeds* off-box — let the
+gate's pixels, not the patch's plausibility, decide; when they don't move, revert (round 14 did).** CUESYNC-9
+§0.12 (the gap) + §0.13 (the refutation); no patch survives this round.

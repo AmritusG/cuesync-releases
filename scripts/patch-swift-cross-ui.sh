@@ -25,9 +25,8 @@ CHECKOUT="$ROOT/.build/checkouts/swift-cross-ui"
 
 INTERACTIVITY_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 GSK_RENDERER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-WINDOW_PRESENT_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
 
-for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH" "$WINDOW_PRESENT_PATCH"; do
+for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH"; do
     if [ ! -f "$patch" ]; then
         echo "patch-swift-cross-ui.sh: missing $patch" >&2
         exit 1
@@ -80,20 +79,4 @@ if git apply --reverse --check "$GSK_RENDERER_PATCH" 2>/dev/null; then
 else
     echo "==> Applying swift-cross-ui Windows GSK-renderer patch"
     git apply "$GSK_RENDERER_PATCH"
-fi
-
-# CUESYNC-9 round 13 (specs/CUESYNC-9-findings.md §0.12): the initial WindowGroup
-# window is only ever shown via backend.show(window:) (gtk_widget_set_visible), never
-# backend.activate(window:)/gtk_window_present — SwiftCrossUI reaches activate only via
-# openWindow(id:)/bringWindowForward(). On Windows show maps but does not raise the
-# surface, so the window stays behind the foreground cmd.exe launcher console the probe
-# starts CueSync.exe from and paints no visible pixels. This patch makes GtkBackend.show
-# also present() the initial window on Windows, using GTK's own gtk_window_present().
-# Applied last (after interactivity + GSK), on GtkBackend.swift, whose read-only flag the
-# GSK step above already cleared. `git apply --reverse --check` guards idempotency.
-if git apply --reverse --check "$WINDOW_PRESENT_PATCH" 2>/dev/null; then
-    echo "==> swift-cross-ui Windows window-present patch already applied — skipping"
-else
-    echo "==> Applying swift-cross-ui Windows window-present patch"
-    git apply "$WINDOW_PRESENT_PATCH"
 fi
