@@ -328,3 +328,32 @@ were ever valid. Round 9 removed the input fix at the exact moment it could firs
 Generalized: **a fix that only ever ran behind a bigger bug was never tested — unmask it, re-probe,
 and let the machine, not the story, decide whether it works.** CUESYNC-9 §0.9,
 `patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch`.
+
+## Pre-register the falsification test, and when it fires negative, revert — don't rationalize (CUESYNC-9, round 11)
+
+Round 10 shipped the tickler-guard fix **and wrote down, in advance, exactly what would refute it**:
+"if the next probe still shows `close_click_exited: false`, revert this hunk before the next suspect."
+The next probe came back `close_click_exited: false`. Because round 10 had disabled the tickler on
+Windows and round 8's probe had it enabled, the two probes formed a **clean controlled A/B — one
+variable, the tickler, changed; input stayed dead in both.** That is a *machine* refutation of the
+Win32-queue-starvation theory (§2.5/§0.9), not another argument about it. Ten rounds of narrative
+couldn't kill that theory; one controlled experiment did.
+
+- **A pre-registered "what would prove me wrong" is the antidote to a self-confirming saga.** This
+  bug drew nine rounds of plausible stories each "explaining" a byte-identical probe. The thing that
+  finally cut through was committing — before seeing the result — to a single boolean oracle and a
+  mandatory action on each outcome. Write the falsifier down *with* the fix; then obey it.
+- **Change exactly one variable between probes or you learn nothing.** The 14:26-vs-15:22 pair was
+  decisive *only* because the sole difference was the tickler's `#if`. Had round 11 also tweaked the
+  renderer or layout, the negative probe would have been uninterpretable. One suspect per round isn't
+  bureaucracy — it's what makes each probe a measurement instead of an anecdote.
+- **When the last in-lane suspect is refuted and the survivor is upstream + unmaintained, escalate —
+  don't manufacture suspect N+1.** Renderer (GSK-cairo, clean log) and fonts (zero Pango) are ruled
+  out on-box; the Swift layer's window wiring is correct (`gtk_widget_show` + `gtk_window_present`).
+  What's left is GDK's win32 C event backend — which every post-v0.8.0 upstream Windows commit
+  abandons in favour of **WinUIBackend**. That's an architectural/backend decision, out of the
+  view-layer lane. The honest deliverable becomes *the refutation + the escalation*, not an 11th patch.
+
+Generalized: **the value of a disciplined negative result is that it ends a line of inquiry cleanly —
+bank it, revert the disproven change, and hand the human the one decision only they can make.**
+CUESYNC-9 §0.10; round-10 patch reverted per spec step 5.

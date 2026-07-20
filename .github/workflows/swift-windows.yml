@@ -166,32 +166,6 @@ jobs:
             echo "Applied swift-cross-ui Windows GSK-renderer patch"
           fi
 
-      # CUESYNC-9 round 10 (specs/CUESYNC-9-findings.md §0.9): the 2026-07-20 14:26
-      # probe — the first machine evidence captured after round 9, with round 8's
-      # layout-loop fix in place — proves the input death is a SEPARATE, still-live
-      # bug (Fork W: the title-bar close click does not kill the app;
-      # close_click_exited=false, changed_ratio=0). The Foundation RunLoop tickler
-      # (`mainRunLoopTicklingLoop`) pumps `RunLoop.main.limitDate(forMode:.default)`,
-      # which drains this thread's Win32 message queue — the same queue GDK needs for
-      # WM_PAINT + input. This patch NARROWS an existing `#if` guard so that tickler,
-      # already excluded on macOS (where the GtkBackend UI is interactive), is also
-      # excluded on Windows — GTK's own GLib loop then owns the queue. NOT the reverted
-      # windows-input patch: no @_silgen_name, no drain, no new API. Checked-in,
-      # reviewable `git apply` patch against pinned v0.8.0
-      # (a6d206370812e3b9edba259d167e848892c5013d); `git apply --reverse --check`
-      # guards idempotency.
-      - name: Patch swift-cross-ui Windows RunLoop tickler (pinned v0.8.0, CUESYNC-9)
-        run: |
-          set -euo pipefail
-          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
-          cd .build/checkouts/swift-cross-ui
-          if git apply --reverse --check "$PATCH" 2>/dev/null; then
-            echo "swift-cross-ui Windows RunLoop-tickler patch already applied — skipping"
-          else
-            git apply "$PATCH"
-            echo "Applied swift-cross-ui Windows RunLoop-tickler patch"
-          fi
-
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -665,36 +639,6 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 10 (specs/CUESYNC-9-findings.md §0.9): narrow an existing `#if`
-      # guard so the Foundation RunLoop tickler that already does not run on macOS also
-      # does not run on Windows. It pumps `RunLoop.main.limitDate(forMode:.default)`,
-      # which drains this thread's Win32 message queue — the same queue GDK needs for
-      # WM_PAINT + input — starving GDK and swallowing every click (Fork W: the 14:26
-      # probe's close_click_exited=false / changed_ratio=0, surviving round 8's layout
-      # fix). NOT the reverted windows-input patch: no @_silgen_name, no drain, no new
-      # API. Same read-only clear + reverse-check idempotency guard as the steps above.
-      - name: Patch swift-cross-ui Windows RunLoop tickler (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows RunLoop-tickler patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows RunLoop-tickler patch"
           }
           Pop-Location
 
@@ -1612,36 +1556,6 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 10 (specs/CUESYNC-9-findings.md §0.9): narrow an existing `#if`
-      # guard so the Foundation RunLoop tickler that already does not run on macOS also
-      # does not run on Windows. It pumps `RunLoop.main.limitDate(forMode:.default)`,
-      # which drains this thread's Win32 message queue — the same queue GDK needs for
-      # WM_PAINT + input — starving GDK and swallowing every click (Fork W: the 14:26
-      # probe's close_click_exited=false / changed_ratio=0, surviving round 8's layout
-      # fix). NOT the reverted windows-input patch: no @_silgen_name, no drain, no new
-      # API. Same read-only clear + reverse-check idempotency guard as the steps above.
-      - name: Patch swift-cross-ui Windows RunLoop tickler (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows RunLoop-tickler patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows RunLoop-tickler patch"
           }
           Pop-Location
 

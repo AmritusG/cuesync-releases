@@ -32,7 +32,6 @@ private let auditedRevision = "a6d206370812e3b9edba259d167e848892c5013d"
 private let windowsInputPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-input.patch"
 private let interactivityPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 private let gskPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-private let runLoopTicklerPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
 private let windowsInputStepNamePattern = #"name:\s*Patch swift-cross-ui Windows input dispatch"#
 
 final class CUESYNC9WindowsInputPatchStepPlacementTests: XCTestCase {
@@ -191,15 +190,13 @@ final class CUESYNC9PatchFileTests: XCTestCase {
             "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a disproven fix")
     }
 
-    /// NEW-STATE CHECK (round 10, specs/CUESYNC-9-findings.md §0.9): exactly the
-    /// three audited patches touch GtkBackend.swift now — the CUESYNC-8 interactivity
-    /// patch, the GSK-renderer patch, and the round-10 RunLoop-tickler patch —
+    /// NEW-STATE CHECK (round 9): exactly the two surviving, audited patches touch
+    /// GtkBackend.swift now — the interactivity patch and the GSK-renderer patch —
     /// mirroring what Tests/test_adversarial.py's `test_dev_script_and_every_ci_leg_
-    /// apply_the_three_remaining_checked_in_patches` enforces on the Python side. The
-    /// round-10 patch is a DISTINCT root cause (Fork W: the tickler draining GDK's
-    /// Win32 queue), not the reverted @_silgen_name windows-input patch, which stays
-    /// gone (asserted separately by testWindowsInputPatchFileNoLongerExists).
-    func testExactlyTheThreeSurvivingPatchesTouchGtkBackendSwift() throws {
+    /// apply_the_one_checked_in_patch` already enforces on the Python side, now also
+    /// pinned on the Swift side. Was: "targets only GtkBackend.swift" (a check that
+    /// only made sense while the now-deleted file still existed to read).
+    func testExactlyTheTwoSurvivingPatchesTouchGtkBackendSwift() throws {
         let patchesDir = RepoPaths9.root.appendingPathComponent("patches")
         let entries = try FileManager.default.contentsOfDirectory(at: patchesDir, includingPropertiesForKeys: nil)
         let gtkBackendPatches = try entries
@@ -210,10 +207,9 @@ final class CUESYNC9PatchFileTests: XCTestCase {
         let expected = [
             (interactivityPatchRelativePath as NSString).lastPathComponent,
             (gskPatchRelativePath as NSString).lastPathComponent,
-            (runLoopTicklerPatchRelativePath as NSString).lastPathComponent,
         ].sorted()
         XCTAssertEqual(gtkBackendPatches, expected,
-            "expected exactly the three surviving patches touching GtkBackend.swift (\(expected)) — a FOURTH " +
+            "expected exactly the two surviving patches touching GtkBackend.swift (\(expected)) — a THIRD " +
             "file, or the reverted windows-input patch reappearing, is a supply-chain regression. Found: " +
             "\(gtkBackendPatches)")
     }
@@ -338,44 +334,43 @@ final class CUESYNC9NoRegressionOnCUESYNC8PatchTests: XCTestCase {
 
 final class CUESYNC9DevScriptAppliesBothPatchesTests: XCTestCase {
 
-    /// UPDATED for round 10 (specs/CUESYNC-9-findings.md §0.9):
-    /// scripts/patch-swift-cross-ui.sh now applies THREE patches (interactivity +
-    /// GSK-renderer + RunLoop-tickler) in executable code, and must STILL not
-    /// reference the reverted windows-input patch at all (regression lock — checked on
-    /// the RAW file, not just the code-only view, so a stray comment mention trips it
-    /// too). The new tickler patch is distinctly named, so this lock is unaffected.
-    func testDevScriptAppliesAllThreePatchesAndNoLongerReferencesWindowsInput() throws {
+    /// UPDATED for round 9: scripts/patch-swift-cross-ui.sh now applies exactly TWO
+    /// patches (interactivity + GSK-renderer) in executable code, and must no
+    /// longer reference the reverted windows-input patch at all (regression lock —
+    /// checked on the RAW file, not just the code-only view, so a stray comment
+    /// mention trips it too). Was: "applies the new patch too."
+    func testDevScriptAppliesExactlyTwoPatchesAndNoLongerReferencesWindowsInput() throws {
         let codeOnly = try codeOnlyDevScript()
         XCTAssertTrue(codeOnly.contains(interactivityPatchRelativePath),
             "scripts/patch-swift-cross-ui.sh must still apply the existing CUESYNC-8 interactivity patch " +
             "too — this ticket must not remove it")
         XCTAssertTrue(codeOnly.contains(gskPatchRelativePath),
             "scripts/patch-swift-cross-ui.sh must still apply the GSK-renderer patch")
-        XCTAssertTrue(codeOnly.contains(runLoopTicklerPatchRelativePath),
-            "scripts/patch-swift-cross-ui.sh must apply the round-10 RunLoop-tickler patch too")
         let raw = try String(contentsOf: RepoPaths9.devScript, encoding: .utf8)
         XCTAssertFalse(raw.contains("windows-input.patch"),
             "scripts/patch-swift-cross-ui.sh must not reference 'windows-input.patch' anywhere — reverted " +
             "in round 9 (specs/CUESYNC-9-findings.md §0.8)")
     }
 
-    /// UPDATED for round 10: THREE patches now (interactivity + GSK-renderer +
-    /// RunLoop-tickler), each guarded idempotently and actually applied — same
-    /// requirement CUESYNC8DevScriptMirrorsCIPatchStepTests pins for the interactivity
-    /// patch alone. A count above 3 would mean a reverted or extra patch crept in.
-    func testDevScriptAppliesAllThreeRemainingPatchesIdempotentlyAndActually() throws {
+    /// UPDATED for round 9: with the windows-input patch gone, exactly TWO patches
+    /// remain (interactivity + GSK-renderer), each still guarded idempotently and
+    /// actually applied — same requirement CUESYNC8DevScriptMirrorsCIPatchStepTests
+    /// pins for the interactivity patch alone. Was: "applies windows-input
+    /// idempotently and actually," asserting a count of (at least) 2 guards that
+    /// included the now-reverted patch.
+    func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 3,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the three patches (interactivity, " +
-            "GSK-renderer, RunLoop-tickler) with its own `git apply --reverse --check` — found " +
-            "\(reverseCheckCount) guard(s); a count above 3 would mean a reverted or extra patch crept in")
+        XCTAssertEqual(reverseCheckCount, 2,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the two remaining patches (interactivity " +
+            "and GSK-renderer) with its own `git apply --reverse --check` — found \(reverseCheckCount) " +
+            "guard(s); a count above 2 would mean a reverted or extra patch crept back in")
 
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 3,
-            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` call for EACH of the three " +
-            "patches, distinct from the `--reverse --check` guards — found \(plainApplyCount)")
+        XCTAssertEqual(plainApplyCount, 2,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` call for EACH of the two " +
+            "remaining patches, distinct from the `--reverse --check` guards — found \(plainApplyCount)")
     }
 
     /// Shell-script quality guard, re-asserted for this ticket's edit to the script.
@@ -542,7 +537,6 @@ private enum RepoPaths9 {
     static let windowsInputPatch = root.appendingPathComponent(windowsInputPatchRelativePath)
     static let interactivityPatch = root.appendingPathComponent(interactivityPatchRelativePath)
     static let gskPatch = root.appendingPathComponent(gskPatchRelativePath)
-    static let runLoopTicklerPatch = root.appendingPathComponent(runLoopTicklerPatchRelativePath)
     static let devScript = root.appendingPathComponent("scripts/patch-swift-cross-ui.sh")
     static let findings = root.appendingPathComponent("specs/CUESYNC-9-findings.md")
     static let agentsUiux = root.appendingPathComponent("agents/uiux.md")

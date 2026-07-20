@@ -1022,14 +1022,6 @@ WINDOWS_INPUT_PATCH_NAME = "swift-cross-ui-0.8.0-windows-input.patch"
 # upstream file (runMainLoop — GSK_RENDERER=cairo for the remote-desktop GL-renderer
 # failure), kept in its own reviewable file, disjoint hunk from the other two.
 WINDOWS_GSK_PATCH_NAME = "swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-# CUESYNC-9 §0.9 (round 10): a fourth, distinct root-cause patch against the same
-# upstream file (the tickler call inside runMainLoop — narrows `#if !os(macOS)` to
-# `#if !os(macOS) && !os(Windows)` so the Foundation RunLoop tickler stops draining
-# GDK's Win32 message queue on Windows; Fork W input-death fix). Kept in its own
-# reviewable file, disjoint hunk from the other two. This is NOT the reverted
-# WINDOWS_INPUT_PATCH_NAME: it binds no @_silgen_name symbol, adds no drain, adds no
-# API — it only changes an existing guard.
-WINDOWS_TICKLER_PATCH_NAME = "swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
 
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
@@ -1684,14 +1676,14 @@ def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit(
 # ---------------------------------------------------------------------------
 
 
-def test_dev_script_and_every_ci_leg_apply_the_three_remaining_checked_in_patches():
-    """UPDATED for round 10 (specs/CUESYNC-9-findings.md §0.9): round 9 reverted
-    round 7's windows-input patch; round 10 adds a NEW, distinct RunLoop-tickler
-    patch (narrows an existing `#if` guard — no @_silgen_name, no drain, no API).
-    Exactly THREE named patches now touch GtkBackend.swift (gesture/interactivity +
-    GSK-renderer + RunLoop-tickler); a FOURTH file, or the reverted windows-input
-    patch reappearing, is a supply-chain regression, so the expected set is asserted
-    exactly, and the reverted patch's absence is checked directly by name too."""
+def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches():
+    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's
+    windows-input patch — the second of the three patches this test used to
+    expect — was reverted as a disproven, non-load-bearing fix per spec step 5.
+    Exactly TWO named patches remain checked in against GtkBackend.swift now
+    (gesture/interactivity + GSK-renderer); a THIRD file (the reverted patch
+    reappearing, or anything else) is a supply-chain regression, so the expected
+    set is asserted exactly, and its absence is checked directly by name too."""
     patch_dir = REPO_ROOT / "patches"
     if not patch_dir.is_dir():
         raise unittest.SkipTest("patches/ directory not found")
@@ -1700,13 +1692,12 @@ def test_dev_script_and_every_ci_leg_apply_the_three_remaining_checked_in_patche
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    expected = sorted(
-        [GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME, WINDOWS_TICKLER_PATCH_NAME]
-    )
+    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME])
     assert gtk_patches == expected, (
-        "spec §4/§0.3/§0.9: expected exactly the three named checked-in patches "
-        "touching GtkBackend.swift (" + repr(expected) + "); a FOURTH file or a "
-        "divergent copy of any is a supply-chain risk. Found: " + repr(gtk_patches)
+        "spec §4/§0.3/§0.8: expected exactly the two named checked-in patches "
+        "touching GtkBackend.swift (" + repr(expected) + ") now that the "
+        "windows-input patch is reverted; a THIRD file or a divergent copy of "
+        "either is a supply-chain risk. Found: " + repr(gtk_patches)
     )
     assert WINDOWS_INPUT_PATCH_NAME not in gtk_patches, (
         "the reverted windows-input patch must not be a checked-in patch file "
@@ -1726,10 +1717,6 @@ def test_dev_script_and_every_ci_leg_apply_the_three_remaining_checked_in_patche
     assert WINDOWS_GSK_PATCH_NAME in dev_code, (
         "scripts/patch-swift-cross-ui.sh must apply the GSK-renderer patch in "
         "executable code too (spec §0.3)"
-    )
-    assert WINDOWS_TICKLER_PATCH_NAME in dev_code, (
-        "scripts/patch-swift-cross-ui.sh must apply the RunLoop-tickler patch in "
-        "executable code too (spec §0.9, round 10)"
     )
     for job, _i, block in GESTURE_BLOCKS:
         assert GESTURE_PATCH_NAME in block, (
@@ -3986,28 +3973,17 @@ def test_xml_parsers_explicitly_disable_external_entity_resolution():
 
 
 def test_every_checked_in_swift_cross_ui_patch_is_lf_only():
-    # Round 10 (§0.9): the RunLoop-tickler patch applies on the same Windows legs and
-    # must be LF-only too. windows-input.patch was reverted (round 9) so it is absent
-    # here — skip only the individually-missing file, never abort the whole check
-    # (which would silently stop guarding the present patches).
     patches = {
         GESTURE_PATCH_NAME: PATCH_PATH,
         WINDOWS_INPUT_PATCH_NAME: WINDOWS_INPUT_PATCH_PATH,
         WINDOWS_GSK_PATCH_NAME: WINDOWS_GSK_PATCH_PATH,
-        WINDOWS_TICKLER_PATCH_NAME: REPO_ROOT / "patches" / WINDOWS_TICKLER_PATCH_NAME,
     }
     offenders = []
-    checked = []
     for name, path in patches.items():
         if not path.is_file():
-            continue
-        checked.append(name)
+            raise unittest.SkipTest("%s not present in this checkout" % name)
         if b"\r" in path.read_bytes():
             offenders.append(name)
-    assert WINDOWS_TICKLER_PATCH_NAME in checked, (
-        "the round-10 RunLoop-tickler patch must be present and LF-checked "
-        "(specs/CUESYNC-9-findings.md §0.9)"
-    )
     assert not offenders, (
         "these checked-in swift-cross-ui patch(es) contain a carriage return "
         "(CRLF-corrupted): %s. Every patch here is applied via `git apply` on "
@@ -5530,7 +5506,8 @@ def _inflate_many(items):
     assert proc.returncode == 0, "zlib harness runtime error:\n" + proc.stderr
     lines = [ln for ln in proc.stdout.split("\n") if ln != ""]
     assert len(lines) == len(cmds), (
-        "zlib harness framing broke: %d lines for %d commands" % (len(lines), len(cmds))
+        "zlib harness framing broke: %d lines for %d commands"
+        % (len(lines), len(cmds))
     )
     out = []
     for ln in lines:
@@ -5612,7 +5589,8 @@ def test_zlib_inflate_cap_boundary_is_exact_and_slack_byte_disambiguates():
     assert at is not None and len(at) == n, (
         "a stream decoding to exactly %d bytes must be accepted at cap=%d "
         "(the one-byte slack buffer proves it is a genuine cap-sized result, "
-        "not a truncated overflow) — got %r" % (n, n, None if at is None else len(at))
+        "not a truncated overflow) — got %r"
+        % (n, n, None if at is None else len(at))
     )
     assert under is None, (
         "a stream decoding to %d bytes must be rejected at cap=%d (one over the "
@@ -5635,9 +5613,7 @@ def test_zlib_inflate_cap_boundary_is_exact_and_slack_byte_disambiguates():
 
 def test_zlib_inflate_rejects_empty_source_and_nonpositive_cap():
     good = _raw_deflate(b"payload")
-    results = _inflate_many(
-        [(b"", 1024), (good, 0), (good, -5), (good, len(b"payload"))]
-    )
+    results = _inflate_many([(b"", 1024), (good, 0), (good, -5), (good, len(b"payload"))])
     empty_src, zero_cap, neg_cap, sane = results
     assert empty_src is None, "empty source must return nil (guard `!src.isEmpty`)"
     assert zero_cap is None, "cap=0 must return nil (guard `cap > 0`)"
@@ -5795,9 +5771,7 @@ def test_enginedj_quickcues_declared_size_gate_and_cap_bound_every_allocation():
     # A real 8-cue payload (each cue at 1s = 44100 samples), padded past the 1 MB
     # gate so the gate — not the cap — is the only thing that can refuse it.
     slots = b"".join(
-        _engine_cue_slot(
-            "cue%d" % i, struct.unpack(">Q", struct.pack(">d", 44100.0))[0]
-        )
+        _engine_cue_slot("cue%d" % i, struct.unpack(">Q", struct.pack(">d", 44100.0))[0])
         for i in range(8)
     )
     real_payload = b"\x00" * 8 + slots
@@ -5903,9 +5877,7 @@ def _hex_binary():
 
 def _parse_colors(strings):
     binpath = _hex_binary()
-    cmds = [
-        "color " + base64.b64encode(s.encode("utf-8")).decode("ascii") for s in strings
-    ]
+    cmds = ["color " + base64.b64encode(s.encode("utf-8")).decode("ascii") for s in strings]
     proc = subprocess.run(
         [binpath],
         input="\n".join(cmds) + "\n",
@@ -5952,8 +5924,7 @@ def test_css_color_parser_always_returns_finite_clamped_components_for_hostile_i
         for name, v in (("r", r), ("g", g), ("b", b)):
             assert v == v, (
                 "parseCSSColor(%r) returned a NaN %s component — the doc promises "
-                "finite output; a later Int(%s) in the renderer would trap."
-                % (s, name, name)
+                "finite output; a later Int(%s) in the renderer would trap." % (s, name, name)
             )
             assert v not in (float("inf"), float("-inf")), (
                 "parseCSSColor(%r) returned a non-finite %s component." % (s, name)

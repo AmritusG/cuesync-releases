@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Applies patches/swift-cross-ui-0.8.0-gtk-interactivity.patch (CUESYNC-8),
-# patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch (CUESYNC-9 round 4), and
-# patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch (CUESYNC-9 round 10) to
-# the resolved swift-cross-ui checkout, in that order, so the dev / ci-local loop can
+# Applies patches/swift-cross-ui-0.8.0-gtk-interactivity.patch (CUESYNC-8) and
+# patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch (CUESYNC-9 round 4) to the
+# resolved swift-cross-ui checkout, in that order, so the dev / ci-local loop can
 # iterate without GitHub CI. Mirrors the `git apply` steps these same patches get in
 # .github/workflows/swift-windows.yml — see that file for the CI-side version.
 #
@@ -26,14 +25,8 @@ CHECKOUT="$ROOT/.build/checkouts/swift-cross-ui"
 
 INTERACTIVITY_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 GSK_RENDERER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-# CUESYNC-9 round 10 (specs/CUESYNC-9-findings.md §0.9): a THIRD patch narrows an
-# existing `#if` guard so the Foundation RunLoop tickler that already does not run on
-# macOS also does not run on Windows — GTK's own GLib loop then owns the Win32 message
-# queue and GDK gets WM_PAINT + input again (Fork W input-death fix). This is NOT the
-# reverted windows-input patch: no @_silgen_name, no drain, no new API — just the guard.
-RUNLOOP_TICKLER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
 
-for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH" "$RUNLOOP_TICKLER_PATCH"; do
+for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH"; do
     if [ ! -f "$patch" ]; then
         echo "patch-swift-cross-ui.sh: missing $patch" >&2
         exit 1
@@ -86,11 +79,4 @@ if git apply --reverse --check "$GSK_RENDERER_PATCH" 2>/dev/null; then
 else
     echo "==> Applying swift-cross-ui Windows GSK-renderer patch"
     git apply "$GSK_RENDERER_PATCH"
-fi
-
-if git apply --reverse --check "$RUNLOOP_TICKLER_PATCH" 2>/dev/null; then
-    echo "==> swift-cross-ui Windows RunLoop-tickler patch already applied — skipping"
-else
-    echo "==> Applying swift-cross-ui Windows RunLoop-tickler patch"
-    git apply "$RUNLOOP_TICKLER_PATCH"
 fi
