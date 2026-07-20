@@ -221,6 +221,35 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      # CI-observed (this branch, runs 29705225341 → 29707857572): six consecutive
+      # rounds widened the retry-with-backoff budget around `.build\release`
+      # (`ResolveLinkTarget`/`Copy-Item`/`Get-ChildItem` all throwing "Access to the
+      # path ... is denied") from 5 attempts/2s to 10 attempts/3s, and the lock still
+      # outlasted it in the latest run: `ResolveLinkTarget` exhausted 10×2s, then the
+      # "Bundle GTK 4 runtime DLLs" step's own `Copy-Item` exhausted a further 10×3s
+      # (50s total) and `.build\release` was still inaccessible. Retrying around a
+      # transient lock is the wrong shape of fix once the lock can outlast any
+      # reasonable budget — the actual holder on windows-latest runners is Microsoft
+      # Defender's real-time scan of the freshly linked CueSync.exe (a documented cause
+      # of "Access is denied" on newly built executables in Windows CI). Excluding this
+      # job's `.build` tree (and the exe itself) from real-time scanning removes the
+      # lock at its source instead of racing it. Runs once, immediately after checkout,
+      # before anything writes into `.build`. Best-effort: the hosted runner's admin
+      # account can normally call Defender cmdlets, but if a future image restricts
+      # this, degrade to a warning rather than failing the job — the retry-with-backoff
+      # logic on every `.build\release` touch further down stays as defense in depth.
+      - name: Exclude .build from Windows Defender real-time scanning
+        shell: pwsh
+        run: |
+          try {
+            $buildPath = Join-Path $env:GITHUB_WORKSPACE ".build"
+            Add-MpPreference -ExclusionPath $buildPath -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "CueSync.exe" -ErrorAction Stop
+            Write-Host "Excluded $buildPath and CueSync.exe from Windows Defender real-time scanning"
+          } catch {
+            Write-Host "Add-MpPreference unavailable/denied on this runner (non-fatal — retry-with-backoff on .build\release still applies below): $($_.Exception.Message)"
+          }
+
       # swift-cross-ui's WinUIBackend (CUESYNC-5) depends on swift-winui, whose
       # own compile-time prerequisite is the Windows 10.0.17763.0 SDK
       # (https://github.com/moreSwift/swift-winui#compiletime-dependencies:
