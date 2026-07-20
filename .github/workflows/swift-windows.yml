@@ -693,6 +693,37 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+      # CUESYNC-9 — resolve the REAL build output directory ONCE, up front, and
+      # hand it to every downstream step via $env:ARTIFACT_DIR. Root cause of the
+      # long "Access ... is denied" run of CI-fix rounds: SwiftPM makes
+      # `.build\release` a directory junction to `.build\<triple>\release` on
+      # Windows, and every operation that touches that junction's reparse point —
+      # `ResolveLinkTarget`, `Copy-Item` INTO it, upload-artifact's `stat` — fails
+      # "Access ... is denied" on this runner, deterministically. It is NOT a
+      # process lock: run 29722598828 shows the "Stop lingering MSVC PDB server"
+      # step below ran successfully and the very next junction write still failed;
+      # a Defender exclusion (also tried) changed nothing. The denial is intrinsic
+      # to the reparse point. So never touch the junction: ask SwiftPM for the real,
+      # non-reparse directory it already wrote CueSync.exe + its DLLs into.
+      # `swift build --show-bin-path` is a pure query (no recompile) that prints
+      # exactly `.build\<triple>\release`; that tree is writable (the build just
+      # proved it) and has no reparse point, so the copy, closure walk and upload
+      # all succeed against it.
+      - name: Resolve real build output directory (Windows junction workaround)
+        id: resolve-artifact-dir
+        if: always()
+        shell: pwsh
+        run: |
+          $binPath = (& swift build -c release --show-bin-path 2>$null | Where-Object { $_.Trim() } | Select-Object -Last 1)
+          if ($binPath) { $binPath = $binPath.Trim() }
+          if (-not $binPath -or -not (Test-Path -LiteralPath $binPath)) {
+            Write-Host "swift --show-bin-path returned no usable directory ('$binPath'); falling back to .build\release"
+            $binPath = ".build\release"
+          }
+          Write-Host "real build output directory: $binPath"
+          Add-Content $env:GITHUB_ENV "ARTIFACT_DIR=$binPath"
+          Add-Content $env:GITHUB_OUTPUT "dir=$binPath"
+
       # CI-observed (this branch, runs 29705225341 → 29707857572): six rounds widened
       # the retry-with-backoff budget around `.build\release` from 5 attempts/2s to 10
       # attempts/3s and the lock still outlasted it. The next round's theory — Windows
@@ -782,22 +813,9 @@ jobs:
       - name: Bundle GTK 4 runtime DLLs next to CueSync.exe
         shell: pwsh
         run: |
-          $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $null
-          $lastError = $null
-          for ($attempt = 1; $attempt -le 10; $attempt++) {
-            try {
-              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
-              break
-            } catch {
-              $lastError = $_
-              Start-Sleep -Seconds 2
-            }
-          }
-          if (-not $resolvedTarget -and $lastError) {
-            Write-Host "ResolveLinkTarget did not succeed after 10 attempts, falling back to unresolved path: $($lastError.Exception.Message)"
-          }
-          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+          # Real, non-junction output dir resolved once by the step above (see its
+          # comment for why the `.build\release` reparse point is never touched).
+          $artifactDir = $env:ARTIFACT_DIR
           $gtkDlls = Get-ChildItem C:\gtk-build\gtk\x64\release\bin -File | Where-Object { $_.Extension -eq '.dll' }
           $copied = $false
           $lastError = $null
@@ -944,17 +962,10 @@ jobs:
           # "Bundle GTK 4 runtime DLLs" step above — see its comment (CI run
           # 29705861291) for why ResolveLinkTarget can transiently throw
           # "Access ... is denied" on a just-built `.build\release`.
-          $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $null
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            try {
-              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
-              break
-            } catch {
-              Start-Sleep -Seconds 2
-            }
-          }
-          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+          # Real, non-junction output dir resolved once early (see the "Resolve
+          # real build output directory" step) — never touch the `.build\release`
+          # reparse point, whose ResolveLinkTarget/write/stat deny access here.
+          $artifactDir = $env:ARTIFACT_DIR
 
           # See the "Verify DLL closure" step comment above: only trust this
           # root if it was actually derived from a resolved swift.exe path —
@@ -1035,7 +1046,7 @@ jobs:
           }
 
           Write-Host "== Dependency-closure check (clean) =="
-          if (-not (Test-DllClosure ".build\release\CueSync.exe")) { throw "clean dependency-closure check failed" }
+          if (-not (Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe")) { throw "clean dependency-closure check failed" }
           Write-Host "Closure check passed: no missing or non-system DLL found outside the artifact directory."
 
           # CI-observed (this branch, run 29609242832): the negative control failed —
@@ -1049,7 +1060,7 @@ jobs:
           # walk actually resolved from inside the artifact directory — i.e. a real,
           # exercised dependency — so removing it is guaranteed to break the closure.
           $victimDll = $null
-          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+          foreach ($rawLine in (& wldd "$env:ARTIFACT_DIR\CueSync.exe")) {
             $trimmedLine = $rawLine.Trim()
             $separatorIndex = $trimmedLine.IndexOf(' => ')
             if ($separatorIndex -le 0) { continue }
@@ -1063,18 +1074,18 @@ jobs:
           if (-not $victimDll) { Write-Error "no bundled DLL found in CueSync.exe's resolved dependency closure to use for the negative control"; exit 1 }
 
           Write-Host "== Negative control: removing $victimDll.dll =="
-          Copy-Item ".build\release\$victimDll.dll" "$env:RUNNER_TEMP\$victimDll.dll.bak" -Force
-          Remove-Item ".build\release\$victimDll.dll" -Force
+          Copy-Item "$env:ARTIFACT_DIR\$victimDll.dll" "$env:RUNNER_TEMP\$victimDll.dll.bak" -Force
+          Remove-Item "$env:ARTIFACT_DIR\$victimDll.dll" -Force
 
-          if (Test-DllClosure ".build\release\CueSync.exe") {
+          if (Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe") {
             throw "negative control failed: the closure check still passed with $victimDll.dll removed"
           }
           Write-Host "Negative control confirmed: the check correctly failed with $victimDll.dll removed."
 
           Write-Host "== Restoring $victimDll.dll =="
-          Copy-Item "$env:RUNNER_TEMP\$victimDll.dll.bak" ".build\release\$victimDll.dll" -Force
+          Copy-Item "$env:RUNNER_TEMP\$victimDll.dll.bak" "$env:ARTIFACT_DIR\$victimDll.dll" -Force
 
-          if (-not (Test-DllClosure ".build\release\CueSync.exe")) {
+          if (-not (Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe")) {
             throw "closure check still fails after restoring $victimDll.dll"
           }
           Write-Host "Closure check passes again after restoring the DLL."
@@ -1120,20 +1131,13 @@ jobs:
           # check's identical ResolveLinkTarget rationale, and the "Bundle GTK 4
           # runtime DLLs" step's comment — CI run 29705861291 — for why the
           # resolve is retried rather than called once).
-          $artifactItem = Get-Item ".build\release"
-          $resolvedTarget = $null
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            try {
-              $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
-              break
-            } catch {
-              Start-Sleep -Seconds 2
-            }
-          }
-          $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
+          # Real, non-junction output dir resolved once early (see the "Resolve
+          # real build output directory" step) — never touch the `.build\release`
+          # reparse point, whose ResolveLinkTarget/write/stat deny access here.
+          $artifactDir = $env:ARTIFACT_DIR
 
           $copied = 0
-          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+          foreach ($rawLine in (& wldd "$env:ARTIFACT_DIR\CueSync.exe")) {
             $trimmedLine = $rawLine.Trim()
             $separatorIndex = $trimmedLine.IndexOf(' => ')
             if ($separatorIndex -le 0) { continue }
@@ -1161,7 +1165,7 @@ jobs:
           # now comes from inside the artifact or a system path). This is the on-box
           # proof that the exe is self-contained.
           $remaining = @()
-          foreach ($rawLine in (& wldd ".build\release\CueSync.exe")) {
+          foreach ($rawLine in (& wldd "$env:ARTIFACT_DIR\CueSync.exe")) {
             $trimmedLine = $rawLine.Trim()
             $separatorIndex = $trimmedLine.IndexOf(' => ')
             if ($separatorIndex -le 0) { continue }
@@ -1194,7 +1198,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $exeItem = Get-Item ".build\release\CueSync.exe" -ErrorAction SilentlyContinue
+          $exeItem = Get-Item "$env:ARTIFACT_DIR\CueSync.exe" -ErrorAction SilentlyContinue
           if (-not $exeItem) { Write-Host "no CueSync.exe to launch — build/bundle did not produce one; nothing to measure"; exit 0 }
           $exe = $exeItem.FullName
           try {
@@ -1220,7 +1224,7 @@ jobs:
           Write-Host "===================== CueSync-startup.log ====================="
           # Round 6 routes the log to <repo>\.factory\probe\; older builds wrote next to the
           # exe — print whichever exists, and copy it into the artifact dir so it uploads.
-          $candidates = @(".factory\probe\CueSync-startup.log", ".build\release\CueSync-startup.log")
+          $candidates = @(".factory\probe\CueSync-startup.log", "$env:ARTIFACT_DIR\CueSync-startup.log")
           $printed = $false
           foreach ($log in $candidates) {
             if (Test-Path $log) {
@@ -1238,69 +1242,13 @@ jobs:
           Write-Host "===================== end diagnostics ========================="
           exit 0
 
-      # CI-observed (this branch, run 29704695613): "Upload build artifact" failed
-      # with "EPERM: operation not permitted, stat 'D:\...\.build\release'" —
-      # actions/upload-artifact's Node-based file walker can't stat the
-      # `.build\release` path directly because on Windows it's an NTFS junction
-      # to `.build\<triple>\release` (same one every earlier step in this job
-      # resolves via ResolveLinkTarget before touching it, e.g. the closure
-      # check and DLL-bundling steps above), not a plain directory. `if:
-      # always()` so the resolution still runs (and degrades gracefully) even
-      # when an earlier step in the job failed and `.build\release` was never
-      # created.
-      # CI-observed (this branch, run 29705861291): this step (which runs
-      # `if: always()`, including right after "Bundle GTK 4 runtime DLLs"
-      # failed) itself threw the same "Exception calling 'ResolveLinkTarget'
-      # ... Access ... is denied" error described in that step's comment
-      # above, so `dir` was never written to $env:GITHUB_OUTPUT — which is
-      # exactly why "Upload build artifact" below then failed with "Input
-      # required and not supplied: path" (its `path:` reads that now-missing
-      # output). Same retry-then-fall-back-to-unresolved-path fix as the
-      # other two ResolveLinkTarget call sites in this job: this step's own
-      # `if: always()` contract — always producing SOME `dir` value even when
-      # earlier steps failed — must hold even when the resolve itself throws.
-      # CI-observed (this branch, run 29706722369): "Upload build artifact" below
-      # failed with "EPERM: operation not permitted, stat 'D:\...\.build\release'"
-      # even though this step itself reported success — it had fallen back to the
-      # unresolved junction path (ResolveLinkTarget exhausted its retries again)
-      # and that path was still locked by the time upload-artifact's Node-based
-      # walker stat'd it moments later. The likely holder: the "Capture CueSync.exe
-      # startup diagnostics" step just above launches CueSync.exe out of this same
-      # directory and force-kills it — Stop-Process returning doesn't guarantee the
-      # OS has released every handle into the directory yet. Since upload-artifact
-      # has no retry of its own, this step now also waits for $artifactDir to be
-      # genuinely enumerable before publishing it, giving that lock the same
-      # retry-with-backoff treatment as the ResolveLinkTarget call above it.
-      - name: Resolve real build output directory (Windows junction workaround)
-        id: resolve-artifact-dir
-        if: always()
-        shell: pwsh
-        run: |
-          if (Test-Path ".build\release") {
-            $artifactItem = Get-Item ".build\release"
-            $resolvedTarget = $null
-            for ($attempt = 1; $attempt -le 5; $attempt++) {
-              try {
-                $resolvedTarget = $artifactItem.ResolveLinkTarget($true)
-                break
-              } catch {
-                Start-Sleep -Seconds 2
-              }
-            }
-            $artifactDir = if ($resolvedTarget) { $resolvedTarget.FullName } else { $artifactItem.FullName }
-            for ($attempt = 1; $attempt -le 5; $attempt++) {
-              try {
-                Get-ChildItem -LiteralPath $artifactDir -ErrorAction Stop | Out-Null
-                break
-              } catch {
-                Start-Sleep -Seconds 3
-              }
-            }
-          } else {
-            $artifactDir = ".build\release"
-          }
-          Add-Content $env:GITHUB_OUTPUT "dir=$artifactDir"
-
+      # The artifact directory was resolved once, early, into
+      # `steps.resolve-artifact-dir.outputs.dir` (the "Resolve real build output
+      # directory" step right after Build) — the real `.build\<triple>\release`
+      # path, never the `.build\release` junction that upload-artifact's Node
+      # walker could not `stat` ("EPERM ... stat '.build\release'", runs
+      # 29704695613 / 29706722369). Uploading that real path sidesteps the
+      # reparse point entirely, so no resolve/retry is needed here.
       - name: Upload build artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
