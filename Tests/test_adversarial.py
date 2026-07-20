@@ -393,14 +393,14 @@ def test_repair_runs_after_resolve_and_before_build():
         assert resolve_i is not None, job + ": no `swift package resolve` step"
         assert repair_i is not None, job + ": no repair step"
         assert build_i is not None, job + ": no Build/Test step"
-        assert (
-            resolve_i < repair_i < build_i
-        ), job + ": repair step must sit AFTER `swift package resolve` and " "BEFORE Build/Test (spec §2); got resolve@" + str(
-            resolve_i
-        ) + " repair@" + str(
-            repair_i
-        ) + " build@" + str(
-            build_i
+        assert resolve_i < repair_i < build_i, (
+            job + ": repair step must sit AFTER `swift package resolve` and "
+            "BEFORE Build/Test (spec §2); got resolve@"
+            + str(resolve_i)
+            + " repair@"
+            + str(repair_i)
+            + " build@"
+            + str(build_i)
         )
 
 
@@ -600,11 +600,12 @@ def _run_batch(commands):
     lines = proc.stdout.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]  # drop only the trailing-newline artifact
-    assert len(lines) == len(
-        commands
-    ), "harness returned %d lines for %d commands (framing broke)" % (
-        len(lines),
-        len(commands),
+    assert len(lines) == len(commands), (
+        "harness returned %d lines for %d commands (framing broke)"
+        % (
+            len(lines),
+            len(commands),
+        )
     )
     return lines
 
@@ -641,12 +642,12 @@ def _assert_safe_component(inp, slug):
     assert slug not in (".", ".."), "slug for %r is '.'/'..'" % (inp,)
     assert slug != "", "slug for %r is empty (fallback must apply)" % (inp,)
     assert "\x00" not in slug, "slug for %r contains a NUL" % (inp,)
-    assert _ALPHANUM_HYPHEN.fullmatch(
-        slug
-    ), "slug %r for %r has characters outside [a-z0-9-]" % (slug, inp)
-    assert not slug.startswith("-") and not slug.endswith(
-        "-"
-    ), "slug %r for %r has a leading/trailing '-'" % (slug, inp)
+    assert _ALPHANUM_HYPHEN.fullmatch(slug), (
+        "slug %r for %r has characters outside [a-z0-9-]" % (slug, inp)
+    )
+    assert not slug.startswith("-") and not slug.endswith("-"), (
+        "slug %r for %r has a leading/trailing '-'" % (slug, inp)
+    )
     assert "--" not in slug, "slug %r for %r has an uncollapsed '--'" % (slug, inp)
     for ch in slug:
         assert ord(ch) >= 0x20, "control char survived in slug %r" % (slug,)
@@ -802,9 +803,9 @@ def test_slugify_reserved_name_spec_examples_are_escaped():
     examples = ["CON", "con", "COM1", "LPT9", "NUL.txt"]
     slugs = _slugify_many([(inp, 80, "untitled") for inp in examples])
     for inp, slug in zip(examples, slugs):
-        assert (
-            slug.lower() not in RESERVED_SET
-        ), "spec §3: slugify(%r) = %r equals a reserved device name" % (inp, slug)
+        assert slug.lower() not in RESERVED_SET, (
+            "spec §3: slugify(%r) = %r equals a reserved device name" % (inp, slug)
+        )
     # Full case matrix, non-truncating: every reserved name escapes to "_name".
     matrix = [(n.upper(), 80, "untitled") for n in RESERVED_DEVICE_NAMES]
     for name, slug in zip(RESERVED_DEVICE_NAMES, _slugify_many(matrix)):
@@ -834,9 +835,9 @@ def test_slugify_is_deterministic_across_repeated_calls():
     ]
     first = _slugify_many([(s, 80, "untitled") for s in inputs])
     second = _slugify_many([(s, 80, "untitled") for s in inputs])
-    assert (
-        first == second
-    ), "slugify must be deterministic; got divergent runs:\n%r\n%r" % (first, second)
+    assert first == second, (
+        "slugify must be deterministic; got divergent runs:\n%r\n%r" % (first, second)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -877,9 +878,9 @@ def test_generate_token_length_contract_including_zero_negative_and_odd():
     tokens = _token_batch(lengths)
     for n, tok in zip(lengths, tokens):
         expected = n if n > 0 else 0
-        assert (
-            len(tok) == expected
-        ), "generateToken(length=%d) returned %d chars: %r" % (n, len(tok), tok)
+        assert len(tok) == expected, (
+            "generateToken(length=%d) returned %d chars: %r" % (n, len(tok), tok)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -895,10 +896,9 @@ def test_generate_token_alphabet_is_lowercase_hex_and_fully_reachable():
     # restricted-alphabet regression would leave gaps.
     tokens = _token_batch([64] * 500)
     seen = set("".join(tokens))
-    assert seen <= set(
-        "0123456789abcdef"
-    ), "token emitted characters outside [0-9a-f]: %r" % (
-        seen - set("0123456789abcdef")
+    assert seen <= set("0123456789abcdef"), (
+        "token emitted characters outside [0-9a-f]: %r"
+        % (seen - set("0123456789abcdef"))
     )
     assert seen == set("0123456789abcdef"), (
         "not every hex symbol is reachable (possible modulo bias / restricted "
@@ -919,9 +919,9 @@ def test_generate_token_is_not_time_or_counter_derived():
     tokens = _token_batch([32] * 256)
     # Not monotonically increasing (a timestamp/counter would be).
     increasing = all(a < b for a, b in zip(tokens, tokens[1:]))
-    assert (
-        not increasing
-    ), "tokens are monotonically increasing — smells like a Date/counter source"
+    assert not increasing, (
+        "tokens are monotonically increasing — smells like a Date/counter source"
+    )
 
     def common_prefix(a, b):
         i = 0
@@ -942,10 +942,9 @@ def test_generate_token_batch_has_no_duplicates():
     # negligible probability, a counter/time source or a too-short-entropy
     # regression collides readily.
     tokens = _token_batch([32] * 5000)
-    assert len(set(tokens)) == len(
-        tokens
-    ), "expected 5000 unique tokens, got %d — entropy/uniqueness regression" % len(
-        set(tokens)
+    assert len(set(tokens)) == len(tokens), (
+        "expected 5000 unique tokens, got %d — entropy/uniqueness regression"
+        % len(set(tokens))
     )
 
 
@@ -1427,9 +1426,9 @@ def test_gesture_patch_sets_can_target_false_only_on_decorative_path_widgets():
     )
     # The assignment appears exactly once in the whole patch, and no interactive
     # widget factory is referenced in any added line.
-    assert (
-        "\n".join(_patch_added_lines()).count("canTarget = false") == 1
-    ), "expected `canTarget = false` to be added exactly once (only in createPathWidget)"
+    assert "\n".join(_patch_added_lines()).count("canTarget = false") == 1, (
+        "expected `canTarget = false` to be added exactly once (only in createPathWidget)"
+    )
     interactive_factories = [
         "createButton",
         "createTextField",
@@ -1504,9 +1503,9 @@ def test_gesture_patch_step_exists_on_all_three_gtkbackend_legs():
 def test_both_windows_gesture_patch_steps_are_byte_identical():
     bodies = _gesture_bodies()
     a, b = bodies.get("windows-build"), bodies.get("windows-test")
-    assert (
-        a is not None and b is not None
-    ), "gesture-patch step missing on a Windows leg: " + repr(sorted(bodies))
+    assert a is not None and b is not None, (
+        "gesture-patch step missing on a Windows leg: " + repr(sorted(bodies))
+    )
     assert a == b, (
         "spec §3: the windows-build and windows-test gesture-patch step bodies must not "
         "drift — a divergence means build and test compile differently-patched checkouts "
@@ -1852,9 +1851,9 @@ def test_dev_script_clears_read_only_on_exactly_the_patched_files_before_apply()
         % (sorted(cleared), sorted(patched))
     )
     apply_pos = code.find("git apply")
-    assert (
-        apply_pos != -1
-    ), "dev script contains no `git apply` at all (ATTACK 35 covers this)"
+    assert apply_pos != -1, (
+        "dev script contains no `git apply` at all (ATTACK 35 covers this)"
+    )
     assert chmod_pos < apply_pos, (
         "the `chmod … u+w` clear must run BEFORE the first `git apply` — a clear placed "
         "after the apply cannot help the apply that already failed on a read-only source"
@@ -2648,9 +2647,9 @@ def test_windows_input_patch_applies_cleanly_in_the_real_ci_sequence_and_its_rev
     )
 
     first = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH)
-    assert (
-        first.returncode == 0
-    ), "forward apply of the windows-input patch failed:\n" + (first.stderr or "")
+    assert first.returncode == 0, (
+        "forward apply of the windows-input patch failed:\n" + (first.stderr or "")
+    )
 
     reverse = _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH, "--reverse", "--check")
     assert reverse.returncode == 0, (
@@ -2692,17 +2691,17 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
     _win_input_or_skip()
     git, tree = _pristine_tree_or_skip()
     assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, "gesture apply failed"
-    assert (
-        _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0
-    ), "windows-input apply failed"
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input apply failed"
+    )
 
     backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
         encoding="utf-8"
     )
     idx = backend.find("func mainRunLoopTicklingLoop")
-    assert (
-        idx != -1
-    ), "mainRunLoopTicklingLoop vanished from GtkBackend.swift after apply"
+    assert idx != -1, (
+        "mainRunLoopTicklingLoop vanished from GtkBackend.swift after apply"
+    )
     # The whole tickler body is small; a generous window stays inside it (the next
     # `func ` bounds it) and never reaches an unrelated later function.
     nxt = backend.find("\n    private ", idx + 40)
@@ -3089,9 +3088,9 @@ def test_windows_input_patch_step_absent_and_both_remaining_windows_patches_stay
 
     gsk_bodies = _gsk_bodies()
     a, b = gsk_bodies.get("windows-build"), gsk_bodies.get("windows-test")
-    assert (
-        a is not None and b is not None
-    ), "GSK-renderer patch step missing on a Windows leg: " + repr(sorted(gsk_bodies))
+    assert a is not None and b is not None, (
+        "GSK-renderer patch step missing on a Windows leg: " + repr(sorted(gsk_bodies))
+    )
     assert a == b, (
         "spec CUESYNC-9 §4: the windows-build and windows-test GSK-renderer patch "
         "step bodies must not drift — a divergence means build and test compile "
@@ -3244,9 +3243,9 @@ def test_both_patches_applied_preserve_can_target_and_add_the_glib_drain():
     _win_input_or_skip()
     git, tree = _pristine_tree_or_skip()
     assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, "gesture apply failed"
-    assert (
-        _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0
-    ), "windows-input apply (second, real CI order) failed"
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input apply (second, real CI order) failed"
+    )
 
     backend = (Path(tree) / "Sources/GtkBackend/GtkBackend.swift").read_text(
         encoding="utf-8"
@@ -3256,9 +3255,9 @@ def test_both_patches_applied_preserve_can_target_and_add_the_glib_drain():
     )
 
     idx = backend.find("createPathWidget")
-    assert (
-        idx != -1
-    ), "createPathWidget vanished from the fully-patched GtkBackend.swift"
+    assert idx != -1, (
+        "createPathWidget vanished from the fully-patched GtkBackend.swift"
+    )
     nxt = backend.find("public func ", idx + len("public func createPathWidget"))
     factory_body = backend[idx:nxt] if nxt != -1 else backend[idx:]
     assert "canTarget = false" in factory_body, (
@@ -3448,12 +3447,12 @@ def test_all_three_patches_apply_cleanly_in_the_real_ci_sequence_gesture_then_in
     _gsk_or_skip()
     _win_input_or_skip()
     git, tree = _pristine_tree_or_skip()
-    assert (
-        _apply_patch(git, tree, PATCH_PATH).returncode == 0
-    ), "gesture (CUESYNC-8) apply failed against the pristine checkout"
-    assert (
-        _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0
-    ), "windows-input (CUESYNC-9) apply failed after the gesture patch"
+    assert _apply_patch(git, tree, PATCH_PATH).returncode == 0, (
+        "gesture (CUESYNC-8) apply failed against the pristine checkout"
+    )
+    assert _apply_patch(git, tree, WINDOWS_INPUT_PATCH_PATH).returncode == 0, (
+        "windows-input (CUESYNC-9) apply failed after the gesture patch"
+    )
     r = _apply_patch(git, tree, WINDOWS_GSK_PATCH_PATH)
     assert r.returncode == 0, (
         "spec CUESYNC-9 §0.3/acceptance: the GSK-renderer patch must apply "
@@ -3625,11 +3624,12 @@ def _run_cs_batch(commands):
     lines = proc.stdout.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
-    assert len(lines) == len(
-        commands
-    ), "value-path harness returned %d lines for %d commands (framing broke)" % (
-        len(lines),
-        len(commands),
+    assert len(lines) == len(commands), (
+        "value-path harness returned %d lines for %d commands (framing broke)"
+        % (
+            len(lines),
+            len(commands),
+        )
     )
     return [base64.b64decode(o).decode("utf-8") for o in lines]
 
@@ -3749,25 +3749,26 @@ def test_showkontrol_timecode_is_bounded_and_wellformed_for_hostile_start_values
         assert len(fields) == _SK_FIELD_COUNT
         formatted, compact, ms = fields[0], fields[1], fields[2]
         numeric = (formatted + " " + compact + " " + ms).lower()
-        assert (
-            "nan" not in numeric and "inf" not in numeric
-        ), "hostile start %r leaked a non-finite token into the .cue timecode: %r" % (
-            s,
-            out,
+        assert "nan" not in numeric and "inf" not in numeric, (
+            "hostile start %r leaked a non-finite token into the .cue timecode: %r"
+            % (
+                s,
+                out,
+            )
         )
-        assert _TC_RE.fullmatch(
-            formatted
-        ), "timecode %r is not HH:MM:SS:FF for start %r" % (formatted, s)
+        assert _TC_RE.fullmatch(formatted), (
+            "timecode %r is not HH:MM:SS:FF for start %r" % (formatted, s)
+        )
         assert 0 <= int(formatted[:2]) <= 99, "hours out of range for start %r" % (s,)
-        assert (
-            compact.isdigit() and len(compact) == 8
-        ), "compact timecode %r malformed for start %r" % (compact, s)
-        assert (
-            ms.isdigit()
-        ), "milliseconds field %r is not a non-negative integer (start %r)" % (ms, s)
-        assert (
-            0 <= int(ms) <= 359_999_000
-        ), "milliseconds %s exceeds the 100h clamp (start %r)" % (ms, s)
+        assert compact.isdigit() and len(compact) == 8, (
+            "compact timecode %r malformed for start %r" % (compact, s)
+        )
+        assert ms.isdigit(), (
+            "milliseconds field %r is not a non-negative integer (start %r)" % (ms, s)
+        )
+        assert 0 <= int(ms) <= 359_999_000, (
+            "milliseconds %s exceeds the 100h clamp (start %r)" % (ms, s)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3806,11 +3807,12 @@ def test_resolume_export_neutralises_xml_injection_in_the_preset_name():
             % (root.attrib.get("name"), a)
         )
         curves = [p.attrib.get("curve") for p in root.iter("point")]
-        assert all(
-            c == "1" for c in curves
-        ), "injected markup created rogue <point> elements (curves=%s) for name %r" % (
-            curves,
-            a,
+        assert all(c == "1" for c in curves), (
+            "injected markup created rogue <point> elements (curves=%s) for name %r"
+            % (
+                curves,
+                a,
+            )
         )
 
 
@@ -3870,9 +3872,9 @@ def test_resolume_export_clamps_hostile_curve_and_neutralises_nonfinite_position
                     "non-finite/scientific coordinate %s=%r leaked into Resolume XML "
                     "(hostile start=%r)" % (axis, v, s)
                 )
-                assert (
-                    0.0 <= float(v) <= 1.0
-                ), "coordinate %s=%s outside [0,1] (start=%r)" % (axis, v, s)
+                assert 0.0 <= float(v) <= 1.0, (
+                    "coordinate %s=%s outside [0,1] (start=%r)" % (axis, v, s)
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -4166,11 +4168,12 @@ def _run_rt_batch(commands):
     lines = proc.stdout.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
-    assert len(lines) == len(
-        commands
-    ), "value-chain harness returned %d lines for %d commands (framing broke)" % (
-        len(lines),
-        len(commands),
+    assert len(lines) == len(commands), (
+        "value-chain harness returned %d lines for %d commands (framing broke)"
+        % (
+            len(lines),
+            len(commands),
+        )
     )
     return [base64.b64decode(o).decode("utf-8") for o in lines]
 
@@ -4218,12 +4221,13 @@ def test_showkontrol_export_reimport_roundtrip_cannot_inject_records_or_shift_co
             "a record separator that the .cue format's own CR/LF re-import honours"
             % (records, name)
         )
-        assert (
-            has_cr == "0" and has_lf == "0"
-        ), "name %r leaked a CR/LF into the exported .cue (hasCR=%s hasLF=%s)" % (
-            name,
-            has_cr,
-            has_lf,
+        assert has_cr == "0" and has_lf == "0", (
+            "name %r leaked a CR/LF into the exported .cue (hasCR=%s hasLF=%s)"
+            % (
+                name,
+                has_cr,
+                has_lf,
+            )
         )
         assert int(fields) == _SK_FIELD_COUNT, (
             "ShowKontrol row is %d comma-columns; name %r produced %s — a comma survived "
@@ -4324,9 +4328,9 @@ def test_rekordbox_import_to_resolume_export_never_emits_nonfinite_coords():
                 "spec §4: a hostile Rekordbox Start leaked a non-finite/scientific %s=%r into "
                 "the Resolume XML across the import->export chain" % (axis, v)
             )
-            assert (
-                0.0 <= float(v) <= 1.0
-            ), "coordinate %s=%s outside [0,1] after the chain" % (axis, v)
+            assert 0.0 <= float(v) <= 1.0, (
+                "coordinate %s=%s outside [0,1] after the chain" % (axis, v)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4449,24 +4453,26 @@ def test_showkontrol_export_reimport_roundtrip_bounds_hostile_numeric_start():
             "[0, 359_999_000] clamp (a non-finite/overflowing start escaped)"
             % (s, max_ms)
         )
-        assert (
-            1 <= int(re_count) <= 2
-        ), "hostile start %r yielded %s re-parsed cues (expected 1 or 2)" % (
-            s,
-            re_count,
+        assert 1 <= int(re_count) <= 2, (
+            "hostile start %r yielded %s re-parsed cues (expected 1 or 2)"
+            % (
+                s,
+                re_count,
+            )
         )
         # The emitted timecode is well-formed and never a nan/inf token.
         sk = _rt_inner(sk_b64)
         timecode = sk.split(",")[0]
-        assert _TC_RE.fullmatch(
-            timecode
-        ), "start %r produced a malformed .cue timecode %r" % (s, timecode)
+        assert _TC_RE.fullmatch(timecode), (
+            "start %r produced a malformed .cue timecode %r" % (s, timecode)
+        )
         low = sk.lower()
-        assert (
-            "nan" not in low and "inf" not in low
-        ), "start %r leaked a non-finite token into the round-tripped .cue: %r" % (
-            s,
-            sk,
+        assert "nan" not in low and "inf" not in low, (
+            "start %r leaked a non-finite token into the round-tripped .cue: %r"
+            % (
+                s,
+                sk,
+            )
         )
         assert has_cr == "0" and has_lf == "0", (
             "start %r perturbed the record framing" % s
@@ -4931,11 +4937,12 @@ def test_resolume_parse_to_export_preset_name_roundtrip_neutralises_injection():
     ]
     outs = _run_av_batch(["resx %s" % _b64(x) for x in xmls])
     for payload, out in zip(payloads, outs):
-        assert out.startswith(
-            "OK\t"
-        ), "Resolume parse->export chain failed for payload %r: %r" % (
-            payload,
-            out[:80],
+        assert out.startswith("OK\t"), (
+            "Resolume parse->export chain failed for payload %r: %r"
+            % (
+                payload,
+                out[:80],
+            )
         )
         _ok, parsed_b64, xml_b64 = out.split("\t")
         parsed_name = base64.b64decode(parsed_b64).decode("utf-8")
