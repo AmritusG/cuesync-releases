@@ -221,35 +221,6 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      # CI-observed (this branch, runs 29705225341 → 29707857572): six consecutive
-      # rounds widened the retry-with-backoff budget around `.build\release`
-      # (`ResolveLinkTarget`/`Copy-Item`/`Get-ChildItem` all throwing "Access to the
-      # path ... is denied") from 5 attempts/2s to 10 attempts/3s, and the lock still
-      # outlasted it in the latest run: `ResolveLinkTarget` exhausted 10×2s, then the
-      # "Bundle GTK 4 runtime DLLs" step's own `Copy-Item` exhausted a further 10×3s
-      # (50s total) and `.build\release` was still inaccessible. Retrying around a
-      # transient lock is the wrong shape of fix once the lock can outlast any
-      # reasonable budget — the actual holder on windows-latest runners is Microsoft
-      # Defender's real-time scan of the freshly linked CueSync.exe (a documented cause
-      # of "Access is denied" on newly built executables in Windows CI). Excluding this
-      # job's `.build` tree (and the exe itself) from real-time scanning removes the
-      # lock at its source instead of racing it. Runs once, immediately after checkout,
-      # before anything writes into `.build`. Best-effort: the hosted runner's admin
-      # account can normally call Defender cmdlets, but if a future image restricts
-      # this, degrade to a warning rather than failing the job — the retry-with-backoff
-      # logic on every `.build\release` touch further down stays as defense in depth.
-      - name: Exclude .build from Windows Defender real-time scanning
-        shell: pwsh
-        run: |
-          try {
-            $buildPath = Join-Path $env:GITHUB_WORKSPACE ".build"
-            Add-MpPreference -ExclusionPath $buildPath -ErrorAction Stop
-            Add-MpPreference -ExclusionProcess "CueSync.exe" -ErrorAction Stop
-            Write-Host "Excluded $buildPath and CueSync.exe from Windows Defender real-time scanning"
-          } catch {
-            Write-Host "Add-MpPreference unavailable/denied on this runner (non-fatal — retry-with-backoff on .build\release still applies below): $($_.Exception.Message)"
-          }
-
       # swift-cross-ui's WinUIBackend (CUESYNC-5) depends on swift-winui, whose
       # own compile-time prerequisite is the Windows 10.0.17763.0 SDK
       # (https://github.com/moreSwift/swift-winui#compiletime-dependencies:
@@ -721,6 +692,35 @@ jobs:
 
       - name: Build (release)
         run: swift build -c release
+
+      # CI-observed (this branch, runs 29705225341 → 29707857572): six rounds widened
+      # the retry-with-backoff budget around `.build\release` from 5 attempts/2s to 10
+      # attempts/3s and the lock still outlasted it. The next round's theory — Windows
+      # Defender real-time scanning the freshly linked CueSync.exe — was tried and
+      # DISPROVED (run 29722598828): an "Exclude .build from Windows Defender real-time
+      # scanning" step ran successfully right after checkout (confirmed in that step's
+      # own log: "Excluded ...\.build and CueSync.exe from Windows Defender real-time
+      # scanning") and the very next attempt still hit the identical "Access to the path
+      # ...\.build\release is denied." Reverted rather than stacked (spec step 5: revert
+      # non-movers) — this is the replacement, single-suspect fix.
+      #
+      # The actual likely holder: MSVC's PDB server, `mspdbsrv.exe`. `link.exe` (which
+      # Swift's Windows toolchain invokes to produce CueSync.exe) spawns it to serialize
+      # PDB writes, and Microsoft's own docs note it deliberately stays resident well
+      # after the link that spawned it returns, to serve the next one — holding open
+      # handles into the output directory (`.build\<triple>\release`, the same tree
+      # `.build\release` junctions to) for far longer than any of this job's retry
+      # budgets. That matches the evidence exactly: a lock that survives 10×2s
+      # (ResolveLinkTarget) then a further 10×3s (Copy-Item) — 50s — and an AV exclusion
+      # that changes nothing, because the holder was never Defender. `mspdbsrv.exe` is
+      # explicitly documented as safe to terminate at any time (Microsoft: it is a
+      # caching convenience, not build state) — the next MSVC link simply respawns it.
+      # `-ErrorAction SilentlyContinue` makes this a no-op when it isn't running.
+      - name: Stop lingering MSVC PDB server (mspdbsrv.exe) before touching build output
+        shell: pwsh
+        run: |
+          Get-Process -Name mspdbsrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "mspdbsrv.exe stopped (or was not running) — .build\release should no longer be held open by it"
 
       # spec §D.17: bundle the GTK 4 runtime (and its transitive closure —
       # glib, cairo, pango, harfbuzz, gdk-pixbuf, graphene, fribidi, libepoxy,
