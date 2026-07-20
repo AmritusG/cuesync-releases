@@ -297,3 +297,34 @@ Fix: drop the hard content min; keep `.defaultSize`; let the inner `ScrollView` 
 Generalized: **an unverifiable fix is a guess, and a guess repeated seven times is still a guess.**
 The moment real evidence lands, rank it above every prior round's narrative — even (especially) your
 own. CUESYNC-9 §0.7, `CueSync/CueSync/UI/CueSyncApp.swift`.
+
+## Two bugs with one symptom: fixing the loud one can unmask — not disprove — the quiet one (CUESYNC-9, round 10)
+
+Round 8 fixed the layout-thrash loop (above) and, because the input death vanished from *theory*,
+round 9 reverted the run-loop input patch as "disproven." Then the first probe captured **after** that
+revert (with round 8's fix in place) came back: layout flood gone, window full-size — **and input still
+100% dead** (`close_click_exited: false`, `changed_ratio: 0`, black content). Two independent bugs had
+been sharing one symptom ("paints but nothing is clickable"): a layout loop *and* Win32-queue
+starvation by the Foundation `RunLoop.main` tickler. The loop was the *louder* one and, while present,
+**masked** every input experiment rounds 1–7 ran — so none of those "didn't move the probe" verdicts
+were ever valid. Round 9 removed the input fix at the exact moment it could first be tested fairly.
+
+- **"The symptom went away in my model" ≠ "the bug is gone."** Round 8's log disproved *starvation as
+  the layout-loop's cause*; it never disproved queue starvation as a *separate* cause. The tell it was
+  mis-read as a disproof: "GTK is actively laying out ⇒ not starved" — but layout runs on GLib idle
+  timers, independent of the Win32 message queue that carries `WM_PAINT` and input. Don't let one bug's
+  evidence acquit another bug on a shared symptom.
+- **When two defects share a symptom, fix the dominant one first, then RE-MEASURE before deleting the
+  other's fix.** Reverting an unproven fix is right (spec step 5) — but sequence it: land the dominant
+  fix, get a clean probe, *then* decide the other fix's fate on evidence, not on the model.
+- **The minimal input fix was already in the audit the whole time.** `§2.5` named the tickler as "the
+  one non-macOS-only mechanism that touches the OS event queue." The fix isn't a new drain or an
+  `@_silgen_name` hook (both reverted, both redteam-flagged) — it's narrowing the tickler's existing
+  `#if !os(macOS)` to also exclude Windows, because macOS **already** runs GtkBackend interactively
+  *without* the tickler. The strongest fix is often "make the broken platform match the working one,"
+  not "add machinery to the broken one." Trade-off (Windows Foundation async now unserviced → file
+  dialogs) is documented and strictly better than total input death; still one suspect, gate-verified.
+
+Generalized: **a fix that only ever ran behind a bigger bug was never tested — unmask it, re-probe,
+and let the machine, not the story, decide whether it works.** CUESYNC-9 §0.9,
+`patches/swift-cross-ui-0.8.0-windows-runloop-tickler.patch`.

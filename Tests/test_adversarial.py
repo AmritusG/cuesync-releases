@@ -1022,6 +1022,14 @@ WINDOWS_INPUT_PATCH_NAME = "swift-cross-ui-0.8.0-windows-input.patch"
 # upstream file (runMainLoop — GSK_RENDERER=cairo for the remote-desktop GL-renderer
 # failure), kept in its own reviewable file, disjoint hunk from the other two.
 WINDOWS_GSK_PATCH_NAME = "swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+# CUESYNC-9 §0.9 (round 10): a fourth, distinct root-cause patch against the same
+# upstream file (the tickler call inside runMainLoop — narrows `#if !os(macOS)` to
+# `#if !os(macOS) && !os(Windows)` so the Foundation RunLoop tickler stops draining
+# GDK's Win32 message queue on Windows; Fork W input-death fix). Kept in its own
+# reviewable file, disjoint hunk from the other two. This is NOT the reverted
+# WINDOWS_INPUT_PATCH_NAME: it binds no @_silgen_name symbol, adds no drain, adds no
+# API — it only changes an existing guard.
+WINDOWS_TICKLER_PATCH_NAME = "swift-cross-ui-0.8.0-windows-runloop-tickler.patch"
 
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
@@ -1676,14 +1684,14 @@ def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit(
 # ---------------------------------------------------------------------------
 
 
-def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches():
-    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's
-    windows-input patch — the second of the three patches this test used to
-    expect — was reverted as a disproven, non-load-bearing fix per spec step 5.
-    Exactly TWO named patches remain checked in against GtkBackend.swift now
-    (gesture/interactivity + GSK-renderer); a THIRD file (the reverted patch
-    reappearing, or anything else) is a supply-chain regression, so the expected
-    set is asserted exactly, and its absence is checked directly by name too."""
+def test_dev_script_and_every_ci_leg_apply_the_three_remaining_checked_in_patches():
+    """UPDATED for round 10 (specs/CUESYNC-9-findings.md §0.9): round 9 reverted
+    round 7's windows-input patch; round 10 adds a NEW, distinct RunLoop-tickler
+    patch (narrows an existing `#if` guard — no @_silgen_name, no drain, no API).
+    Exactly THREE named patches now touch GtkBackend.swift (gesture/interactivity +
+    GSK-renderer + RunLoop-tickler); a FOURTH file, or the reverted windows-input
+    patch reappearing, is a supply-chain regression, so the expected set is asserted
+    exactly, and the reverted patch's absence is checked directly by name too."""
     patch_dir = REPO_ROOT / "patches"
     if not patch_dir.is_dir():
         raise unittest.SkipTest("patches/ directory not found")
@@ -1692,12 +1700,13 @@ def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches(
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME])
+    expected = sorted(
+        [GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME, WINDOWS_TICKLER_PATCH_NAME]
+    )
     assert gtk_patches == expected, (
-        "spec §4/§0.3/§0.8: expected exactly the two named checked-in patches "
-        "touching GtkBackend.swift (" + repr(expected) + ") now that the "
-        "windows-input patch is reverted; a THIRD file or a divergent copy of "
-        "either is a supply-chain risk. Found: " + repr(gtk_patches)
+        "spec §4/§0.3/§0.9: expected exactly the three named checked-in patches "
+        "touching GtkBackend.swift (" + repr(expected) + "); a FOURTH file or a "
+        "divergent copy of any is a supply-chain risk. Found: " + repr(gtk_patches)
     )
     assert WINDOWS_INPUT_PATCH_NAME not in gtk_patches, (
         "the reverted windows-input patch must not be a checked-in patch file "
@@ -1717,6 +1726,10 @@ def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches(
     assert WINDOWS_GSK_PATCH_NAME in dev_code, (
         "scripts/patch-swift-cross-ui.sh must apply the GSK-renderer patch in "
         "executable code too (spec §0.3)"
+    )
+    assert WINDOWS_TICKLER_PATCH_NAME in dev_code, (
+        "scripts/patch-swift-cross-ui.sh must apply the RunLoop-tickler patch in "
+        "executable code too (spec §0.9, round 10)"
     )
     for job, _i, block in GESTURE_BLOCKS:
         assert GESTURE_PATCH_NAME in block, (
@@ -3973,17 +3986,28 @@ def test_xml_parsers_explicitly_disable_external_entity_resolution():
 
 
 def test_every_checked_in_swift_cross_ui_patch_is_lf_only():
+    # Round 10 (§0.9): the RunLoop-tickler patch applies on the same Windows legs and
+    # must be LF-only too. windows-input.patch was reverted (round 9) so it is absent
+    # here — skip only the individually-missing file, never abort the whole check
+    # (which would silently stop guarding the present patches).
     patches = {
         GESTURE_PATCH_NAME: PATCH_PATH,
         WINDOWS_INPUT_PATCH_NAME: WINDOWS_INPUT_PATCH_PATH,
         WINDOWS_GSK_PATCH_NAME: WINDOWS_GSK_PATCH_PATH,
+        WINDOWS_TICKLER_PATCH_NAME: REPO_ROOT / "patches" / WINDOWS_TICKLER_PATCH_NAME,
     }
     offenders = []
+    checked = []
     for name, path in patches.items():
         if not path.is_file():
-            raise unittest.SkipTest("%s not present in this checkout" % name)
+            continue
+        checked.append(name)
         if b"\r" in path.read_bytes():
             offenders.append(name)
+    assert WINDOWS_TICKLER_PATCH_NAME in checked, (
+        "the round-10 RunLoop-tickler patch must be present and LF-checked "
+        "(specs/CUESYNC-9-findings.md §0.9)"
+    )
     assert not offenders, (
         "these checked-in swift-cross-ui patch(es) contain a carriage return "
         "(CRLF-corrupted): %s. Every patch here is applied via `git apply` on "

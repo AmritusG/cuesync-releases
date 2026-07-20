@@ -282,21 +282,21 @@ final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
             "in round 9 (specs/CUESYNC-9-findings.md §0.8)")
     }
 
-    /// UPDATED for round 9: each of the two REMAINING patches is guarded
-    /// idempotently and actually applied — an exact count of 2, not merely "at
-    /// least 3" as before, so a reverted patch quietly reappearing would trip this.
-    /// Was: "each of the three patches ... idempotently and actually."
-    func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
+    /// UPDATED for round 10 (specs/CUESYNC-9-findings.md §0.9): THREE patches are
+    /// each guarded idempotently and actually applied — an exact count of 3 (round 10
+    /// adds the RunLoop-tickler patch), so a reverted patch quietly reappearing, or a
+    /// fourth creeping in, would trip this. Was: an exact count of 2 (round 9).
+    func testDevScriptAppliesAllThreeRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 2,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the two remaining patches with its own " +
+        XCTAssertEqual(reverseCheckCount, 3,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the three patches with its own " +
             "`git apply --reverse --check` — found \(reverseCheckCount)")
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 2,
-            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the two " +
-            "remaining patches — found \(plainApplyCount)")
+        XCTAssertEqual(plainApplyCount, 3,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the three " +
+            "patches — found \(plainApplyCount)")
     }
 
     func testDevScriptStillFailsFastOnAnyError() throws {

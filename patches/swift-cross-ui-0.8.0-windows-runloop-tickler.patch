@@ -1,0 +1,109 @@
+# swift-cross-ui v0.8.0 GtkBackend Windows RunLoop-tickler fix (CUESYNC-9, round 10)
+#
+# Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
+# *resolved checkout* at `.build/checkouts/swift-cross-ui` — the upstream dependency
+# source is never edited in place in this repo; this file is the only checked-in copy
+# of the change. Kept SEPARATE from patches/swift-cross-ui-0.8.0-gtk-interactivity.patch
+# (CUESYNC-8, createPathWidget can-target) and
+# patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch (CUESYNC-9 round 4, GSK_RENDERER
+# at the top of runMainLoop) so each patch documents exactly one root cause and stays
+# independently revertable (spec CUESYNC-9 step 5). All three touch
+# Sources/GtkBackend/GtkBackend.swift but at DISJOINT line ranges — createPathWidget
+# (~1618), the top of runMainLoop (~116), and the tickler call inside runMainLoop's
+# activation callback (~151) — so they apply cleanly in sequence in either order.
+#
+# This is NOT the reverted rounds-1/2/7 `windows-input.patch`. That patch rewrote
+# `mainRunLoopTicklingLoop` to *add* a Win32-queue drain and (round 7) an
+# `@_silgen_name("_dispatch_main_queue_callback_4CF")` hook to a private libdispatch
+# symbol; round 9 reverted it as a disproven, non-load-bearing, fragile mutation
+# (specs/CUESYNC-9-findings.md §0.8, two redteam tests). This patch adds NO symbol
+# binding, NO drain, NO new API — it only *narrows an existing `#if` guard* so the
+# tickler that already does not run on macOS also does not run on Windows.
+#
+# Root cause — Fork W, window-level input death (specs/CUESYNC-9-findings.md §0.9):
+#   The 2026-07-20 14:26 probe (the first machine evidence captured AFTER round 9,
+#   with round 8's layout-loop fix in place) proves the input death is a SEPARATE,
+#   still-live bug that survives that fix: the `Gtk-CRITICAL: Allocation height too
+#   small` FLOOD is gone (round 8 worked — the infinite relayout loop is fixed and
+#   the window is now full-size 1228x854), yet result.json still reports
+#   `close_click_exited: false`, `center_click_changed: false`, `changed_ratio: 0`,
+#   and the window renders its background + scrollbar but black content. A real click
+#   on the window's own title-bar CLOSE button does not terminate the app => Fork W
+#   (window-level), which per spec §1 rules OUT app-level hit-testing (Fork D).
+#
+#   `mainRunLoopTicklingLoop` (GtkBackend.swift, added upstream by PR #141 to service
+#   Foundation on non-macOS) pumps `RunLoop.main.limitDate(forMode: .default)`.
+#   swift-corelibs-foundation binds the .default run-loop mode to this thread's Win32
+#   message queue via `_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`; each pass
+#   PeekMessage/DispatchMessage-drains that queue — the SAME queue GDK's win32 backend
+#   reads for WM_PAINT and for pointer/keyboard input. Two uncoordinated pumps race
+#   over one queue; GDK loses. That single starvation explains BOTH symptoms at once:
+#   no further WM_PAINT reaches GDK (content stays black after the first frame) and no
+#   input reaches GDK's WNDPROC (every click, including window chrome, is swallowed).
+#   Round 8's dismissal of this ("GTK is actively laying out => not starved") was a
+#   non-sequitur: relayout runs on GLib idle/timeout sources, which are independent of
+#   the Win32 message queue — so live layout activity never disproved input-queue
+#   starvation. And every pre-round-8 probe had the min-frame relayout LOOP masking
+#   this, so no earlier input experiment was ever fairly evaluated.
+#
+# Fix (one hunk, an existing `#if` guard, no new symbol/API/dependency):
+#   The tickler already runs only `#if !os(macOS)` — it is deliberately excluded on
+#   macOS, where the GtkBackend UI nonetheless renders and is fully interactive (the
+#   saga built and ran that exact target on macOS/Homebrew GTK). That proves GTK/GDK
+#   do NOT need the Foundation tickler for rendering or input — GTK's own GLib main
+#   loop (g_application_run) owns the message queue. So extend the exclusion to
+#   Windows: `#if !os(macOS) && !os(Windows)`. GTK's GLib loop then owns the Win32
+#   queue on Windows exactly as it already does on macOS, and GDK receives WM_PAINT +
+#   input again. Linux is unchanged (still runs the tickler).
+#
+#   Trade-off, documented (findings §0.9): with the Foundation tickler off on Windows,
+#   `DispatchQueue.main` / Swift `Task`+`await` continuations are no longer serviced,
+#   so the file-dialog import/export paths (which use `Task { await chooseFile() }`)
+#   will not complete on Windows until a follow-up services the dispatch main queue
+#   WITHOUT re-draining the Win32 queue (e.g. a private-mode run-loop pass). That is a
+#   strict improvement over today's TOTAL input death, and is the correct one-suspect
+#   step per spec step 5: if the probe does not move, this hunk is reverted before the
+#   next suspect (a backend decision, e.g. WinUIBackend) is tried.
+#
+# Compile/link verified on macOS: the change is a compile-time `#if` narrowing only;
+# the excluded call and the whole non-Windows path are unaffected, and `swift build`
+# links CueSync with all three patches applied. The live remote-desktop behaviour is
+# what the on-box probe / GTE confirms.
+#
+# Idempotency: .github/workflows/swift-windows.yml and scripts/patch-swift-cross-ui.sh
+# guard re-application with `git apply --reverse --check` before applying, so a second
+# run against an already-patched checkout is a no-op rather than a failure.
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index d83bbefb..b8c5def0 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -148,7 +148,27 @@ public final class GtkBackend:
+             // soon as we exit this scope.
+             self.globalCSSProvider = provider
+
+-            #if !os(macOS)
++            // CUESYNC-9 round 10 (specs/CUESYNC-9-findings.md §0.9): on Windows the
++            // Foundation RunLoop tickler must NOT run. `mainRunLoopTicklingLoop`
++            // pumps `RunLoop.main.limitDate(forMode: .default)`; swift-corelibs-
++            // foundation binds the .default run-loop mode to this thread's Win32
++            // message queue (`_CFRunLoopSetWindowsMessageQueueMask(QS_ALLINPUT)`) and
++            // each pass PeekMessage-drains it — the SAME queue GDK's win32 backend
++            // needs for WM_PAINT and pointer/keyboard input. With the tickler running,
++            // GDK is starved of both: the window paints its first frame then stays
++            // black and every click — including the title-bar close button (Fork W,
++            // window-level input death) — is swallowed. The 2026-07-20 14:26 probe
++            // proves this survives round 8's layout-loop fix: close_click_exited=false,
++            // center_click_changed=false, changed_ratio=0, while GLib layout is still
++            // ticking (see specs/CUESYNC-9-findings.md §0.9). macOS already excludes the
++            // tickler here and its GtkBackend UI renders and is interactive, proving
++            // GTK/GDK do not need it — GTK's own GLib main loop (g_application_run) owns
++            // the queue. Excluding Windows makes Windows behave the same. Trade-off:
++            // Foundation async (DispatchQueue.main / `Task`+`await`, used by the file
++            // dialog import/export paths) is no longer serviced on Windows — a
++            // documented follow-up (findings §0.9), and strictly better than today's
++            // total input death. Linux is unchanged and keeps the tickler.
++            #if !os(macOS) && !os(Windows)
+                 Self.mainRunLoopTicklingLoop()
+             #endif
+         }
