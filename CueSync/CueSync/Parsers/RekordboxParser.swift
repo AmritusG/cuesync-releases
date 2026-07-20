@@ -142,9 +142,15 @@ private class RekordboxXMLDelegate: NSObject, XMLParserDelegate {
 
     private func parseCollectionTrack(_ attrs: [String: String]) {
         let location = attrs["Location"] ?? ""
-        let decodedLocation = location
+        let percentDecoded = location
             .replacingOccurrences(of: "file://localhost", with: "")
             .removingPercentEncoding ?? location
+        // `removingPercentEncoding` runs after the file-level raw-NUL guard in `parse(...)`,
+        // so a percent-encoded %00 (no literal NUL byte in the XML) would otherwise decode
+        // into a real NUL here and slip past that guard. Strip any NUL it produces.
+        let decodedLocation = percentDecoded.unicodeScalars.contains(where: { $0.value == 0x00 })
+            ? String(String.UnicodeScalarView(percentDecoded.unicodeScalars.filter { $0.value != 0x00 }))
+            : percentDecoded
 
         currentTrack = Track(
             id: attrs["TrackID"] ?? UUID().uuidString,
