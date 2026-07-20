@@ -4,9 +4,19 @@ import XCTest
 // =============================================================================
 // CUESYNC-9 §0.3 / step-4-contingency compliance — the GtkBackend Windows
 // GSK-renderer patch (round 4): its presence, placement, idempotency, read-only
-// scoping, pin, and no-regression on the CUESYNC-8 interactivity patch and the
-// CUESYNC-9 input-dispatch patch, across all three GtkBackend-compiling CI legs
-// (macos, windows-build, windows-test), and the checked-in `.patch` file itself.
+// scoping, pin, and no-regression on the CUESYNC-8 interactivity patch, across all
+// three GtkBackend-compiling CI legs (macos, windows-build, windows-test), and the
+// checked-in `.patch` file itself.
+//
+// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the CUESYNC-9
+// input-dispatch patch this file used to no-regression-check against (it applied
+// between the interactivity patch and this one) was REVERTED — a disproven,
+// non-load-bearing fix per spec step 5, once round 8 proved the real root cause
+// was an unrelated window-minimum relayout loop. The GSK-renderer patch itself
+// (round 4, this file's subject) is untouched by that revert — it now applies
+// immediately after the interactivity patch instead of after the (now-gone)
+// input-dispatch patch. Tests that asserted the input-dispatch patch's presence
+// are inverted into regression locks asserting its ABSENCE.
 //
 // Same rationale as CUESYNC9WindowsInputDispatchWorkflowTests: `swift test` is
 // deterministic and network-free, so it cannot spin up a real Windows build box +
@@ -35,22 +45,26 @@ final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
         }
     }
 
-    /// The GSK-renderer step must run AFTER the CUESYNC-9 input-dispatch patch step on
-    /// every leg (apply order: interactivity -> input -> gsk).
-    func testGskPatchStepRunsAfterTheInputDispatchPatchOnEveryLeg() throws {
+    /// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the input-dispatch
+    /// patch that used to sit between interactivity and GSK-renderer was reverted,
+    /// so the apply order is now interactivity -> gsk directly. The GSK-renderer
+    /// step must run AFTER the CUESYNC-8 interactivity patch step on every leg.
+    /// Was: "runs after the input-dispatch patch."
+    func testGskPatchStepRunsAfterTheInteractivityPatchOnEveryLeg() throws {
         for jobName in ["macos", "windows-build", "windows-test"] {
             let job = try JobBlocksGSK.require(jobName)
-            guard let inputLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows input dispatch"#) else {
-                XCTFail("\(jobName) has no CUESYNC-9 input-dispatch patch step to order against")
+            guard let interactivityLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
+                XCTFail("\(jobName) has no CUESYNC-8 interactivity patch step to order against")
                 continue
             }
             guard let gskLine = job.firstLineIndex(matching: gskStepNamePattern) else {
                 XCTFail("\(jobName) has no GSK-renderer patch step to order")
                 continue
             }
-            XCTAssertGreaterThan(gskLine, inputLine,
-                "\(jobName)'s GSK-renderer patch step must run AFTER the input-dispatch patch step " +
-                "(apply order interactivity -> input -> gsk, CUESYNC-9 §0.3)")
+            XCTAssertGreaterThan(gskLine, interactivityLine,
+                "\(jobName)'s GSK-renderer patch step must run AFTER the interactivity patch step (apply " +
+                "order interactivity -> gsk now that round 9 reverted the input-dispatch patch, " +
+                "specs/CUESYNC-9-findings.md §0.8)")
         }
     }
 
@@ -214,16 +228,21 @@ final class CUESYNC9GskRendererPatchFileTests: XCTestCase {
 
 final class CUESYNC9GskRendererDisjointHunkTests: XCTestCase {
 
-    /// All three patches touch GtkBackend.swift but at disjoint anchors — the GSK patch
-    /// is anchored at runMainLoop, distinct from the input patch (mainRunLoopTicklingLoop)
-    /// and the interactivity patch (createPathWidget) — so they apply cleanly in sequence.
-    func testThreePatchesTargetDisjointAnchorsWithinGtkBackendSwift() throws {
+    /// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): now only TWO patches
+    /// remain live on GtkBackend.swift — the GSK patch is anchored at runMainLoop,
+    /// distinct from the interactivity patch (createPathWidget) — so they apply
+    /// cleanly in sequence. The third patch (input-dispatch, anchored at
+    /// mainRunLoopTicklingLoop) was reverted; its file no longer exists to read, so
+    /// it is dropped from this check (CUESYNC9WindowsInputDispatchWorkflowTests'
+    /// testWindowsInputPatchFileNoLongerExists already locks the deletion, and
+    /// CUESYNC9NoRegressionOnCUESYNC8PatchTests already locks the interactivity
+    /// patch never absorbing that anchor). Was: "three patches ... disjoint anchors."
+    func testTwoRemainingPatchesTargetDisjointAnchorsWithinGtkBackendSwift() throws {
         let interactivity = try String(contentsOf: RepoPathsGSK.interactivityPatch, encoding: .utf8)
-        let windowsInput = try String(contentsOf: RepoPathsGSK.windowsInputPatch, encoding: .utf8)
         let gsk = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
 
         // Inspect only the unified-diff body (from the first `diff --git` on): the
-        // header comment above it legitimately NAMES the other two anchors to explain
+        // header comment above it legitimately NAMES the other anchor to explain
         // disjointness, so the exclusion must be checked against the actual hunk, not
         // the prose.
         guard let diffStart = gsk.range(of: "diff --git a/") else {
@@ -237,39 +256,47 @@ final class CUESYNC9GskRendererDisjointHunkTests: XCTestCase {
         XCTAssertFalse(gskDiffBody.contains("createPathWidget"),
             "the GSK patch hunk must not touch createPathWidget — that is the CUESYNC-8 interactivity patch's hunk")
         XCTAssertFalse(gskDiffBody.contains("mainRunLoopTicklingLoop"),
-            "the GSK patch hunk must not touch mainRunLoopTicklingLoop — that is the CUESYNC-9 input patch's hunk")
+            "the GSK patch hunk must not touch mainRunLoopTicklingLoop — that was the reverted CUESYNC-9 " +
+            "input-dispatch patch's hunk (specs/CUESYNC-9-findings.md §0.8)")
         XCTAssertFalse(interactivity.contains("g_setenv"),
             "the interactivity patch must not contain the GSK fix")
-        XCTAssertFalse(windowsInput.contains("g_setenv"),
-            "the input-dispatch patch must not contain the GSK fix — kept separate, one root cause per patch")
     }
 }
 
 final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
 
-    /// scripts/patch-swift-cross-ui.sh applies all three patches in executable code.
-    func testDevScriptReferencesAllThreePatchFilesInExecutableCode() throws {
+    /// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): scripts/patch-swift-cross-ui.sh
+    /// now applies exactly TWO patches in executable code, and must no longer
+    /// reference the reverted input-dispatch patch at all (checked on the RAW file,
+    /// not just the code-only view — a stray comment mention trips it too). Was:
+    /// "applies all three patches."
+    func testDevScriptReferencesBothRemainingPatchFilesAndNoLongerReferencesWindowsInput() throws {
         let codeOnly = try codeOnlyDevScript()
         XCTAssertTrue(codeOnly.contains(gskPatchRelativePath),
             "scripts/patch-swift-cross-ui.sh must apply \(gskPatchRelativePath) in executable code")
-        XCTAssertTrue(codeOnly.contains(windowsInputPatchRelativePath),
-            "scripts/patch-swift-cross-ui.sh must still apply the input-dispatch patch")
         XCTAssertTrue(codeOnly.contains(interactivityPatchRelativePath),
             "scripts/patch-swift-cross-ui.sh must still apply the interactivity patch")
+        let raw = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        XCTAssertFalse(raw.contains("windows-input.patch"),
+            "scripts/patch-swift-cross-ui.sh must not reference 'windows-input.patch' anywhere — reverted " +
+            "in round 9 (specs/CUESYNC-9-findings.md §0.8)")
     }
 
-    /// Each of the three patches is guarded idempotently and actually applied.
-    func testDevScriptAppliesAllThreePatchesIdempotentlyAndActually() throws {
+    /// UPDATED for round 9: each of the two REMAINING patches is guarded
+    /// idempotently and actually applied — an exact count of 2, not merely "at
+    /// least 3" as before, so a reverted patch quietly reappearing would trip this.
+    /// Was: "each of the three patches ... idempotently and actually."
+    func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertGreaterThanOrEqual(reverseCheckCount, 3,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the three patches with its own " +
-            "`git apply --reverse --check` — found only \(reverseCheckCount)")
+        XCTAssertEqual(reverseCheckCount, 2,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the two remaining patches with its own " +
+            "`git apply --reverse --check` — found \(reverseCheckCount)")
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertGreaterThanOrEqual(plainApplyCount, 3,
-            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the three patches — " +
-            "found only \(plainApplyCount)")
+        XCTAssertEqual(plainApplyCount, 2,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the two " +
+            "remaining patches — found \(plainApplyCount)")
     }
 
     func testDevScriptStillFailsFastOnAnyError() throws {
@@ -288,24 +315,25 @@ final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
 
 final class CUESYNC9GskRendererNoRegressionTests: XCTestCase {
 
-    /// The CUESYNC-8 interactivity patch and the CUESYNC-9 input-dispatch patch are
-    /// unchanged by round 4 (still exist, still target their audited files/anchors).
-    func testPriorTwoPatchesAreUnchangedAndStillPresent() throws {
+    /// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the CUESYNC-9
+    /// input-dispatch patch this test used to also check was reverted — its file no
+    /// longer exists to read. Only the CUESYNC-8 interactivity patch's can-target
+    /// hunk is checked here now. Was: "the prior TWO patches are unchanged."
+    func testPriorInteractivityPatchIsUnchangedAndStillPresent() throws {
         let interactivity = try String(contentsOf: RepoPathsGSK.interactivityPatch, encoding: .utf8)
         XCTAssertTrue(interactivity.contains(#""can-target""#) && interactivity.contains("canTarget = false"),
             "the CUESYNC-8 interactivity patch's can-target hunk must stay intact")
-        let windowsInput = try String(contentsOf: RepoPathsGSK.windowsInputPatch, encoding: .utf8)
-        XCTAssertTrue(windowsInput.contains("g_main_context_iteration") && windowsInput.contains("mainRunLoopTicklingLoop"),
-            "the CUESYNC-9 input-dispatch patch must stay intact (drain + tickler hunks)")
     }
 
-    /// The input-dispatch patch step's name is unchanged on all legs (round 4 must not
-    /// rename or remove it — the input suite pins that name).
-    func testInputDispatchPatchStepStillPresentOnAllLegs() throws {
+    /// REGRESSION LOCK (round 9): the input-dispatch patch step must now be ABSENT
+    /// on all three legs — round 4's GSK-renderer patch must not have (and did not)
+    /// resurrect it. INVERTED from "the input-dispatch patch step is still present."
+    func testInputDispatchPatchStepIsAbsentOnAllLegs() throws {
         for jobName in ["macos", "windows-build", "windows-test"] {
             let job = try JobBlocksGSK.require(jobName)
-            XCTAssertNotNil(job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows input dispatch"#),
-                "\(jobName) must still declare the CUESYNC-9 input-dispatch patch step (round 4 must not remove it)")
+            XCTAssertNil(job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows input dispatch"#),
+                "\(jobName) must NOT declare the CUESYNC-9 input-dispatch patch step — reverted in round 9 " +
+                "(specs/CUESYNC-9-findings.md §0.8); the GSK-renderer patch (round 4) must not resurrect it")
         }
     }
 }

@@ -1674,7 +1674,14 @@ def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit(
 # ---------------------------------------------------------------------------
 
 
-def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
+def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches():
+    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's
+    windows-input patch — the second of the three patches this test used to
+    expect — was reverted as a disproven, non-load-bearing fix per spec step 5.
+    Exactly TWO named patches remain checked in against GtkBackend.swift now
+    (gesture/interactivity + GSK-renderer); a THIRD file (the reverted patch
+    reappearing, or anything else) is a supply-chain regression, so the expected
+    set is asserted exactly, and its absence is checked directly by name too."""
     patch_dir = REPO_ROOT / "patches"
     if not patch_dir.is_dir():
         raise unittest.SkipTest("patches/ directory not found")
@@ -1683,13 +1690,16 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
         for p in patch_dir.glob("*.patch")
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
-    expected = sorted(
-        [GESTURE_PATCH_NAME, WINDOWS_INPUT_PATCH_NAME, WINDOWS_GSK_PATCH_NAME]
-    )
+    expected = sorted([GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME])
     assert gtk_patches == expected, (
-        "spec §4/§0.3: expected exactly the three named checked-in patches touching "
-        "GtkBackend.swift (" + repr(expected) + "); a FOURTH file or a divergent "
-        "copy of any is a supply-chain risk. Found: " + repr(gtk_patches)
+        "spec §4/§0.3/§0.8: expected exactly the two named checked-in patches "
+        "touching GtkBackend.swift (" + repr(expected) + ") now that the "
+        "windows-input patch is reverted; a THIRD file or a divergent copy of "
+        "either is a supply-chain risk. Found: " + repr(gtk_patches)
+    )
+    assert WINDOWS_INPUT_PATCH_NAME not in gtk_patches, (
+        "the reverted windows-input patch must not be a checked-in patch file "
+        "touching GtkBackend.swift (specs/CUESYNC-9-findings.md §0.8)"
     )
     dev_script = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
     assert dev_script.is_file(), "scripts/patch-swift-cross-ui.sh must exist (spec §3)"
@@ -1699,8 +1709,12 @@ def test_dev_script_and_every_ci_leg_apply_the_one_checked_in_patch():
         if not ln.lstrip().startswith("#")
     )
     assert GESTURE_PATCH_NAME in dev_code, (
-        "scripts/patch-swift-cross-ui.sh must apply the one checked-in patch in "
+        "scripts/patch-swift-cross-ui.sh must apply the gesture patch in "
         "executable code (not just a comment) — the same file CI applies (spec §3)"
+    )
+    assert WINDOWS_GSK_PATCH_NAME in dev_code, (
+        "scripts/patch-swift-cross-ui.sh must apply the GSK-renderer patch in "
+        "executable code too (spec §0.3)"
     )
     for job, _i, block in GESTURE_BLOCKS:
         assert GESTURE_PATCH_NAME in block, (
@@ -2749,11 +2763,20 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
 # ---------------------------------------------------------------------------
 
 
-def test_windows_input_patch_step_runs_after_resolve_and_java_repair_on_windows_legs():
+def test_windows_input_patch_step_is_absent_and_gsk_patch_still_runs_after_resolve_and_java_repair_on_windows_legs():
+    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the windows-input
+    patch step this test used to order against resolve/repair/gesture was
+    reverted — a disproven, non-load-bearing patch per spec step 5. This is now a
+    regression lock (the step must be ABSENT) PLUS a repurposed ordering check on
+    the GSK-renderer patch step, which now occupies the slot immediately after the
+    gesture step and must still land after resolve and the swift-java symlink
+    repair — the same failure mode (patching an unresolved / still-broken checkout)
+    the original test guarded against, now pinned to the patch that actually runs
+    there."""
     for job in ("windows-build", "windows-test"):
         assert job in JOBS, "missing job " + job
         start, end = JOBS[job]
-        resolve_idx = repair_idx = gesture_idx = win_input_idx = None
+        resolve_idx = repair_idx = gesture_idx = win_input_idx = gsk_idx = None
         for k in range(start, end):
             m = STEP_NAME_RE.match(LINES[k])
             if not m:
@@ -2767,23 +2790,30 @@ def test_windows_input_patch_step_runs_after_resolve_and_java_repair_on_windows_
                 gesture_idx = k
             if WINDOWS_INPUT_STEP_NAME in name:
                 win_input_idx = k
-        assert win_input_idx is not None, job + ": no windows-input patch step found"
+            if WINDOWS_GSK_STEP_NAME in name:
+                gsk_idx = k
+        assert win_input_idx is None, (
+            job + ": the windows-input patch step must be ABSENT — reverted in round 9 "
+            "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a "
+            "disproven, non-load-bearing patch"
+        )
+        assert gsk_idx is not None, job + ": no GSK-renderer patch step found"
         for label, other in (
             (RESOLVE_STEP_NAME, resolve_idx),
             (REPAIR_STEP_NAME, repair_idx),
             (GESTURE_STEP_NAME, gesture_idx),
         ):
             assert other is not None, (
-                "%s: the `%s` step is missing — spec §4 requires the windows-input patch "
-                "to run AFTER it, so its absence breaks the ordering premise"
-                % (job, label)
+                "%s: the `%s` step is missing — the GSK-renderer patch step must run "
+                "AFTER it, so its absence breaks the ordering premise" % (job, label)
             )
-            assert other < win_input_idx, (
-                "%s: the windows-input patch step (line %d) must run AFTER `%s` (line %d). "
-                "spec §4: it lands after resolve / the swift-java symlink repair / the "
-                "existing patch steps and before build. Patching an unresolved or "
-                "still-broken-reparse-point checkout fails `git apply` on the Windows legs "
-                "this patch exists to fix." % (job, win_input_idx, label, other)
+            assert other < gsk_idx, (
+                "%s: the GSK-renderer patch step (line %d) must run AFTER `%s` (line %d) "
+                "now that it is the step immediately following the gesture patch (the "
+                "windows-input step that used to sit between them was reverted in round "
+                "9). Patching an unresolved or still-broken-reparse-point checkout fails "
+                "`git apply` on the Windows legs this patch exists to fix."
+                % (job, gsk_idx, label, other)
             )
 
 
@@ -3033,14 +3063,31 @@ def test_every_git_apply_of_the_windows_input_patch_is_strict_not_fuzzy():
 # ---------------------------------------------------------------------------
 
 
-def test_both_windows_input_patch_steps_are_byte_identical():
-    bodies = _win_input_bodies()
-    a, b = bodies.get("windows-build"), bodies.get("windows-test")
+def test_windows_input_patch_step_absent_and_both_remaining_windows_patches_stay_byte_identical():
+    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the windows-input
+    patch step this test used to compare across legs was reverted, so there is
+    nothing left to compare — that half is now a regression lock (no such step on
+    either Windows leg). Repurposed to close a real, previously-unguarded gap
+    instead: ATTACK 2 pins byte-identity for the swift-java repair step and
+    ATTACK 30 for the gesture step, but nothing pinned it for the GSK-renderer
+    patch step (the one that now runs immediately after gesture on every leg) —
+    if it drifted between windows-build and windows-test, build and test would
+    compile differently-patched checkouts, the exact split-brain CUESYNC-6d
+    suffered."""
+    win_input_bodies = _win_input_bodies()
+    assert "windows-build" not in win_input_bodies and "windows-test" not in win_input_bodies, (
+        "the windows-input patch step must be ABSENT on both Windows legs — "
+        "reverted in round 9 (specs/CUESYNC-9-findings.md §0.8): "
+        + repr(sorted(win_input_bodies))
+    )
+
+    gsk_bodies = _gsk_bodies()
+    a, b = gsk_bodies.get("windows-build"), gsk_bodies.get("windows-test")
     assert a is not None and b is not None, (
-        "windows-input patch step missing on a Windows leg: " + repr(sorted(bodies))
+        "GSK-renderer patch step missing on a Windows leg: " + repr(sorted(gsk_bodies))
     )
     assert a == b, (
-        "spec CUESYNC-9 §4: the windows-build and windows-test windows-input patch "
+        "spec CUESYNC-9 §4: the windows-build and windows-test GSK-renderer patch "
         "step bodies must not drift — a divergence means build and test compile "
         "differently-patched checkouts (the split-brain CUESYNC-6d suffered).\n"
         "--- windows-build ---\n" + a + "\n--- windows-test ---\n" + b
@@ -3059,17 +3106,34 @@ def test_both_windows_input_patch_steps_are_byte_identical():
 # ---------------------------------------------------------------------------
 
 
-def test_windows_input_patch_clears_read_only_before_apply_on_exactly_gtkbackend():
+def test_windows_input_patch_absent_and_gsk_renderer_clears_read_only_before_apply_on_exactly_gtkbackend():
+    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the windows-input
+    step this test used to check ordering for was reverted — regression-locked
+    below (no such step on either Windows leg). Repurposed onto a real,
+    previously-unguarded gap in the GSK-renderer patch step (which now runs where
+    windows-input used to): ATTACK D
+    (test_gsk_renderer_patch_step_clears_read_only_on_exactly_gtkbackend_on_both_windows_legs)
+    only asserts the read-only clear names the right file SOMEWHERE in the step —
+    it never checks the clear runs BEFORE the forward `git apply`. A clear that ran
+    after the apply still contains the token yet is a live break: `git apply` hits
+    a read-only dependency source and dies before the clear ever executes."""
+    win_input_bodies = _win_input_bodies()
     for job in ("windows-build", "windows-test"):
-        body = _win_input_bodies()[job]
+        assert job not in win_input_bodies, (
+            job + ": the windows-input patch step must be ABSENT — reverted in round 9 "
+            "(specs/CUESYNC-9-findings.md §0.8)"
+        )
+
+        body = _gsk_bodies()[job]
         apply_idx = body.find("git apply $patch")
-        assert apply_idx != -1, job + ": no forward `git apply $patch` in the step"
+        assert apply_idx != -1, job + ": no forward `git apply $patch` in the GSK-renderer step"
         ro_positions = [m.start() for m in re.finditer(r"IsReadOnly", body)]
-        assert ro_positions, job + ": step never clears the Windows read-only flag"
+        assert ro_positions, job + ": GSK-renderer step never clears the Windows read-only flag"
         assert all(p < apply_idx for p in ro_positions), (
             job + ": a `Set-ItemProperty … -Name IsReadOnly -Value $false` clear runs "
-            "AFTER the forward `git apply` — the apply hits a read-only dependency "
-            "source and fails before the clear ever executes (spec CUESYNC-9 §4)"
+            "AFTER the forward `git apply` in the GSK-renderer step — the apply hits a "
+            "read-only dependency source and fails before the clear ever executes "
+            "(spec CUESYNC-9 §4)"
         )
         cleared = set()
         for _var, path in re.findall(r'\$(\w+)\s*=\s*"([^"]+)"', body):
@@ -3080,7 +3144,7 @@ def test_windows_input_patch_clears_read_only_before_apply_on_exactly_gtkbackend
                     )
                 )
         assert cleared == {"Sources/GtkBackend/GtkBackend.swift"}, (
-            job + ": the windows-input read-only clear targets %r, but the patch "
+            job + ": the GSK-renderer read-only clear targets %r, but the patch "
             "modifies ONLY GtkBackend.swift — clearing the wrong (or an extra) file "
             "leaves the real target read-only, or needlessly clears a file this patch "
             "does not touch (spec CUESYNC-9 §4: 'exactly the file(s) it patches')"
@@ -3100,25 +3164,24 @@ def test_windows_input_patch_clears_read_only_before_apply_on_exactly_gtkbackend
 # ---------------------------------------------------------------------------
 
 
-def test_windows_input_patch_step_fails_loud_on_a_bad_apply_on_every_leg():
+def test_windows_input_patch_step_is_absent_on_every_leg_including_macos():
+    """REGRESSION LOCK (round 9, specs/CUESYNC-9-findings.md §0.8): the
+    windows-input patch step must not exist on ANY of the three GtkBackend-
+    compiling legs — including macos, which the other windows-input regression
+    locks in this file do not separately check (they focus on the two Windows
+    legs). Was: "the step must fail loud on a bad apply on every leg" — a check
+    that presupposed a step that no longer exists. Its fail-loud INTENT survives
+    unweakened: ATTACK 32 already pins fail-loud for the gesture patch step and
+    ATTACK E (test_gsk_renderer_patch_step_is_reverse_guarded_and_fails_loud_on_every_leg)
+    already pins it for the GSK-renderer patch step on all three legs, so nothing
+    that patches GtkBackend.swift today ships un-checked for a swallowed `git
+    apply` failure."""
     bodies = _win_input_bodies()
-    mac = bodies.get("macos")
-    assert mac is not None, "windows-input patch step missing on the macos leg"
-    assert re.search(r"set -euo?\s+pipefail|set -e\b", mac), (
-        "spec CUESYNC-9 §4: the macos windows-input patch step must set fail-fast "
-        "shell options (`set -euo pipefail`) so a failed `git apply` aborts the job "
-        "instead of building an un-patched checkout"
-    )
-    assert 'git apply "$PATCH"' in mac, (
-        'the macos step must contain a forward `git apply "$PATCH"` (not only the '
-        "`--reverse --check` guard) for set -e to fail loud on"
-    )
-    for job in ("windows-build", "windows-test"):
-        body = bodies[job]
-        assert "$LASTEXITCODE -ne 0" in body and "exit 1" in body, (
-            job + ": the windows-input patch step must fail loud on a `git apply` "
-            "error (`$LASTEXITCODE -ne 0` -> `exit 1`), never proceed against an "
-            "un-patched checkout (spec CUESYNC-9 §4)"
+    for job in ("macos", "windows-build", "windows-test"):
+        assert job not in bodies, (
+            job + ": the windows-input patch step must be ABSENT — reverted in round 9 "
+            "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a "
+            "disproven, non-load-bearing patch"
         )
 
 

@@ -1,5 +1,71 @@
 # CUESYNC-9 §§1–3 findings — window/main-loop input death
 
+## §0.8 — ROUND 9 (2026-07-20): round 7's disproven `windows-input.patch` formally reverted, not left stacked
+
+> §0.7 left round 7's `patches/swift-cross-ui-0.8.0-windows-input.patch` applied "as a candidate
+> revert" pending confirmation that round 8's fix was the real mover, explicitly warning "do not
+> treat it as load-bearing." That confirmation is now in: round 8's `.frame(minHeight:)` removal
+> (`CueSync/CueSync/UI/CueSyncApp.swift`) is the evidence-based root-cause fix (§0.7's mechanical
+> trace from the app's own Windows stderr, ratified by origin CI going green). Nothing further
+> happened this round to reopen that diagnosis — this round's job is purely to close the "candidate
+> revert" that §0.7 left open, per spec step 5: **"if a round's fix does not move the probe, revert
+> that hunk before trying the next suspect — never stack speculative patches."**
+
+**Why the revert is safe now, independent of round 8.** §0.7 already established the two fixes are
+mechanically unrelated: "the loop runs on GLib timeouts, not `RunLoop.main`" (§0.7, verbatim). Round
+7's patch rewrites `GtkBackend.mainRunLoopTicklingLoop` to stop pumping `RunLoop.main` on Windows
+(§0.6); round 8's fix removes a SwiftUI-level `.frame(minHeight:)` constraint that was driving
+`WindowReference.update`'s resize/relayout loop (§0.7 §§35-50). Neither reads nor writes the other's
+state — reverting round 7 cannot resurrect round 8's flood, and round 8's fix does not depend on
+round 7's tickler rewrite having ever shipped. There is no evidence round 7's patch ever *was*
+load-bearing for the click-probe: §0.7's own auditable stderr trace explains the "paints but nothing
+is clickable" symptom in full via the relayout loop alone, with no residual signal (font/renderer/
+main-loop-starvation lines are all **zero** per §0.7) attributable to a genuine Win32-queue race.
+
+**Second reason to revert, not just "leave it, it's harmless": the patch itself carries fragility
+the `windows-input.patch` header text does not fully disclose as a live cost.** Round 7's mechanism
+(§0.6, "round 7's mechanism") binds `@_silgen_name("_dispatch_main_queue_callback_4CF")` — a raw
+linker binding to an **undocumented, leading-underscore libdispatch↔CoreFoundation bridge internal**
+that is neither a GTK nor a GLib public API and carries no stable-ABI guarantee. `@_silgen_name`
+bypasses Swift's normal import visibility; a future Swift toolchain that renames or drops that
+private symbol breaks the Windows *link*, not just a runtime behaviour — a supply-chain liability
+spec §3/§4's "GTK/GLib's own APIs … no fragile external coupling" constraint exists specifically to
+rule out. Carrying that risk was an acceptable trade while the patch was the load-bearing input fix;
+it is not an acceptable trade for a patch that §0.7 itself calls non-load-bearing and a "candidate
+revert."
+
+**What forced this cleanup:** a redteam adversarial pass (`Tests/test_adversarial.py`) added two
+tests this round is a direct response to:
+- `test_windows_input_patch_premise_is_disproven_yet_it_is_still_applied_on_every_leg` — asserted
+  that a patch whose own findings entry calls it "disproven … candidate revert … not load-bearing"
+  must not still be `git apply`'d on every CI leg and the dev script; spec step 5 requires reverting
+  a non-mover, not leaving a speculative, disproven mutation stacked on the audited dependency.
+- `test_windows_input_patch_binds_no_undocumented_private_symbol_via_silgen_name` — asserted the
+  patch must not bind an undocumented private symbol via `@_silgen_name`, independently flagging the
+  `_dispatch_main_queue_callback_4CF` binding above as a defect in its own right.
+
+Both were "LIVE FINDING — expected to FAIL" tests against the pre-round-9 tree; this round's revert
+is what makes them pass (the second now correctly *skips*, since its fixture raises once the patch
+file no longer exists — that is the intended outcome of removing the thing it inspects, not a gap).
+
+**What was removed, this round, exactly:**
+1. `patches/swift-cross-ui-0.8.0-windows-input.patch` deleted (`git rm`) — the file itself.
+2. The "Patch swift-cross-ui Windows input dispatch (pinned v0.8.0, CUESYNC-9)" step removed from
+   all three jobs (`macos`, `windows-build`, `windows-test`) in `.github/workflows/swift-windows.yml`,
+   replaced with a short comment block pointing here.
+3. The patch's application removed from `scripts/patch-swift-cross-ui.sh` (the `WINDOWS_INPUT_PATCH`
+   variable, its membership in the missing-file check loop, and its `git apply`/idempotency-guard
+   block) — the dev/ci-local loop now applies exactly two patches: the CUESYNC-8 gesture/
+   interactivity patch and the CUESYNC-9-round-4 GSK-renderer patch, in that order.
+
+**What is explicitly NOT reopened by this round.** Round 8's fix stands as the confirmed root cause;
+this round performs no new diagnosis of the click-probe and makes no runtime-behaviour claim beyond
+what §0.7 already recorded. If a future probe run somehow shows Windows input dead again with round
+8's fix still in place, the correct next step per spec step 5 is a *fresh* suspect investigated with
+fresh on-box evidence (§0.6's still-open backend-decision fork, or suspects (2)/(3) in §3, both
+already ruled out at the source level but not yet re-confirmed against a live Windows run without
+round 7's patch in the mix) — not silently re-applying this reverted, disproven patch.
+
 ## §0.7 — ROUND 8 (2026-07-19): the app's OWN Windows stderr, finally auditable, overturns the main-loop diagnosis — it is a layout-thrash loop from a content min-height the display can't grant
 
 > **This round replaces guessing with the app's actual Windows runtime output.** The branch is now
