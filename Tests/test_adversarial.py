@@ -5362,6 +5362,579 @@ def test_gsk_renderer_patch_step_is_reverse_guarded_and_fails_loud_on_every_leg(
             )
 
 
+# =============================================================================
+# Red-Team adversarial suite — CUESYNC-9 (untrusted-binary decode boundaries)
+#
+# Making the whole Windows UI live (this ticket) means the value-handling paths
+# that were previously unreachable on Windows now actually run — spec §4 says so
+# in as many words ("value-handling paths that were previously unreachable on
+# Windows now actually run, so their existing guards matter *more*"). Two of
+# those guards had **zero** behavioral coverage before this block:
+#
+#   * `Support/Zlib.swift` — the raw-DEFLATE inflate that feeds the Engine DJ
+#     `quickCues` blob. Spec §4/Zlib.swift doc: "the blob is untrusted, and its
+#     declared uncompressed size must never drive an unbounded allocation" — the
+#     `cap` argument is the decompression-bomb backstop.
+#   * `Parsers/EngineDJParser.swift` — the full untrusted-`.db` → cue-point path,
+#     including the `< 1_000_000` declared-size sanity gate, the `cap` handed to
+#     `Zlib.inflate`, and the `CuePoint.sanitized()` clamp on a raw-float64 cue
+#     position that may be NaN/Inf/negative.
+#   * `Support/Hex.swift` — `parseCSSColor`, the dependency-free color parser the
+#     swift-cross-ui re-host calls; its doc promises "always finite" components so
+#     a later `Int(component)` conversion in the renderer can never trap on
+#     NaN/Inf (`Int(.nan)` is a hard trap in Swift).
+#
+# Like the CUESYNC-7 block above, these attack the *real, shipped Swift* (they
+# compile the actual sources with a tiny driver and push adversarial bytes
+# through), and follow the same LIVE-FINDING / REGRESSION-LOCK convention. If no
+# Swift toolchain (or, for the Engine DJ path, no stdlib `sqlite3`) is present,
+# they skip rather than error, so the pure-stdlib suite is unaffected; on the
+# ticket's macOS CI leg (`swift` installed, `import SQLite3`/`import Compression`
+# available) they run and bite.
+# =============================================================================
+
+
+def _find_source(*rel_parts):
+    """Locate a CueSync source file (under CueSync/CueSync/...) by walking up."""
+    here = Path(__file__).resolve()
+    for base in [here.parent] + list(here.parents):
+        candidate = base.joinpath("CueSync", "CueSync", *rel_parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _build_swift_harness(state, rel_sources, driver_src, prefix):
+    """Compile the given real sources + a driver once; process-cache the binary.
+
+    Raises unittest.SkipTest (never a hard error) when no usable Swift toolchain
+    or a source file is missing, mirroring `_harness_binary()` above.
+    """
+    if state["built"]:
+        if state["bin"] is None:
+            raise unittest.SkipTest(state["err"])
+        return state["bin"]
+    state["built"] = True
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        state["err"] = "swiftc not on PATH — skipping Swift-execution red-team test"
+        raise unittest.SkipTest(state["err"])
+    srcs = []
+    for rel in rel_sources:
+        p = _find_source(*rel)
+        if p is None:
+            state["err"] = "source not found: CueSync/CueSync/" + "/".join(rel)
+            raise unittest.SkipTest(state["err"])
+        srcs.append(str(p))
+    workdir = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, workdir, True)
+    main_swift = os.path.join(workdir, "main.swift")
+    with open(main_swift, "w", encoding="utf-8") as fh:
+        fh.write(driver_src)
+    binpath = os.path.join(workdir, "harness")
+    proc = subprocess.run(
+        [swiftc, *srcs, main_swift, "-o", binpath],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not os.path.exists(binpath):
+        state["err"] = "harness build failed:\n" + proc.stderr
+        raise unittest.SkipTest(state["err"])
+    state["bin"] = binpath
+    return binpath
+
+
+def _raw_deflate(payload):
+    """Raw DEFLATE (no zlib/gzip wrapper) — exactly what Zlib.inflate expects."""
+    import zlib
+
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return c.compress(payload) + c.flush()
+
+
+# ---------------------------------------------------------------------------
+# Zlib.inflate — the decompression-bomb backstop that guards every Engine DJ
+# import. Driver protocol: one `inflate <cap> <b64src>` line in, one line out:
+#   `OK <decodedLen> <b64out>`  or  `NIL`.
+# ---------------------------------------------------------------------------
+
+_ZLIB_STATE = {"built": False, "bin": None, "err": None}
+
+_ZLIB_DRIVER = r"""
+import Foundation
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    if f[0] == "inflate" {
+        let cap = Int(f[1]) ?? 0
+        let src = Data(base64Encoded: f[2]) ?? Data()
+        if let out = Zlib.inflate(src, cap: cap) {
+            print("OK \(out.count) \(out.base64EncodedString())")
+        } else {
+            print("NIL")
+        }
+    } else {
+        print("ERR")
+    }
+}
+"""
+
+
+def _zlib_binary():
+    return _build_swift_harness(
+        _ZLIB_STATE,
+        [("Support", "Zlib.swift")],
+        _ZLIB_DRIVER,
+        "cuesync9_zlib_",
+    )
+
+
+def _inflate_many(items):
+    """items: iterable of (src_bytes, cap) -> list of (decoded_bytes | None)."""
+    binpath = _zlib_binary()
+    cmds = [
+        "inflate %d %s" % (cap, base64.b64encode(src).decode("ascii"))
+        for (src, cap) in items
+    ]
+    proc = subprocess.run(
+        [binpath],
+        input="\n".join(cmds) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, "zlib harness runtime error:\n" + proc.stderr
+    lines = [ln for ln in proc.stdout.split("\n") if ln != ""]
+    assert len(lines) == len(cmds), (
+        "zlib harness framing broke: %d lines for %d commands"
+        % (len(lines), len(cmds))
+    )
+    out = []
+    for ln in lines:
+        if ln == "NIL":
+            out.append(None)
+        else:
+            parts = ln.split(" ")
+            assert parts[0] == "OK", "unexpected harness line: " + ln
+            out.append(base64.b64decode(parts[2]) if len(parts) > 2 else b"")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — the decompression bomb is bounded by `cap`, never by
+# the (attacker-controlled) declared or compressed size. A ~1 MB run of zeros
+# raw-deflates to ~1 KB; feeding it with any `cap` below the true output MUST
+# return nil, and no returned buffer may ever exceed `cap`. spec §4: "its declared
+# uncompressed size must never drive an unbounded allocation."
+# ---------------------------------------------------------------------------
+
+
+def test_zlib_inflate_bounds_a_decompression_bomb_regardless_of_declared_size():
+    import os as _os
+
+    zeros = b"\x00" * 1_000_000  # ~1 KB compressed, 1 MB out — a 1000x bomb
+    bomb = _raw_deflate(zeros)
+    rnd = _os.urandom(50_000)  # incompressible — deflate stays ~50 KB out
+    rnd_def = _raw_deflate(rnd)
+
+    items = [
+        (bomb, 1),  # cap << output
+        (bomb, 1024),
+        (bomb, 100_000),
+        (bomb, 999_999),  # one short of the true 1 MB output
+        (bomb, 1_000_000),  # exactly enough
+        (bomb, 4_000_000),  # generous
+        (rnd_def, len(rnd) - 1),  # incompressible, one short
+        (rnd_def, len(rnd)),  # incompressible, exact
+    ]
+    results = _inflate_many(items)
+
+    expected_nil = {0, 1, 2, 3, 6}  # every cap strictly below the true output
+    for idx, ((src, cap), out) in enumerate(zip(items, results)):
+        if idx in expected_nil:
+            assert out is None, (
+                "spec §4: Zlib.inflate returned %d bytes for cap=%d though the "
+                "true output is larger — the decompression-bomb cap is not "
+                "enforced (a hostile quickCues blob could drive an unbounded "
+                "allocation)." % (0 if out is None else len(out), cap)
+            )
+        else:
+            assert out is not None, (
+                "cap=%d is >= the true output yet inflate refused it — the cap "
+                "backstop is over-tight and rejects a legitimate blob." % cap
+            )
+        if out is not None:
+            assert len(out) <= cap, (
+                "spec §4: Zlib.inflate returned %d bytes with cap=%d — output "
+                "MUST never exceed cap, or the bomb backstop is defeated."
+                % (len(out), cap)
+            )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — the cap boundary is *exact*, and the one-byte slack
+# buffer disambiguates "decoded exactly cap" from "decoded more, got cut off"
+# (Zlib.swift appleInflate: `bufferSize = cap + 1`, then `decodedCount <= cap`).
+# A stream that decodes to exactly N bytes must be accepted at cap==N (proving the
+# slack byte is not mistaken for overflow) and rejected at cap==N-1. If a refactor
+# drops the `+1` slack, cap==N becomes ambiguous and this turns red.
+# ---------------------------------------------------------------------------
+
+
+def test_zlib_inflate_cap_boundary_is_exact_and_slack_byte_disambiguates():
+    n = 4096
+    stream = _raw_deflate(b"A" * n)
+    at, under, over = _inflate_many([(stream, n), (stream, n - 1), (stream, n + 1)])
+
+    assert at is not None and len(at) == n, (
+        "a stream decoding to exactly %d bytes must be accepted at cap=%d "
+        "(the one-byte slack buffer proves it is a genuine cap-sized result, "
+        "not a truncated overflow) — got %r"
+        % (n, n, None if at is None else len(at))
+    )
+    assert under is None, (
+        "a stream decoding to %d bytes must be rejected at cap=%d (one over the "
+        "limit) — the cap is off-by-one and lets an over-cap blob through." % (n, n - 1)
+    )
+    assert over is not None and len(over) == n, (
+        "cap=%d (one above the true output) must still yield the full %d bytes."
+        % (n + 1, n)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — the two entry guards (`cap > 0` and `!src.isEmpty`)
+# hold: an empty source or a non-positive cap returns nil, never a crash or a
+# zero-length "success" the caller would misread. On a 32-bit target `cap` is a
+# 32-bit Int, so a caller passing 0 or a negative must be refused outright before
+# any allocation.
+# ---------------------------------------------------------------------------
+
+
+def test_zlib_inflate_rejects_empty_source_and_nonpositive_cap():
+    good = _raw_deflate(b"payload")
+    results = _inflate_many([(b"", 1024), (good, 0), (good, -5), (good, len(b"payload"))])
+    empty_src, zero_cap, neg_cap, sane = results
+    assert empty_src is None, "empty source must return nil (guard `!src.isEmpty`)"
+    assert zero_cap is None, "cap=0 must return nil (guard `cap > 0`)"
+    assert neg_cap is None, "negative cap must return nil (guard `cap > 0`)"
+    assert sane == b"payload", (
+        "a well-formed stream with an adequate cap must still round-trip — the "
+        "guards must reject only the degenerate inputs, not everything."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Engine DJ end-to-end — the real untrusted-`.db` boundary. The driver takes a
+# database path on argv and prints, per track:
+#   `TRACK <id> <cueCount> <allFinite:0|1> <allNonNeg:0|1>`
+# then `OK <n>` (or `THROW <msg>` if parse threw).
+# ---------------------------------------------------------------------------
+
+_ENGINE_STATE = {"built": False, "bin": None, "err": None}
+
+_ENGINE_DRIVER = r"""
+import Foundation
+
+let path = CommandLine.arguments[1]
+do {
+    let tracks = try EngineDJParser.parse(databaseURL: URL(fileURLWithPath: path))
+    for t in tracks {
+        let starts = t.cuePoints.map { $0.start }
+        let finite = starts.allSatisfy { $0.isFinite } ? 1 : 0
+        let nonneg = starts.allSatisfy { $0 >= 0 } ? 1 : 0
+        print("TRACK \(t.id) \(t.cuePoints.count) \(finite) \(nonneg)")
+    }
+    print("OK \(tracks.count)")
+} catch {
+    print("THROW \(error)")
+}
+"""
+
+
+def _engine_binary():
+    return _build_swift_harness(
+        _ENGINE_STATE,
+        [
+            ("Models", "CuePoint.swift"),
+            ("Models", "Track.swift"),
+            ("Models", "ParseError.swift"),
+            ("Support", "Zlib.swift"),
+            ("Support", "SQLite.swift"),
+            ("Parsers", "EngineDJParser.swift"),
+        ],
+        _ENGINE_DRIVER,
+        "cuesync9_engine_",
+    )
+
+
+def _quickcues_blob(declared_size, payload):
+    """Engine DJ quickCues layout: LE-uint32 declared size + raw-DEFLATE body."""
+    import struct
+
+    return struct.pack("<I", declared_size & 0xFFFFFFFF) + _raw_deflate(payload)
+
+
+def _engine_cue_slot(name, position_bits):
+    """One cue slot: nameLen(1) + name + big-endian float64 position + 4 pad."""
+    import struct
+
+    nb = name.encode("utf-8")
+    return bytes([len(nb) & 0xFF]) + nb + struct.pack(">Q", position_bits) + b"\x00" * 4
+
+
+def _make_engine_db(perf_rows):
+    """Build a minimal-but-valid Engine DJ DB. `perf_rows` maps trackId ->
+    quickCues blob bytes (or None). Always inserts one Track row per key so the
+    parser's non-empty-Track guard passes. Returns a temp path (auto-cleaned)."""
+    try:
+        import sqlite3
+    except ImportError:  # pragma: no cover — stdlib module, effectively always present
+        raise unittest.SkipTest("stdlib sqlite3 unavailable")
+
+    fd, path = tempfile.mkstemp(prefix="cuesync9_engine_", suffix=".db")
+    os.close(fd)
+    os.remove(path)  # sqlite3 wants to create it fresh
+    atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))
+    con = sqlite3.connect(path)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, "
+            "album TEXT, genre TEXT, length INT, bpmAnalyzed REAL, key INT, "
+            "path TEXT, filename TEXT)"
+        )
+        cur.execute("CREATE TABLE PerformanceData (trackId INTEGER, quickCues BLOB)")
+        for tid, blob in perf_rows.items():
+            cur.execute(
+                "INSERT INTO Track VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (tid, "T%d" % tid, "A", "Al", "G", 100, 120.0, 1, "/x/", "f.mp3"),
+            )
+            cur.execute(
+                "INSERT INTO PerformanceData VALUES (?, ?)",
+                (tid, sqlite3.Binary(blob) if blob is not None else None),
+            )
+        con.commit()
+    finally:
+        con.close()
+    return path
+
+
+def _run_engine(path):
+    """Parse `path` through the real EngineDJParser; return ({tid: (n, fin, nn)},
+    raw_stdout). Raises AssertionError on a hang (a DoS finding)."""
+    binpath = _engine_binary()
+    try:
+        proc = subprocess.run(
+            [binpath, path], capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            "spec §4: EngineDJParser.parse did not terminate within 60s on a "
+            "hostile quickCues blob — an unbounded decode/allocation DoS."
+        )
+    assert proc.returncode == 0, "engine harness crashed:\n" + proc.stderr
+    lines = proc.stdout.strip().split("\n")
+    tracks = {}
+    for ln in lines:
+        if ln.startswith("TRACK "):
+            _, tid, n, fin, nn = ln.split(" ")
+            tracks[tid] = (int(n), fin == "1", nn == "1")
+    return tracks, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — the declared-size sanity gate and the inflate cap
+# together bound *every* allocation the Engine DJ importer makes, so a hostile
+# quickCues blob can neither lie huge to force a multi-GB buffer nor lie small
+# then bomb-expand. Four blobs on four tracks, each chosen so a *removed* guard is
+# observable, not silently absorbed:
+#   * track 1 (gate lock): declared == 2 MB (> the 1 MB gate) but the body is a
+#     genuine 8-slot cue payload padded to 2 MB — WITH the gate it is refused (0
+#     cues); DROP the gate and inflate would decode it into 8 real cues. So the
+#     0-cue assertion turns red the moment the `< 1_000_000` gate is loosened.
+#   * track 2 (cap lock): declared == 500 but the body decompresses to 5 MB ->
+#     cap=756 -> inflate nil -> 0 cues. Turns red if the inflate cap is loosened.
+#   * track 3 (no-OOM lock): declared == UINT32_MAX with a 16-byte body — the gate
+#     refuses it up front; without the gate the appleInflate buffer is ~4 GB, so
+#     this pins that a hostile declared size never drives that allocation (the
+#     parse must still finish within the timeout).
+#   * track 4 (bounded legit path): declared == 999_999 of zeros -> decodes but is
+#     bounded and yields 0 cues (all-empty slots) rather than hanging.
+# Every track must end with 0 cues, and the whole parse must finish.
+# ---------------------------------------------------------------------------
+
+
+def test_enginedj_quickcues_declared_size_gate_and_cap_bound_every_allocation():
+    import struct
+
+    # A real 8-cue payload (each cue at 1s = 44100 samples), padded past the 1 MB
+    # gate so the gate — not the cap — is the only thing that can refuse it.
+    slots = b"".join(
+        _engine_cue_slot("cue%d" % i, struct.unpack(">Q", struct.pack(">d", 44100.0))[0])
+        for i in range(8)
+    )
+    real_payload = b"\x00" * 8 + slots
+    real_payload += b"\x00" * (2_000_000 - len(real_payload))  # pad to 2 MB
+
+    rows = {
+        1: _quickcues_blob(len(real_payload), real_payload),  # 2 MB -> gate refuses
+        2: _quickcues_blob(500, b"\x00" * 5_000_000),  # lie small, bomb body
+        3: _quickcues_blob(0xFFFFFFFF, b"\x00" * 16),  # lie huge (4 GB) -> gate
+        4: _quickcues_blob(999_999, b"\x00" * 999_999),  # legit-ish, bounded
+    }
+    db = _make_engine_db(rows)
+    tracks, raw = _run_engine(db)
+
+    assert "THROW" not in raw, "parse threw on a hostile-blob DB:\n" + raw
+    for tid in ("engine-1", "engine-2", "engine-3", "engine-4"):
+        assert tid in tracks, "expected %s in parse output:\n%s" % (tid, raw)
+        n, fin, nn = tracks[tid]
+        assert n == 0, (
+            "spec §4: %s should yield 0 cues — its quickCues blob is hostile "
+            "(oversized-declared / bomb / cap-exceeding). Got %d cues, which "
+            "means an allocation guard (the `< 1_000_000` declared-size gate or "
+            "the inflate `cap`) is not holding." % (tid, n)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — a cue position is read straight from raw float64
+# bits (`readBigEndianFloat64`), so a hostile blob can plant NaN / +Inf / -Inf /
+# a huge negative there. `CuePoint.sanitized()` MUST clamp every one to a finite,
+# non-negative `start` before it can reach the envelope canvas (`Int(.nan)` trap)
+# or the exporters (timecode overflow / `nan` in XML). spec §4 (a).
+# ---------------------------------------------------------------------------
+
+
+def test_enginedj_quickcues_nonfinite_positions_sanitise_to_finite_nonnegative():
+    nan = 0x7FF8000000000000
+    pos_inf = 0x7FF0000000000000
+    neg_inf = 0xFFF0000000000000
+    neg_big = 0xC1CDCD6500000000  # ~ -1e9 samples
+    pos_huge = 0x7FE0000000000000  # ~ 1e308, finite but astronomically large
+    header = b"\x00" * 8
+    payload = (
+        header
+        + _engine_cue_slot("NanCue", nan)
+        + _engine_cue_slot("PosInf", pos_inf)
+        + _engine_cue_slot("NegInf", neg_inf)
+        + _engine_cue_slot("NegBig", neg_big)
+        + _engine_cue_slot("PosHuge", pos_huge)
+    )
+    db = _make_engine_db({7: _quickcues_blob(len(payload), payload)})
+    tracks, raw = _run_engine(db)
+
+    assert "THROW" not in raw, "parse threw on non-finite cue positions:\n" + raw
+    assert "engine-7" in tracks, "expected engine-7 in output:\n" + raw
+    n, fin, nn = tracks["engine-7"]
+    assert n == 5, (
+        "expected all 5 planted cue slots to parse; got %d — the fixture or the "
+        "slot walker changed:\n%s" % (n, raw)
+    )
+    assert fin, (
+        "spec §4(a): a NaN/Inf cue position survived into `start` unsanitised — "
+        "CuePoint.sanitized() must map every non-finite bit pattern to a finite "
+        "value before it reaches the canvas (`Int(.nan)` traps) or the exporters."
+    )
+    assert nn, (
+        "spec §4(a): a negative cue position survived into `start` — sanitized() "
+        "must clamp start to >= 0 so timecode/normalisation math stays well-formed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hex / CSS color parser — Support/Hex.swift `parseCSSColor`. Driver protocol:
+# one `color <b64string>` line in, one `r g b` line out (finite decimals).
+# ---------------------------------------------------------------------------
+
+_HEX_STATE = {"built": False, "bin": None, "err": None}
+
+_HEX_DRIVER = r"""
+import Foundation
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    if f[0] == "color" {
+        let s = String(decoding: Data(base64Encoded: f[1]) ?? Data(), as: UTF8.self)
+        let c = Hex.parseCSSColor(s)
+        print("\(c.r) \(c.g) \(c.b)")
+    } else {
+        print("ERR")
+    }
+}
+"""
+
+
+def _hex_binary():
+    return _build_swift_harness(
+        _HEX_STATE,
+        [("Support", "Hex.swift")],
+        _HEX_DRIVER,
+        "cuesync9_hex_",
+    )
+
+
+def _parse_colors(strings):
+    binpath = _hex_binary()
+    cmds = ["color " + base64.b64encode(s.encode("utf-8")).decode("ascii") for s in strings]
+    proc = subprocess.run(
+        [binpath],
+        input="\n".join(cmds) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, "hex harness runtime error:\n" + proc.stderr
+    lines = [ln for ln in proc.stdout.split("\n") if ln != ""]
+    assert len(lines) == len(cmds), "hex harness framing broke"
+    return [tuple(float(x) for x in ln.split(" ")) for ln in lines]
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — parseCSSColor's doc promises "The returned components
+# are always finite." Push NaN / Inf / overflowing-literal / garbage color strings
+# (values that reach the parser from untrusted files via the re-hosted
+# `Color(cssString:)`) through the real parser and demand every component is a
+# finite number in [0, 1]. A non-finite escape would trap a later `Int(component)`
+# in the renderer.
+# ---------------------------------------------------------------------------
+
+
+def test_css_color_parser_always_returns_finite_clamped_components_for_hostile_input():
+    hostile = [
+        "rgb(nan, nan, nan)",
+        "rgb(inf, inf, inf)",
+        "rgb(-inf, -inf, -inf)",
+        "rgb(1e400, 1e400, 1e400)",  # overflows Double to +inf
+        "rgb(-1e400, 0, 0)",  # overflows to -inf
+        "rgb(999999999, -999999999, 128)",
+        "rgb(NaN,Inf,-Inf)",
+        "#nan",
+        "#ffffff",
+        "#000",
+        "rgb( , , )",
+        "rgb()",
+        "",
+        "garbage",
+        "#" + "f" * 4096,  # oversized hex must not parse to something non-finite
+        "rgb(" + "9" * 400 + ",0,0)",  # gigantic literal -> inf -> clamp
+    ]
+    for s, (r, g, b) in zip(hostile, _parse_colors(hostile)):
+        for name, v in (("r", r), ("g", g), ("b", b)):
+            assert v == v, (
+                "parseCSSColor(%r) returned a NaN %s component — the doc promises "
+                "finite output; a later Int(%s) in the renderer would trap." % (s, name, name)
+            )
+            assert v not in (float("inf"), float("-inf")), (
+                "parseCSSColor(%r) returned a non-finite %s component." % (s, name)
+            )
+            assert 0.0 <= v <= 1.0, (
+                "parseCSSColor(%r) returned %s=%r outside [0,1] — sanitize() must "
+                "clamp every component." % (s, name, v)
+            )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
