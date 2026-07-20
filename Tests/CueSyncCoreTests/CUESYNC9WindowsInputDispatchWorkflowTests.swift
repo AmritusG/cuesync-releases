@@ -32,6 +32,10 @@ private let auditedRevision = "a6d206370812e3b9edba259d167e848892c5013d"
 private let windowsInputPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-input.patch"
 private let interactivityPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 private let gskPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+// CUESYNC-9 round 13 (specs/CUESYNC-9-findings.md §0.12): the new window-present
+// patch — a THIRD live patch on GtkBackend.swift, distinct in root cause/file/
+// mechanism from the round-9-reverted windows-input patch above.
+private let windowsWindowPresentPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-window-present.patch"
 private let windowsInputStepNamePattern = #"name:\s*Patch swift-cross-ui Windows input dispatch"#
 
 final class CUESYNC9WindowsInputPatchStepPlacementTests: XCTestCase {
@@ -190,13 +194,14 @@ final class CUESYNC9PatchFileTests: XCTestCase {
             "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a disproven fix")
     }
 
-    /// NEW-STATE CHECK (round 9): exactly the two surviving, audited patches touch
-    /// GtkBackend.swift now — the interactivity patch and the GSK-renderer patch —
-    /// mirroring what Tests/test_adversarial.py's `test_dev_script_and_every_ci_leg_
-    /// apply_the_one_checked_in_patch` already enforces on the Python side, now also
-    /// pinned on the Swift side. Was: "targets only GtkBackend.swift" (a check that
-    /// only made sense while the now-deleted file still existed to read).
-    func testExactlyTheTwoSurvivingPatchesTouchGtkBackendSwift() throws {
+    /// NEW-STATE CHECK (updated round 13, specs/CUESYNC-9-findings.md §0.12): exactly
+    /// the three surviving, audited patches touch GtkBackend.swift now — the CUESYNC-8
+    /// interactivity patch, the round-4 GSK-renderer patch, and the round-13
+    /// window-present patch. Mirrors what Tests/test_adversarial.py enforces on the
+    /// Python side, now also pinned on the Swift side. A FOURTH file, or the
+    /// round-9-reverted windows-input patch reappearing, is a supply-chain regression.
+    /// Was (round 9): "exactly the two surviving patches."
+    func testExactlyTheThreeSurvivingPatchesTouchGtkBackendSwift() throws {
         let patchesDir = RepoPaths9.root.appendingPathComponent("patches")
         let entries = try FileManager.default.contentsOfDirectory(at: patchesDir, includingPropertiesForKeys: nil)
         let gtkBackendPatches = try entries
@@ -207,9 +212,10 @@ final class CUESYNC9PatchFileTests: XCTestCase {
         let expected = [
             (interactivityPatchRelativePath as NSString).lastPathComponent,
             (gskPatchRelativePath as NSString).lastPathComponent,
+            (windowsWindowPresentPatchRelativePath as NSString).lastPathComponent,
         ].sorted()
         XCTAssertEqual(gtkBackendPatches, expected,
-            "expected exactly the two surviving patches touching GtkBackend.swift (\(expected)) — a THIRD " +
+            "expected exactly the three surviving patches touching GtkBackend.swift (\(expected)) — a FOURTH " +
             "file, or the reverted windows-input patch reappearing, is a supply-chain regression. Found: " +
             "\(gtkBackendPatches)")
     }
@@ -352,24 +358,24 @@ final class CUESYNC9DevScriptAppliesBothPatchesTests: XCTestCase {
             "in round 9 (specs/CUESYNC-9-findings.md §0.8)")
     }
 
-    /// UPDATED for round 9: with the windows-input patch gone, exactly TWO patches
-    /// remain (interactivity + GSK-renderer), each still guarded idempotently and
-    /// actually applied — same requirement CUESYNC8DevScriptMirrorsCIPatchStepTests
-    /// pins for the interactivity patch alone. Was: "applies windows-input
-    /// idempotently and actually," asserting a count of (at least) 2 guards that
-    /// included the now-reverted patch.
-    func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
+    /// UPDATED for round 13 (specs/CUESYNC-9-findings.md §0.12): with the round-13
+    /// window-present patch added, exactly THREE patches now apply (interactivity +
+    /// GSK-renderer + window-present), each still guarded idempotently and actually
+    /// applied. The exact count still catches the round-9-reverted windows-input patch
+    /// (or any rogue extra) quietly reappearing — it would push the count to 4. Was
+    /// (round 9): "exactly TWO patches remain," a count of 2.
+    func testDevScriptAppliesAllThreeRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 2,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the two remaining patches (interactivity " +
-            "and GSK-renderer) with its own `git apply --reverse --check` — found \(reverseCheckCount) " +
-            "guard(s); a count above 2 would mean a reverted or extra patch crept back in")
+        XCTAssertEqual(reverseCheckCount, 3,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the three remaining patches (interactivity, " +
+            "GSK-renderer, window-present) with its own `git apply --reverse --check` — found \(reverseCheckCount) " +
+            "guard(s); a count above 3 would mean the reverted windows-input patch or an extra crept back in")
 
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 2,
-            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` call for EACH of the two " +
+        XCTAssertEqual(plainApplyCount, 3,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` call for EACH of the three " +
             "remaining patches, distinct from the `--reverse --check` guards — found \(plainApplyCount)")
     }
 

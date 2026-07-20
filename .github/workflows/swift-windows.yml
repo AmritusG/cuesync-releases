@@ -166,6 +166,33 @@ jobs:
             echo "Applied swift-cross-ui Windows GSK-renderer patch"
           fi
 
+      # CUESYNC-9 round 13 (specs/CUESYNC-9-findings.md §0.12): the initial WindowGroup
+      # window is only ever shown via SwiftCrossUI's backend.show(window:) on isFirstUpdate
+      # (gtk_widget_set_visible) — never backend.activate(window:)/gtk_window_present, which
+      # SwiftCrossUI reaches solely via openWindow(id:)/bringWindowForward(). On Windows,
+      # show maps but does not RAISE the surface, so the window stays behind the foreground
+      # cmd.exe launcher console the probe box starts CueSync.exe from and paints no visible
+      # pixels — the probe then screenshots/clicks that console, never CueSync (round 12's
+      # RGB pixel audit, findings §0.11/§0.12). This patch makes GtkBackend.show also
+      # present() the initial window on Windows, via GTK's own gtk_window_present(). Distinct
+      # in root cause, file, and mechanism from the round-9-reverted Win32-message-queue
+      # input patch (findings §0.8). Checked-in `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Applied after the GSK-renderer patch above and before "Build
+      # (release)" below; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        run: |
+          set -euo pipefail
+          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
+          cd .build/checkouts/swift-cross-ui
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "swift-cross-ui Windows window-present patch already applied — skipping"
+          else
+            git apply "$PATCH"
+            echo "Applied swift-cross-ui Windows window-present patch"
+          fi
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -639,6 +666,43 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 13 (specs/CUESYNC-9-findings.md §0.12): the initial WindowGroup
+      # window is only ever shown via SwiftCrossUI's backend.show(window:) on isFirstUpdate
+      # (gtk_widget_set_visible) — never backend.activate(window:)/gtk_window_present, which
+      # SwiftCrossUI reaches solely via openWindow(id:)/bringWindowForward(). On Windows,
+      # show maps but does not RAISE the surface, so the window stays behind the foreground
+      # cmd.exe launcher console the probe box starts CueSync.exe from and paints no visible
+      # pixels — the probe screenshots/clicks that console, never CueSync (round-12 RGB pixel
+      # audit, findings §0.11/§0.12). This patch makes GtkBackend.show also present() the
+      # initial window on Windows, via GTK's own gtk_window_present(). Distinct in root
+      # cause, file, and mechanism from the round-9-reverted Win32-message-queue input patch (findings §0.8). Checked-in `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
+      # first (same rationale as the GSK step above), applied after the GSK-renderer patch
+      # and before "Build (release)"; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows window-present patch"
           }
           Pop-Location
 
@@ -1556,6 +1620,43 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 13 (specs/CUESYNC-9-findings.md §0.12): the initial WindowGroup
+      # window is only ever shown via SwiftCrossUI's backend.show(window:) on isFirstUpdate
+      # (gtk_widget_set_visible) — never backend.activate(window:)/gtk_window_present, which
+      # SwiftCrossUI reaches solely via openWindow(id:)/bringWindowForward(). On Windows,
+      # show maps but does not RAISE the surface, so the window stays behind the foreground
+      # cmd.exe launcher console the probe box starts CueSync.exe from and paints no visible
+      # pixels — the probe screenshots/clicks that console, never CueSync (round-12 RGB pixel
+      # audit, findings §0.11/§0.12). This patch makes GtkBackend.show also present() the
+      # initial window on Windows, via GTK's own gtk_window_present(). Distinct in root
+      # cause, file, and mechanism from the round-9-reverted Win32-message-queue input patch (findings §0.8). Checked-in `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
+      # first (same rationale as the GSK step above), applied after the GSK-renderer patch
+      # and before "Test" below; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows window-present patch"
           }
           Pop-Location
 

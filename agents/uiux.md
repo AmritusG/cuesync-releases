@@ -390,3 +390,41 @@ Generalized: **a red result from a machine gate is only evidence against your co
 gate actually acted on your code; until then a false-negative harness and a real app bug are
 indistinguishable — and a whole saga can burn re-fixing an app the gate never validly touched.**
 CUESYNC-9 §0.11; no patch shipped this round (tree stays at the round-11 verified-green state).
+
+## "No missing `present` call" — did you check the call-graph, or just that the method exists? (CUESYNC-9, round 13)
+
+Rounds 11–12 concluded the Swift window wiring was correct and *nothing a patch could add was missing*,
+because the backend plainly has both `show(window:) → gtk_widget_show` **and** `activate(window:) →
+gtk_window_present`. Both methods exist — but existence is not invocation. Tracing who actually calls them
+for the **initial** `WindowGroup` window: SwiftCrossUI's `WindowReference.update` calls `backend.show(window:)`
+once on `isFirstUpdate` and **never** `backend.activate(window:)` — `activate`/`present` is reached only via
+`openWindow(id:)` and `bringWindowForward()`, neither of which fires at bootstrap. So the initial window is
+`gtk_widget_set_visible(true)` (maps the surface — enumerable, has a rect, hence `window_found: true`) but
+never `gtk_window_present()` (raises + focuses). On Windows it therefore maps **behind** the foreground
+launcher console and paints zero visible pixels — the exact "renders nothing / clicks hit the console"
+symptom the whole saga chased as "input death."
+
+- **`show` ≠ `present`. A mapped-but-unraised top-level is `window_found: true` and invisible at once.** On
+  GTK4/Windows, `gtk_widget_set_visible(true)` does not bring a window to the foreground; `gtk_window_present()`
+  does. "The window has a rect" proves it was mapped, not that it is on top or painted.
+- **When you conclude "no Swift fix exists," you are asserting a call-graph fact — verify it as one.** Don't
+  stop at "the backend has a present method." Follow the initial-window bootstrap path (`App.run → scene
+  update → WindowReference.update`) and see which of show/activate it *actually* reaches. Round 11/12's "no
+  missing `present`" was true of the method table and false of the call-graph.
+- **Calling the toolkit's OWN `present()` is not the GDK-win32 foreground hack you rejected.** Round 12
+  correctly ruled out reaching for `SetForegroundWindow`/`HWND_TOPMOST` via `gdk_win32_surface_get_handle`
+  (wrong layer, un-compile-checkable off-box). But making `show(window:)` also call the framework's existing
+  `window.present()` — the identical call `activate` already makes — is GTK's own public API, compiles on the
+  macOS authoring box (it did: release build green), and closes a real gap. Windows-guarded so macOS/Linux
+  are untouched.
+- **Still governed by step 5.** Whether `present()` beats the console's foreground-lock on the box is the
+  open question — but a console-launched child gets a one-time startup `SetForegroundWindow` grant, so the
+  never-taken present has a real chance. Judge the next probe by its **pixels** (does the frame now show your
+  app's accent colors?), not the red/green boolean; if it doesn't move, revert.
+
+Generalized: **"there's no fix to make" is a claim about what the code actually *does at runtime*, not about
+what methods are *defined*. Before you escalate past the view layer, trace the real call-graph for the exact
+object (here: the initial window) — a present that exists but is never invoked for that object is a fixable
+gap, and closing it with the framework's own API is in-lane, not the native-interop hack you were right to
+avoid.** CUESYNC-9 §0.12; `patches/swift-cross-ui-0.8.0-windows-window-present.patch`, one suspect,
+gate-to-verify.
