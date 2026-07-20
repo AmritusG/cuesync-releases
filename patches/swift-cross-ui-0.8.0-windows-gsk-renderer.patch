@@ -48,7 +48,7 @@ diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend
 index d83bbefb..0fc62404 100644
 --- a/Sources/GtkBackend/GtkBackend.swift
 +++ b/Sources/GtkBackend/GtkBackend.swift
-@@ -116,6 +116,23 @@ public final class GtkBackend:
+@@ -116,6 +116,33 @@ public final class GtkBackend:
      var globalCSSProvider: CSSProvider?
  
      public func runMainLoop(_ callback: @escaping @MainActor () -> Void) {
@@ -67,7 +67,17 @@ index d83bbefb..0fc62404 100644
 +            // so GSK reads it before selecting a renderer. GLib's own public API
 +            // (g_setenv), Windows-only; Linux/macOS keep their working default
 +            // renderers untouched.
-+            _ = g_setenv("GSK_RENDERER", "cairo", 1)
++            // Default to GTK's GPU/GL renderer — the full Cue Sync UI rendered
++            // correctly under GL on real hardware (Win-Box Iris Pro 580). Force
++            // software Cairo ONLY when the launch context explicitly asks
++            // (CUESYNC_SOFTWARE_RENDER=1) — e.g. a headless/remote-desktop probe
++            // where GL cannot realize a window. Forcing cairo UNCONDITIONALLY
++            // software-rendered the window content BLACK, regressing the GL UI
++            // (CUESYNC-9: black on every Windows build; the input bug was
++            // unverifiable because nothing was painted).
++            if g_getenv("CUESYNC_SOFTWARE_RENDER") != nil {
++                _ = g_setenv("GSK_RENDERER", "cairo", 1)
++            }
 +        #endif
          gtkApp.run { window in
              self.measurementCustomLabel = (self.createTextView() as! CustomLabel)
