@@ -953,9 +953,13 @@ jobs:
           # remaining dependency (surfacing every violation in one pass, not just
           # the first) and `return -not $failed` executes normally either way.
           function Test-DllClosure {
-            param([string]$exePath)
+            # $Quiet suppresses the full per-dependency dump (and the tolerated
+            # toolchain-root notes) but never the violation errors — used while the
+            # negative control probes candidate victims one at a time, so the log shows
+            # each candidate's verdict without repeating wldd's ~100-line walk per probe.
+            param([string]$exePath, [switch]$Quiet)
             $lines = & wldd $exePath
-            $lines | ForEach-Object { Write-Host $_ }
+            if (-not $Quiet) { $lines | ForEach-Object { Write-Host $_ } }
             $failed = $false
             foreach ($rawLine in $lines) {
               $trimmedLine = $rawLine.Trim()
@@ -987,7 +991,7 @@ jobs:
                   # so leaving them unbundled is what kept the exe from launching at
                   # all). Tolerated here; the bundling step makes the uploaded artifact
                   # self-contained and re-verifies the closure.
-                  Write-Host "resolved from Swift toolchain root; bundled into the artifact by the step below (spec CUESYNC-9 §0.2): $name => $path"
+                  if (-not $Quiet) { Write-Host "resolved from Swift toolchain root; bundled into the artifact by the step below (spec CUESYNC-9 §0.2): $name => $path" }
                 } elseif (-not $isInsideArtifact -and -not $isAllowedSystemDll) {
                   Write-Error "non-system DLL resolved outside the artifact directory: $name => $path" -ErrorAction Continue
                   $failed = $true
@@ -1011,7 +1015,22 @@ jobs:
           # control was vacuous. The victim must instead be a name wldd's own clean-run
           # walk actually resolved from inside the artifact directory — i.e. a real,
           # exercised dependency — so removing it is guaranteed to break the closure.
-          $victimDll = $null
+          #
+          # CI-observed (this branch, run 29725984597): "the closure check still passed
+          # with FoundationXML.dll removed". Even a real, exercised artifact-dir dependency
+          # is a vacuous victim if it ALSO ships under the Swift toolchain root: a Swift
+          # runtime DLL (FoundationXML.dll here) lives in BOTH .build\release AND
+          # ...\Swift\Runtimes\<ver>\usr\bin (on PATH), so removing it from the artifact dir
+          # just makes wldd re-resolve it from the toolchain root, which Test-DllClosure's
+          # $isFromSwiftToolchain branch tolerates — the check stays green and the control
+          # proves nothing. Predicting which deps have such a fallback (and where it
+          # resolves from) is fragile; test the property directly. Walk every artifact-dir
+          # dependency and, for each, remove it, re-run the closure check, then always
+          # restore it — the victim is the first whose removal actually makes the check
+          # FAIL. This is immune to wherever a fallback resolves from; a run in which NO
+          # candidate breaks the check (a genuinely vacuous negative control) is itself a
+          # hard failure.
+          $artifactDeps = [System.Collections.Generic.List[string]]::new()
           foreach ($rawLine in (& wldd "$env:ARTIFACT_DIR\CueSync.exe")) {
             $trimmedLine = $rawLine.Trim()
             $separatorIndex = $trimmedLine.IndexOf(' => ')
@@ -1019,23 +1038,30 @@ jobs:
             $depName = $trimmedLine.Substring(0, $separatorIndex).Trim()
             $depPath = $trimmedLine.Substring($separatorIndex + 4).Trim()
             if ($depPath.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-              $victimDll = [System.IO.Path]::GetFileNameWithoutExtension($depName)
-              break
+              $baseName = [System.IO.Path]::GetFileNameWithoutExtension($depName)
+              if (-not $artifactDeps.Contains($baseName)) { $artifactDeps.Add($baseName) }
             }
           }
-          if (-not $victimDll) { Write-Error "no bundled DLL found in CueSync.exe's resolved dependency closure to use for the negative control"; exit 1 }
+          if ($artifactDeps.Count -eq 0) { Write-Error "no bundled DLL found in CueSync.exe's resolved dependency closure to use for the negative control"; exit 1 }
 
-          Write-Host "== Negative control: removing $victimDll.dll =="
-          Copy-Item "$env:ARTIFACT_DIR\$victimDll.dll" "$env:RUNNER_TEMP\$victimDll.dll.bak" -Force
-          Remove-Item "$env:ARTIFACT_DIR\$victimDll.dll" -Force
-
-          if (Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe") {
-            throw "negative control failed: the closure check still passed with $victimDll.dll removed"
+          $victimDll = $null
+          foreach ($candidate in $artifactDeps) {
+            if (-not (Test-Path "$env:ARTIFACT_DIR\$candidate.dll")) { continue }
+            Write-Host "== Negative control: removing $candidate.dll =="
+            Copy-Item "$env:ARTIFACT_DIR\$candidate.dll" "$env:RUNNER_TEMP\$candidate.dll.bak" -Force
+            Remove-Item "$env:ARTIFACT_DIR\$candidate.dll" -Force
+            try {
+              $stillPasses = Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe" -Quiet
+            } finally {
+              # Always restore, even if Test-DllClosure throws, so the artifact dir is
+              # left byte-identical to the clean build no matter which candidate we tried.
+              Copy-Item "$env:RUNNER_TEMP\$candidate.dll.bak" "$env:ARTIFACT_DIR\$candidate.dll" -Force
+            }
+            if (-not $stillPasses) { $victimDll = $candidate; break }
+            Write-Host "candidate $candidate.dll has a fallback on the loader search path (closure still passed after removal, then restored); trying the next"
           }
-          Write-Host "Negative control confirmed: the check correctly failed with $victimDll.dll removed."
-
-          Write-Host "== Restoring $victimDll.dll =="
-          Copy-Item "$env:RUNNER_TEMP\$victimDll.dll.bak" "$env:ARTIFACT_DIR\$victimDll.dll" -Force
+          if (-not $victimDll) { throw "negative control found no artifact-only dependency whose removal fails the closure check — the check may be vacuous" }
+          Write-Host "Negative control confirmed: the check correctly failed with $victimDll.dll removed, then it was restored."
 
           if (-not (Test-DllClosure "$env:ARTIFACT_DIR\CueSync.exe")) {
             throw "closure check still fails after restoring $victimDll.dll"
