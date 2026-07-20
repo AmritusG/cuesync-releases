@@ -357,3 +357,36 @@ couldn't kill that theory; one controlled experiment did.
 Generalized: **the value of a disciplined negative result is that it ends a line of inquiry cleanly —
 bank it, revert the disproven change, and hand the human the one decision only they can make.**
 CUESYNC-9 §0.10; round-10 patch reverted per spec step 5.
+
+## `window_found: true` is not `clicked_your_window: true` — a red gate can be a harness false-negative (CUESYNC-9, round 12)
+
+Round 3's lesson was "prove the window is even yours" — back then the probe screenshotted the launcher
+`cmd.exe` console and `window_found` was effectively bogus. Round 12 is the sharper successor: the probe
+now *does* find CueSync (`window_found: true`, a plausible rect `(52,52)–(1280,906)`), and the red verdict
+still isn't about CueSync. Reading the probe's own `before.png`/`after.png` on the macOS box (no Windows
+needed): a black `~958×487` window sits foregrounded at `(0,0)` with a **scrollbar that has up/down arrow
+buttons** — a Win32/`conhost` scrollbar, not GTK's arrow-less overlay one; `958×487` is a default 80×25
+console. That is the launcher console, on top, and `gtk_window_present()` can't pull CueSync in front of it
+(Windows foreground-lock). The gate derives its center click from the rect midpoint `((52+1280)/2,
+(52+906)/2) = (666,479)` — which lands **inside** that console. So `center_click_changed: false` measured
+the console's (unchanging) pixels, not CueSync, no matter how healthy CueSync's input is.
+
+- **Read the pixels *and* the z-order, not just the boolean.** `window_found: true` says a window with
+  that title/class exists; it says nothing about whether the synthesized click reached it. A foreground
+  window from another process (here the probe's own launcher) can occlude the exact click point. Verify
+  the app is the topmost window *at the click coordinate* (window-from-point), not merely present.
+- **A synthesized-input gate can produce a false negative from the harness, not the app.** Before an 11th
+  in-app patch, rule out the instrument: is the click landing on your realized surface? Is the click
+  coordinate derived from the real control geometry (GTK CSD close-button offset / native titlebar) or
+  from a "top-right corner" guess that may miss? A machine oracle is only an oracle once it provably
+  exercises the thing under test.
+- **The right fix for "the harness clicks the wrong window" is in the harness, not the app.** Forcing the
+  app to steal foreground (GDK-win32 → `SetForegroundWindow`/`HWND_TOPMOST`) to defeat a broken probe is
+  the wrong layer, needs Windows-only interop you can't compile-check off-box, and only masks a center-leg
+  z-order problem while leaving a coordinate-geometry close-leg problem untouched. Fix the probe: raise or
+  hide the launcher console, hit-test topmost-at-point, drive close via `WM_CLOSE` to the located handle.
+
+Generalized: **a red result from a machine gate is only evidence against your code once you've proven the
+gate actually acted on your code; until then a false-negative harness and a real app bug are
+indistinguishable — and a whole saga can burn re-fixing an app the gate never validly touched.**
+CUESYNC-9 §0.11; no patch shipped this round (tree stays at the round-11 verified-green state).
