@@ -92,7 +92,9 @@ struct CueSyncApp: App {
             argv: \(CommandLine.arguments.joined(separator: " "))
             log: \(logPath)
             Reaching this line proves CueSync.exe itself launched (not the probe's \
-            cmd.exe launcher). GSK_RENDERER is forced to 'cairo' by patch. GTK/GLib/\
+            cmd.exe launcher). GSK renderer: GTK's GL default, switched to software \
+            'cairo' when a remote-desktop session (SESSIONNAME/CLIENTNAME) or \
+            CUESYNC_SOFTWARE_RENDER is detected (CUESYNC-9 round 16). GTK/GLib/\
             Pango/GSK output — if any — follows below; a clean run to a visible window \
             with these silent points at main-loop starvation, Pango/font lines at a \
             font-config failure, and GSK/GL lines at a renderer failure.

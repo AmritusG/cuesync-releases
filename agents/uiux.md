@@ -471,3 +471,40 @@ Generalized: **a workaround that makes the window *appear* is not neutral to wha
 swaps the renderer, it can black out exactly the pixels your gate measures. Gate every diagnostic fallback
 behind an explicit opt-in and default to the real path, or you will spend rounds debugging the scaffolding
 you yourself installed.** CUESYNC-9 §0.14; commit `9ed33bd` — cairo made opt-in, GL restored as default.
+
+## An opt-in the automated gate never sets is, to that gate, an off switch (CUESYNC-9, round 16)
+
+Round 15 (section above) was right to make the software-Cairo fallback opt-in and default to GL — but it made
+the opt-in a launch-time env var (`CUESYNC_SOFTWARE_RENDER=1`), and **the click-probe gate launches the bare
+`CueSync.exe` with no environment set**. So on the one box the gate actually runs on — the remote-desktop
+probe box where GL cannot realize a surface (§0.3) — the "default" path was now GL-that-crashes, and the next
+probe came back worse than any black window: `window_found: false`, `rect: null`, *"process exited before
+showing a window."* Rounds 4–14's forced Cairo always produced *a* window; round 15's GL-default produced
+none. The opt-in that reads as "safe default, explicit override" on a dev box reads as "always take the
+broken path" on an unattended gate.
+
+- **A default is only "safe" relative to who runs it. Enumerate your launchers.** There were two: the human
+  GTE on real GL hardware (wants the colour default) and the automated probe on a GL-incapable remote box
+  (needs the fallback). A single static default cannot serve both, and an env var that only the human knows to
+  set silently hands the automated one the wrong branch. When two callers need opposite behaviour, the switch
+  has to be something the code can read *itself*, not a flag one caller happens to set.
+- **Turn the environmental premise you already believe into a runtime condition.** Round 4 diagnosed the exact
+  cause: "GL can't realize a surface over the remote-desktop session." That sentence is a detectable predicate.
+  Round 16 keeps GL the default but auto-selects Cairo when it detects that session, via the Windows-set
+  `SESSIONNAME`/`CLIENTNAME` markers — so the box that needs the fallback takes it without anyone setting an
+  env var, and the GPU box still gets colour. The explicit `CUESYNC_SOFTWARE_RENDER=1` stays as a belt.
+- **Let the guard rails pick the mechanism.** The obvious detector, Win32 `GetSystemMetrics(SM_REMOTESESSION)`,
+  needs `import WinSDK` — which this patch's own no-new-dependency test forbids on an added line. Rather than
+  fight the guard, find the import-free equivalent: the same TS/RDP signal is already in the process
+  environment (`SESSIONNAME`/`CLIENTNAME`), reachable through the Foundation that's imported anyway. The
+  constraint narrowed the design to a *better* one.
+- **Name the residual out loud.** `SESSIONNAME`/`CLIENTNAME` detect a Terminal-Services/RDP session, not a
+  physical-console remote tool (some RustDesk modes). If the probe box is the latter the auto-detect won't fire
+  and the env override is still required — so the fix ships *with* that caveat documented, not as a claimed
+  certainty. Un-regressing "no window → a window" is real progress on the finding at hand even when the
+  downstream foreground/position concerns (harness-owned) remain.
+
+Generalized: **when an automated gate is one of your launchers, any behaviour behind a flag it doesn't set is
+effectively off for the case you most need to test. Detect the condition from state the process can read
+itself; keep the explicit flag as an override, not the only door.** CUESYNC-9 §0.15; round 16 — GL default,
+Cairo auto-selected on a detected remote-desktop session.
