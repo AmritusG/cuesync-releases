@@ -8,7 +8,10 @@
 >
 > - Source: `CueSync/CueSync/Support/TextTools.swift` (in the `CueSyncCore` target).
 > - Tests: `Tests/CueSyncCoreTests/TextToolsTests.swift` (44 cases across slugify/token/compliance).
-> - Live callers: `ExportSectionView.swift:84,103`, `ProjectSectionView.swift:302`.
+> - Live callers (swift-cross-ui re-host tree): `CueSync/CueSync/UI/Sections/ExportSectionView.swift:84,103`,
+>   `CueSync/CueSync/UI/Sections/ProjectSectionView.swift:302`. The parallel AppKit tree under
+>   `CueSync/CueSync/Views/Sections/…` deliberately passes the raw `presetName`/`projectName` and is
+>   **not** part of this port's changed surface — do not "fix" it here.
 > - The module and its tests both cite **spec CUESYNC-7 §2/§3/§4/§5** as their home — this
 >   is CUESYNC-7 work, not CUESYNC-9.
 >
@@ -64,9 +67,10 @@ All steps live in the cross-platform `CueSyncCore` target (`path: "CueSync/CueSy
    UInt8.random(in: .min ... .max, using: &rng)`) and hex-encode each byte's two nibbles — **never**
    `Int.random(in:) % 16` (modulo bias). Odd `length` draws `⌈length/2⌉` bytes and keeps the
    first `length` characters.
-4. Route the app's existing filename construction through `slugify` (already done at
-   `ExportSectionView.swift:84,103` and `ProjectSectionView.swift:302` — verify, do not
-   duplicate).
+4. Route the app's existing filename construction through `slugify` (already done in the
+   swift-cross-ui re-host tree at `CueSync/CueSync/UI/Sections/ExportSectionView.swift:84,103` and
+   `CueSync/CueSync/UI/Sections/ProjectSectionView.swift:302` — verify, do not duplicate). The
+   AppKit `Views/Sections/…` tree is untouched.
 5. Keep the module free of any `AppKit` / `SwiftUI` / `Security` / `Combine` import and of any
    filesystem call, so it compiles unchanged in `CueSyncCore` on every platform.
 
