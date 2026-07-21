@@ -77,12 +77,17 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          # Cache key includes the dependency PATCHES + the apply script, so a
-          # patch change INVALIDATES the cached (already-patched) swift-cross-ui
-          # checkout instead of restoring a stale one that `git apply` then can't
-          # re-patch ("patch does not apply" — the rounds 9-14 CI red). No broad
-          # restore-keys: a prefix match would resurrect exactly that stale checkout.
-          key: macos-spm-${{ hashFiles('Package.resolved', 'patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}
+          # macOS key stays keyed on Package.resolved ONLY (spec CUESYNC-6c: the
+          # macOS .build cache key must not move for the toolchain bump — a guard
+          # test pins it byte-for-byte). That is safe here: Package.resolved never
+          # changes across this branch, so this key is constant → macOS restores the
+          # SAME .build every run → the two `git apply` steps below hit their
+          # `--reverse --check` idempotency guard and no-op on the already-patched
+          # checkout. macOS therefore never sees the "patch does not apply" that the
+          # Windows legs did, so it needs neither patch-scoped key nor reset.
+          key: macos-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            macos-spm-
 
       - name: Swift version
         run: swift --version
@@ -372,13 +377,23 @@ jobs:
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .build
-          # Cache key includes the dependency PATCHES + the apply script, so a
-          # patch change INVALIDATES the cached (already-patched) swift-cross-ui
+          # Key busts on ANY change to the dependency patches or the apply script,
+          # so a patch edit invalidates the cached (already-patched) swift-cross-ui
           # checkout instead of restoring a stale one that `git apply` then can't
-          # re-patch ("patch does not apply" — the rounds 9-14 CI red). No broad
-          # restore-keys: a prefix match would resurrect exactly that stale checkout.
-          key: windows-build-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('Package.resolved', 'patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}
+          # re-patch ("patch does not apply" — the rounds 9-14 CI red). The toolchain
+          # + gvsbuild version stays in the key so a compiler bump can never restore a
+          # `.swiftmodule` tree built by a different swiftc (spec §2 step 7).
+          #
+          # restore-keys is PATCH-SCOPED, not a bare prefix: it shares the
+          # patch/apply-script hash segment, differing only in the trailing
+          # Package.resolved hash. So it only ever falls back to a cache built from
+          # the SAME patches — never the stale-patched checkout the old broad prefix
+          # would have resurrected — while still pinning swift-6.3.3, which the
+          # toolchain-pin guard tests require every restore-keys fallback to name.
+          path: .build
+          key: windows-build-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            windows-build-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-
 
       - name: Swift version
         run: swift --version
@@ -1326,13 +1341,23 @@ jobs:
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: .build
-          # Cache key includes the dependency PATCHES + the apply script, so a
-          # patch change INVALIDATES the cached (already-patched) swift-cross-ui
+          # Key busts on ANY change to the dependency patches or the apply script,
+          # so a patch edit invalidates the cached (already-patched) swift-cross-ui
           # checkout instead of restoring a stale one that `git apply` then can't
-          # re-patch ("patch does not apply" — the rounds 9-14 CI red). No broad
-          # restore-keys: a prefix match would resurrect exactly that stale checkout.
-          key: windows-test-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('Package.resolved', 'patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}
+          # re-patch ("patch does not apply" — the rounds 9-14 CI red). The toolchain
+          # + gvsbuild version stays in the key so a compiler bump can never restore a
+          # `.swiftmodule` tree built by a different swiftc (spec §2 step 7).
+          #
+          # restore-keys is PATCH-SCOPED, not a bare prefix: it shares the
+          # patch/apply-script hash segment, differing only in the trailing
+          # Package.resolved hash. So it only ever falls back to a cache built from
+          # the SAME patches — never the stale-patched checkout the old broad prefix
+          # would have resurrected — while still pinning swift-6.3.3, which the
+          # toolchain-pin guard tests require every restore-keys fallback to name.
+          path: .build
+          key: windows-test-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            windows-test-spm-swift-6.3.3-gvsbuild-2026.6.0-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-
 
       - name: Swift version
         run: swift --version
