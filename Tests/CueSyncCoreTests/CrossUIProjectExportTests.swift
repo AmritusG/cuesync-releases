@@ -22,9 +22,14 @@ final class CrossUIProjectExportTests: XCTestCase {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
     private static let sectionsDir = repoRoot.appendingPathComponent("CueSync/CueSync/UI/Sections")
+    private static let appKitSectionsDir = repoRoot.appendingPathComponent("CueSync/CueSync/Views/Sections")
 
     private func read(_ fileName: String) throws -> String {
         try String(contentsOf: Self.sectionsDir.appendingPathComponent(fileName), encoding: .utf8)
+    }
+
+    private func readAppKit(_ fileName: String) throws -> String {
+        try String(contentsOf: Self.appKitSectionsDir.appendingPathComponent(fileName), encoding: .utf8)
     }
 
     // MARK: - ProjectSectionView (spec §E.10/§E.11/§E.12)
@@ -252,5 +257,80 @@ final class CrossUIProjectExportTests: XCTestCase {
                            "ExportSectionView.swift must add no clipboard action — the macOS original has none " +
                            "and swift-cross-ui exposes no clipboard API at 0.8.0 (spec §H.18)")
         }
+    }
+
+    // MARK: - TextTools.slugify routing (spec CUESYNC-9-texttools.md §2 step 4 / routing note)
+
+    /// spec CUESYNC-9-texttools.md §2 step 4: "Route the app's existing filename construction
+    /// through slugify (already done in the swift-cross-ui re-host tree at
+    /// CueSync/CueSync/UI/Sections/ExportSectionView.swift:84,103 ... verify, do not duplicate)."
+    /// Pins both call sites by name (not just "slugify appears somewhere") so a future edit that
+    /// silently drops one of the two exporters' filenames back to a raw, unsanitised
+    /// state.presetName is caught rather than passing on a loose "slugify is used somewhere" check.
+    func testExportSectionRoutesFilenameConstructionThroughTextToolsSlugify() throws {
+        let src = try read("ExportSectionView.swift")
+        guard let xmlFunc = src.range(of: "private func exportXML()") else {
+            XCTFail("ExportSectionView.swift is missing exportXML()")
+            return
+        }
+        let xmlWindowEnd = src.index(xmlFunc.upperBound, offsetBy: 700, limitedBy: src.endIndex) ?? src.endIndex
+        XCTAssertTrue(src[xmlFunc.upperBound..<xmlWindowEnd].contains(
+                        "TextTools.slugify(state.presetName, fallback: \"envelope\")"),
+                      "exportXML() must build its filename via TextTools.slugify(state.presetName, " +
+                      "fallback: \"envelope\") (spec CUESYNC-9-texttools.md §2 step 4)")
+
+        guard let skFunc = src.range(of: "private func exportShowKontrol()") else {
+            XCTFail("ExportSectionView.swift is missing exportShowKontrol()")
+            return
+        }
+        let skWindowEnd = src.index(skFunc.upperBound, offsetBy: 700, limitedBy: src.endIndex) ?? src.endIndex
+        XCTAssertTrue(src[skFunc.upperBound..<skWindowEnd].contains(
+                        "TextTools.slugify(state.presetName, fallback: \"cues\")"),
+                      "exportShowKontrol() must build its filename via TextTools.slugify(state.presetName, " +
+                      "fallback: \"cues\") (spec CUESYNC-9-texttools.md §2 step 4)")
+    }
+
+    /// spec CUESYNC-9-texttools.md §2 step 4: same routing note, for ProjectSectionView's
+    /// Save-As path (the "…/ProjectSectionView.swift:302" citation).
+    func testProjectSectionRoutesSaveAsFilenameThroughTextToolsSlugify() throws {
+        let src = try read("ProjectSectionView.swift")
+        guard let saveFunc = src.range(of: "private func saveProject()") else {
+            XCTFail("ProjectSectionView.swift is missing saveProject()")
+            return
+        }
+        let windowEnd = src.index(saveFunc.upperBound, offsetBy: 700, limitedBy: src.endIndex) ?? src.endIndex
+        XCTAssertTrue(src[saveFunc.upperBound..<windowEnd].contains(
+                        "TextTools.slugify(state.projectName, fallback: \"untitled\")"),
+                      "saveProject()'s Save-As path must build its filename via TextTools.slugify(" +
+                      "state.projectName, fallback: \"untitled\") (spec CUESYNC-9-texttools.md §2 step 4)")
+    }
+
+    /// spec CUESYNC-9-texttools.md routing note: "The parallel AppKit tree under
+    /// CueSync/CueSync/Views/Sections/… deliberately passes the raw presetName/projectName and
+    /// is not part of this port's changed surface — do not 'fix' it here." This is a
+    /// no-regression guard, not a request to add slugify there: it pins the *documented* gap so
+    /// a future change either (a) leaves the AppKit tree exactly as spec'd, or (b) updates this
+    /// spec/test together with the source, rather than silently drifting the two trees apart.
+    func testAppKitExportAndProjectSectionsStillPassRawNamesUndocumentedGapUnchanged() throws {
+        let exportSrc = try readAppKit("ExportSectionView.swift")
+        XCTAssertFalse(exportSrc.contains("TextTools"),
+                       "Views/Sections/ExportSectionView.swift (AppKit tree) is documented as out of scope " +
+                       "for TextTools routing — it must keep passing the raw state.presetName " +
+                       "(CUESYNC-9-texttools.md routing note)")
+        XCTAssertTrue(exportSrc.contains("state.presetName.isEmpty ? \"envelope\" : state.presetName"),
+                      "Views/Sections/ExportSectionView.swift must still build the XML filename from the " +
+                      "raw state.presetName (CUESYNC-9-texttools.md routing note)")
+        XCTAssertTrue(exportSrc.contains("state.presetName.isEmpty ? \"cues\" : state.presetName"),
+                      "Views/Sections/ExportSectionView.swift must still build the ShowKontrol filename from " +
+                      "the raw state.presetName (CUESYNC-9-texttools.md routing note)")
+
+        let projectSrc = try readAppKit("ProjectSectionView.swift")
+        XCTAssertFalse(projectSrc.contains("TextTools"),
+                       "Views/Sections/ProjectSectionView.swift (AppKit tree) is documented as out of scope " +
+                       "for TextTools routing — it must keep passing the raw state.projectName " +
+                       "(CUESYNC-9-texttools.md routing note)")
+        XCTAssertTrue(projectSrc.contains("state.projectName.isEmpty ? \"Untitled\" : state.projectName"),
+                      "Views/Sections/ProjectSectionView.swift must still build the Save-As filename from the " +
+                      "raw state.projectName (CUESYNC-9-texttools.md routing note)")
     }
 }
