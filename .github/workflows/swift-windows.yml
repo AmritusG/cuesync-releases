@@ -178,6 +178,31 @@ jobs:
             echo "Applied swift-cross-ui Windows GSK-renderer patch"
           fi
 
+      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
+      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate
+      # (Scenes/WindowReference.swift) and NEVER backend.activate(window:) — activate/present
+      # is reached only via openWindow(id:). On Windows GDK, show MAPS the surface (enumerable,
+      # has a rect → window_found:true) but does not RAISE it, so the window stays behind the
+      # foreground cmd.exe launcher console the probe box starts CueSync.exe from
+      # (.factory/probe/before.png shows only that console, no CueSync window). This patch makes
+      # show(window:) also gtk_window_present() the initial window on Windows — GTK's own API,
+      # the identical call activate() already makes. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Applied after the GSK-renderer patch above and before "Build
+      # (release)" below; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        run: |
+          set -euo pipefail
+          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
+          cd .build/checkouts/swift-cross-ui
+          if git apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "swift-cross-ui Windows window-present patch already applied — skipping"
+          else
+            git apply "$PATCH"
+            echo "Applied swift-cross-ui Windows window-present patch"
+          fi
+
       - name: Build (release)
         run: swift build -c release
       # -c release: reuses the object files "Build (release)" just produced
@@ -664,6 +689,39 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
+      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate and
+      # never backend.activate(window:), so on Windows GDK it MAPS behind the foreground cmd.exe
+      # launcher console instead of raising (.factory/probe/before.png shows only that console,
+      # no CueSync window). This patch makes show(window:) also gtk_window_present() the initial
+      # window on Windows — GTK's own API. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
+      # first (same rationale as the gulong/gsize step), applied after the GSK-renderer patch
+      # above and before "Build (release)" below; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows window-present patch"
           }
           Pop-Location
 
@@ -1625,6 +1683,39 @@ jobs:
               exit 1
             }
             Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
+          }
+          Pop-Location
+
+      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
+      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate and
+      # never backend.activate(window:), so on Windows GDK it MAPS behind the foreground cmd.exe
+      # launcher console instead of raising (.factory/probe/before.png shows only that console,
+      # no CueSync window). This patch makes show(window:) also gtk_window_present() the initial
+      # window on Windows — GTK's own API. Checked-in, reviewable `git apply` patch
+      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
+      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
+      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
+      # first (same rationale as the gulong/gsize step), applied after the GSK-renderer patch
+      # above and before "Test" below; `git apply --reverse --check` guards idempotency.
+      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
+          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
+          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
+
+          Push-Location .build\checkouts\swift-cross-ui
+          git apply --reverse --check $patch 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
+          } else {
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
+              exit 1
+            }
+            Write-Host "Applied swift-cross-ui Windows window-present patch"
           }
           Pop-Location
 

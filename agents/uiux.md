@@ -508,3 +508,38 @@ Generalized: **when an automated gate is one of your launchers, any behaviour be
 effectively off for the case you most need to test. Detect the condition from state the process can read
 itself; keep the explicit flag as an override, not the only door.** CUESYNC-9 §0.15; round 16 — GL default,
 Cairo auto-selected on a detected remote-desktop session.
+
+## Read the screenshot, not the metric derived from it — and re-test a fix whose refutation rested on a confound you later removed (CUESYNC-9, round 17)
+
+Round 16 finally produced a probe frame that was neither a GL "no window" nor a Cairo-black null. Its `result.json`
+looked like the ticket's own thesis: `window_found:true`, `rendered:true`, `content_nonblack_frac:0.5492`,
+`close_click_exited:false` — "window is up, painted, and ignores the mouse." **The two `before.png`/`after.png`
+frames said otherwise: there was no CueSync window in them at all — only the build's PowerShell console and the
+launcher's cmd.exe.** The `0.5492` "content" was the blue console; the reported window `rect` was CueSync's real
+HWND sitting *behind* both consoles, mapped but never raised. A derived scalar (`content_nonblack_frac`,
+`window_found`) computed over a screen region cannot tell "your window, painted" from "someone else's window in the
+same rectangle" — only the pixels can, and the whole saga's rounds 5–14 had trusted the scalar.
+
+- **A probe's summary JSON is a lossy projection of the frame. When it and the frame disagree, the frame wins.**
+  `window_found:true` meant "a top-level with CueSync's PID has a rect," not "CueSync is the thing on screen at that
+  rect." Open the actual before/after PNGs before believing any derived metric — it's the difference between "input
+  is dead" (a widget bug you'd chase for rounds) and "the window is behind the launcher" (a foreground/z-order gap).
+- **The real gap was one `show()` vs `present()` call in the call-graph.** SwiftCrossUI shows the launch window via
+  `backend.show(window:)` (`WindowReference.swift:301` → `gtk_widget_set_visible`, which *maps* but does not
+  *raise*); `gtk_window_present` lives only in `activate(window:)`, reached solely via `openWindow(id:)`. So the
+  launch window maps behind whatever is foreground — the cmd.exe that launched it. This is the same finding round 13
+  made (see the round-13 section above); it was sound.
+- **A reverted fix is not permanently dead — re-open it when its refutation rested on a variable you've since
+  controlled.** Round 14 reverted round 13's `present()` because the probe still showed zero accent pixels. §0.14
+  then proved *those* pixels were a Cairo-black confound (the window may well have raised and simply painted black),
+  and the window was also cascaded off-screen. Both confounds are gone as of round 16, so round 17 re-applies
+  `present()` — with the justification written down (not a silent re-land), because it is the confirmed in-lane gap
+  and is *necessary before any input claim can even be measured*: you cannot judge a click on a window that isn't in
+  front. Reverting a non-mover (spec discipline) and re-trying it under a corrected experiment are not in tension;
+  what's forbidden is re-landing it while pretending the earlier refutation didn't happen.
+
+Generalized: **trust the raw artifact over the metric derived from it; and treat "we tried that and reverted it" as
+conditional on the experiment that refuted it — when you remove the confound that experiment ran under, the fix is a
+live candidate again, re-applied openly with the new evidence cited.** CUESYNC-9 §0.16; round 17 — `present()` the
+initial Windows window in `show(window:)`, re-applying round 13 now that §0.14/§0.15 lifted the cairo-black +
+off-screen confounds its revert rested on.

@@ -1,0 +1,33 @@
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index d83bbefb..1f0ded0b 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -285,6 +285,28 @@ public final class GtkBackend:
+ 
+     public func show(window: Window) {
+         window.show()
++        #if os(Windows)
++            // CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial
++            // WindowGroup window is only ever shown here. SwiftCrossUI calls
++            // backend.show(window:) on isFirstUpdate (Scenes/WindowReference.swift:301)
++            // and NEVER backend.activate(window:) for the launch window —
++            // activate/present is reached solely via openWindow(id:) (Scenes/Window.swift:87).
++            // And window.show() == gtk_widget_set_visible(true): on Windows GDK that MAPS
++            // the surface (the HWND is enumerable, has a rect → the probe reports
++            // window_found:true) but does NOT raise it, so the window stays BEHIND the
++            // foreground cmd.exe launcher console the probe box starts CueSync.exe from —
++            // .factory/probe/before.png shows only the PowerShell build console + the black
++            // cmd.exe launcher, no CueSync window, so the probe screenshots/clicks the
++            // console and the close-click never reaches CueSync. Raise the initial window
++            // with GTK's own gtk_window_present() (Gtk/Widgets/Window.swift: present()), the
++            // identical call activate() already makes, using the one-time foreground grant
++            // Windows gives a freshly-started child of the foreground process. Round 13
++            // (§0.12) added this same call but round 14 reverted it on the cairo-black +
++            // off-screen-cascade confounds §0.14/§0.15 later invalidated; both are now
++            // lifted, so it is re-applied here. Windows-only so macOS/Linux keep their
++            // working gtk_widget_show default untouched.
++            window.present()
++        #endif
+     }
+ 
+     public func activate(window: Window) {

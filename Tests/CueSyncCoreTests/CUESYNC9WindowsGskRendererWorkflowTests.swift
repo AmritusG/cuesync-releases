@@ -282,20 +282,23 @@ final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
             "in round 9 (specs/CUESYNC-9-findings.md §0.8)")
     }
 
-    /// UPDATED for round 9: each of the two REMAINING patches is guarded
-    /// idempotently and actually applied — an exact count of 2, not merely "at
-    /// least 3" as before, so a reverted patch quietly reappearing would trip this.
-    /// Was: "each of the three patches ... idempotently and actually."
+    /// UPDATED for round 17 (specs/CUESYNC-9-findings.md §0.16): the round-13
+    /// window-present patch is re-applied (the cairo-black + off-screen-cascade
+    /// confounds that got it reverted in round 14 were later invalidated by
+    /// §0.14/§0.15), so exactly THREE patches now apply (interactivity + GSK-renderer
+    /// + window-present) — an exact count of 3, so the round-9-reverted windows-input
+    /// patch quietly reappearing (count 4) would still trip this. Was (round 9): a
+    /// count of 2.
     func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 2,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the two remaining patches with its own " +
+        XCTAssertEqual(reverseCheckCount, 3,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the three remaining patches with its own " +
             "`git apply --reverse --check` — found \(reverseCheckCount)")
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 2,
-            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the two " +
+        XCTAssertEqual(plainApplyCount, 3,
+            "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the three " +
             "remaining patches — found \(plainApplyCount)")
     }
 

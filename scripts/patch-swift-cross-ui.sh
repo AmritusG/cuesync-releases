@@ -25,8 +25,15 @@ CHECKOUT="$ROOT/.build/checkouts/swift-cross-ui"
 
 INTERACTIVITY_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 GSK_RENDERER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
+# CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): a third live patch on
+# GtkBackend.swift — show(window:) also gtk_window_present()s the initial window on
+# Windows so it raises above the launcher console instead of mapping behind it.
+# Distinct root cause/file-region/mechanism from the round-9-reverted windows-input
+# patch; applied last (after interactivity + GSK) so it lands on the shifted
+# show(window:) anchor via git apply's context match.
+WINDOW_PRESENT_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
 
-for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH"; do
+for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH" "$WINDOW_PRESENT_PATCH"; do
     if [ ! -f "$patch" ]; then
         echo "patch-swift-cross-ui.sh: missing $patch" >&2
         exit 1
@@ -79,4 +86,11 @@ if git apply --reverse --check "$GSK_RENDERER_PATCH" 2>/dev/null; then
 else
     echo "==> Applying swift-cross-ui Windows GSK-renderer patch"
     git apply "$GSK_RENDERER_PATCH"
+fi
+
+if git apply --reverse --check "$WINDOW_PRESENT_PATCH" 2>/dev/null; then
+    echo "==> swift-cross-ui Windows window-present patch already applied — skipping"
+else
+    echo "==> Applying swift-cross-ui Windows window-present patch"
+    git apply "$WINDOW_PRESENT_PATCH"
 fi
