@@ -437,3 +437,37 @@ repositions the window before probing) is below the Swift layer, exactly where �
 call-graph claims (round 13 was right to), but don't assume the newly-reached call *succeeds* off-box — let the
 gate's pixels, not the patch's plausibility, decide; when they don't move, revert (round 14 did).** CUESYNC-9
 §0.12 (the gap) + §0.13 (the refutation); no patch survives this round.
+
+## The workaround that makes the window appear can be painting every pixel your oracle later reads (CUESYNC-9, round 15)
+
+Round 4 shipped `GSK_RENDERER=cairo` to force GTK's software renderer, because the GPU/GL renderer could
+not realize a surface over the RDP/RustDesk probe box (a real, correct diagnosis — §0.3, the lesson two
+sections up). It made a window appear. It was also **left forced unconditionally on every Windows build for
+eleven rounds** — and GTK's Cairo backend software-renders CueSync's content **black**. So from round 4 on,
+every probe frame was a black window, and rounds 5–14 read that blackness as, in turn, empty render, input
+death, and foreground-lock. Round 15's one-line correction — gate the cairo force behind an opt-in env
+(`if g_getenv("CUESYNC_SOFTWARE_RENDER") != nil { g_setenv("GSK_RENDERER","cairo",1) }`), default to GL —
+is what finally lets the real coloured UI paint on real hardware.
+
+- **A "make it appear" fallback and "it isn't painting / isn't responding" are pixel-identical to a
+  before/after diff.** A window forced to a software renderer that draws content black produces the exact same
+  zero-accent frame as a window that never painted or never took focus. The accent-scan oracle §0.13 trusted
+  to "discriminate" could not tell cairo-black from never-painted — the two hypotheses were unfalsifiable *by
+  that instrument* the whole time. Before you conclude "the pixels prove X," confirm the pixels *can* show
+  not-X: that the renderer under test actually draws the colours you're scanning for.
+- **A workaround you leave on is an uncontrolled variable in every experiment that follows it.** Round 10's
+  own discipline was "change exactly one variable per probe." Rounds 5–14 honoured that for the *fix under
+  test* while silently pinning the *render mode* to a software fallback that corrupted the measurement. When
+  you ship a fallback to unblock a probe, treat it as a variable you must be able to turn off — env-gate it,
+  default to the real path — so later rounds can measure the app, not the scaffolding.
+- **Make diagnostic fallbacks opt-in, not default.** The correct shape is: real renderer by default (so the
+  human GTE and any GL-capable box see the true UI), software fallback only when a launch context explicitly
+  asks for it (`CUESYNC_SOFTWARE_RENDER=1` for a headless/RDP capture that would otherwise get no window at
+  all). The probe then chooses its trade-off knowingly: cairo → a window appears but content is black, so the
+  pixel-change leg is meaningless while the process-kill leg still works; GL → real pixels but only where GL
+  can realize. A fallback wired as the unconditional default silently makes that choice for every future round.
+
+Generalized: **a workaround that makes the window *appear* is not neutral to what the window *shows* — if it
+swaps the renderer, it can black out exactly the pixels your gate measures. Gate every diagnostic fallback
+behind an explicit opt-in and default to the real path, or you will spend rounds debugging the scaffolding
+you yourself installed.** CUESYNC-9 §0.14; commit `9ed33bd` — cairo made opt-in, GL restored as default.
