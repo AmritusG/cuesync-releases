@@ -77,17 +77,21 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
-          # macOS key stays keyed on Package.resolved ONLY (spec CUESYNC-6c: the
-          # macOS .build cache key must not move for the toolchain bump — a guard
-          # test pins it byte-for-byte). That is safe here: Package.resolved never
-          # changes across this branch, so this key is constant → macOS restores the
-          # SAME .build every run → the two `git apply` steps below hit their
-          # `--reverse --check` idempotency guard and no-op on the already-patched
-          # checkout. macOS therefore never sees the "patch does not apply" that the
-          # Windows legs did, so it needs neither patch-scoped key nor reset.
-          key: macos-spm-${{ hashFiles('Package.resolved') }}
+          # CI-observed (this branch, run 29812099337): the "macOS never needs a
+          # patch-scoped key" theory this comment used to state is FALSE. The GSK-
+          # renderer patch's content changed (9ed33bd) while Package.resolved stayed
+          # constant, so a frozen Package.resolved-only key restored a macOS .build
+          # whose checked-out swift-cross-ui already had the OLDER patch hunk
+          # applied — matching neither "already applied" (the `--reverse --check`
+          # no-op) nor "pristine" (a clean forward apply), so `git apply` failed
+          # with "patch does not apply" at GtkBackend.swift:116, same failure mode
+          # as the Windows legs the patches-hash key below already fixed (rounds
+          # 9-14). Fixed the same way: hash the patches + apply script into the key
+          # so any patch edit busts this cache too, instead of resurrecting a
+          # checkout patched differently than the current patch files.
+          key: macos-spm-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            macos-spm-
+            macos-spm-${{ hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh') }}-
 
       - name: Swift version
         run: swift --version

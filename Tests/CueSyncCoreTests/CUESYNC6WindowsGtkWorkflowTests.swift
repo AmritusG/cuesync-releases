@@ -521,18 +521,47 @@ final class CUESYNC6cCacheKeyTests: XCTestCase {
             "spec §0.4: this guard must still fail if the pin goes missing or floats")
     }
 
-    /// spec CUESYNC-6c §3 Cache: "The macos-spm- key is unchanged." The macos
-    /// job uses the runner's preinstalled toolchain; this ticket does not
-    /// touch it, so 6.3.3 lands on Windows only.
-    func testMacosCacheKeyIsUnchangedByTheToolchainBump() throws {
+    /// spec CUESYNC-6c §3 Cache said "The macos-spm- key is unchanged" for that
+    /// ticket's toolchain bump — true in isolation, but CUESYNC-9 round 15
+    /// (CI run 29812099337) disproved the broader assumption a later commit
+    /// leaned on ("patches never apply differently on macOS; its constant key
+    /// always cache-hits, so `git apply --reverse --check` no-ops"): a macOS leg
+    /// hit "patch failed: GtkBackend.swift:116 / patch does not apply" once the
+    /// GSK-renderer patch's content changed while Package.resolved stayed
+    /// constant — the cached checkout had the OLDER hunk applied, matching
+    /// neither "already applied" nor "pristine". The macos .build cache key must
+    /// therefore bust on patch content changes exactly like the Windows legs,
+    /// not stay frozen on Package.resolved alone.
+    func testMacosCacheKeyBustsWhenThePatchesChange() throws {
         let job = try JobBlocks.require("macos")
         guard let keyLine = job.lines.first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("key:") }) else {
             XCTFail("macos must still declare a .build cache key")
             return
         }
-        XCTAssertEqual(keyLine.trimmingCharacters(in: .whitespaces),
-            "key: macos-spm-${{ hashFiles('Package.resolved') }}",
-            "the macos .build cache key must remain byte-identical to before this ticket")
+        let trimmed = keyLine.trimmingCharacters(in: .whitespaces)
+        XCTAssertTrue(trimmed.contains("hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh')"),
+            "the macos .build cache key must hash the dependency patches + apply script, exactly like the " +
+            "Windows legs, so a patch content change busts a stale already-differently-patched checkout — " +
+            "got: \(trimmed)")
+        XCTAssertTrue(trimmed.contains("hashFiles('Package.resolved')"),
+            "the macos .build cache key must still hash Package.resolved too — got: \(trimmed)")
+    }
+
+    /// Mirrors the Windows legs' anti-cache-poisoning fix: `restore-keys` must
+    /// share the patch-hash segment (a bare `macos-spm-` prefix would resurrect
+    /// the exact stale-patched checkout the key change above is meant to avoid).
+    func testMacosRestoreKeysArePatchScopedNotABarePrefix() throws {
+        let job = try JobBlocks.require("macos")
+        guard let restoreLine = job.lines.first(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("macos-spm-")
+        }) else {
+            XCTFail("macos must declare a macos-spm- restore-keys prefix")
+            return
+        }
+        let trimmed = restoreLine.trimmingCharacters(in: .whitespaces)
+        XCTAssertTrue(trimmed.contains("hashFiles('patches/*.patch', 'scripts/patch-swift-cross-ui.sh')"),
+            "the macos restore-keys prefix must stay patch-scoped, not a bare 'macos-spm-' prefix that " +
+            "would resurrect a checkout patched differently than the current patch files — got: \(trimmed)")
     }
 }
 
