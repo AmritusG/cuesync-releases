@@ -6227,6 +6227,219 @@ def test_rekordbox_xml_name_to_filename_slug_is_traversal_free_end_to_end():
 
 
 # ---------------------------------------------------------------------------
+# ShowKontrol IMPORT harness — the missing half of the trust boundary.
+#
+# Every other ShowKontrol test drives `ShowKontrolParser.parse` on the exporter's
+# OWN well-formed output (the `skrt` round trip). But a `.cue` file is an untrusted
+# import in its own right (spec §4 lists "ShowKontrol/Resolume" among the hostile
+# sources), and on Windows the input-death fix makes the Import → duration-modal
+# path actually run. This harness feeds hand-crafted hostile `.cue` text straight
+# into the importer and inspects what it hands the app: the cue starts and the
+# `suggestedDurationMs` / `durationFromCues` it presents as the authoritative track
+# length. Sources: CuePoint + ParseError + ShowKontrolParser only.
+#
+# Protocol — one `skimport <b64content>` line in, one b64'd line out, tab-joined:
+#   OK \t <durTok|NONE> \t <fromCues 0/1> \t <count> \t <allStartsFinite 0/1>
+#      \t <allStartsNonNeg 0/1> \t <durFinite 0/1> \t <durNonNeg 0/1>
+#      \t <minStart> \t <maxStart>
+#   THREW \t <error>
+# ---------------------------------------------------------------------------
+
+_SK_IMPORT_STATE = {"built": False, "bin": None, "err": None}
+
+_SK_IMPORT_DRIVER = r"""
+import Foundation
+
+func b64dec(_ s: String) -> String { guard let d = Data(base64Encoded: s) else { return "" }; return String(decoding: d, as: UTF8.self) }
+func b64enc(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+
+while let line = readLine(strippingNewline: true) {
+    let f = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    if f[0] == "skimport" {
+        let content = b64dec(f[1])
+        do {
+            let r = try ShowKontrolParser.parse(content: content)
+            let starts = r.cuePoints.map { $0.start }
+            let allFinite = starts.allSatisfy { $0.isFinite } ? "1" : "0"
+            let allNonNeg = starts.allSatisfy { $0 >= 0 } ? "1" : "0"
+            let minS = starts.min() ?? 0
+            let maxS = starts.max() ?? 0
+            let durTok: String
+            let durFinite: String
+            let durNonNeg: String
+            if let d = r.suggestedDurationMs {
+                durTok = String(d)
+                durFinite = d.isFinite ? "1" : "0"
+                durNonNeg = d >= 0 ? "1" : "0"
+            } else {
+                durTok = "NONE"; durFinite = "1"; durNonNeg = "1"
+            }
+            let fromCues = r.durationFromCues ? "1" : "0"
+            print(b64enc("OK\t\(durTok)\t\(fromCues)\t\(r.cuePoints.count)\t\(allFinite)\t\(allNonNeg)\t\(durFinite)\t\(durNonNeg)\t\(String(minS))\t\(String(maxS))"))
+        } catch {
+            print(b64enc("THREW\t\(error)"))
+        }
+    } else {
+        print(b64enc("ERR"))
+    }
+}
+"""
+
+
+def _skimport_binary():
+    return _build_swift_harness(
+        _SK_IMPORT_STATE,
+        [
+            ("Models", "CuePoint.swift"),
+            ("Models", "ParseError.swift"),
+            ("Parsers", "ShowKontrolParser.swift"),
+        ],
+        _SK_IMPORT_DRIVER,
+        "cuesync9_skimport_",
+    )
+
+
+def _skimport_batch(contents):
+    """contents: iterable of raw `.cue` text -> list of tab-split field lists."""
+    binpath = _skimport_binary()
+    cmds = ["skimport %s" % _b64(c) for c in contents]
+    proc = subprocess.run(
+        [binpath],
+        input="\n".join(cmds) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        "showkontrol-import harness runtime error:\n" + proc.stderr
+    )
+    lines = [ln for ln in proc.stdout.split("\n") if ln != ""]
+    assert len(lines) == len(cmds), (
+        "showkontrol-import harness framing broke: %d lines for %d commands"
+        % (len(lines), len(cmds))
+    )
+    return [base64.b64decode(ln).decode("utf-8").split("\t") for ln in lines]
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (LIVE FINDING — was red until parseDurationString was hardened) — a
+# ShowKontrol `.cue` may carry a CUE0 duration-metadata field (column 5 of a
+# `...,CUE0,<duration>,...` row). `ShowKontrolParser.parseDurationString` builds
+# that duration by feeding each ":"-split component through `Double(...)`, which
+# happily parses a NEGATIVE ("-1:00", "1:-99999", "0:0:-1") or non-finite
+# ("nan:00", "inf:00") token. The pre-fix guard only checked `.isFinite`, so a
+# negative product like (-1*60)*1000 = -60000 sailed through and was returned as
+# `suggestedDurationMs` with `durationFromCues = true`.
+#
+# Impact: that negative "authoritative" track length flows into the app as
+# `trackDuration`; `ResolumeExporter.generate` then hits `guard trackDuration > 0`
+# and returns nil, so Save XML silently exports NOTHING — the export button looks
+# dead, directly contradicting the CUESYNC-9 DoD ("Save XML fires / export works").
+# A duration is never negative: the parser must reject non-positive/non-finite
+# durations and fall back to the max-cue-time path.
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_import_hostile_cue0_duration_never_yields_a_negative_or_nonfinite_track_length():
+    real = "00:00:05:00,00000500,5000,Real,TAG,,,,,,"  # a genuine cue @ 5 s so the file parses
+
+    def doc(cue0_meta):
+        return "00:00:00:00,00000000,0,CUE0,%s,,,,,,\r%s" % (cue0_meta, real)
+
+    attacks = {
+        "-1:00": doc("-1:00"),        # negative MM:SS      -> -60000 ms
+        "-5:00:00": doc("-5:00:00"),  # negative MM:SS:MS   -> -300000 ms
+        "1:-99999": doc("1:-99999"),  # negative seconds component
+        "0:0:-1": doc("0:0:-1"),      # negative ms component
+        "nan:00": doc("nan:00"),      # non-finite component (Double("nan") parses)
+        "inf:00": doc("inf:00"),      # +inf component
+        "clean": doc("2:00"),         # control: a legit 2-minute duration
+    }
+    labels = list(attacks.keys())
+    rows = _skimport_batch([attacks[k] for k in labels])
+    by_label = dict(zip(labels, rows))
+
+    for label, row in zip(labels, rows):
+        assert row[0] == "OK", "hostile CUE0 %r made the importer throw: %r" % (
+            label,
+            row,
+        )
+        dur_tok, from_cues = row[1], row[2]
+        dur_finite, dur_nonneg = row[6], row[7]
+        assert dur_finite == "1", (
+            "spec §4: ShowKontrol CUE0 metadata %r yielded a NON-FINITE suggestedDurationMs "
+            "(%s) — a nan/inf duration traps the Int() the duration modal performs downstream"
+            % (label, dur_tok)
+        )
+        assert dur_nonneg == "1", (
+            "spec §4 / DoD: ShowKontrol CUE0 metadata %r yielded a NEGATIVE suggestedDurationMs "
+            "(%s) marked durationFromCues=%s. A negative 'authoritative' track length trips "
+            "ResolumeExporter's `guard trackDuration > 0`, so Save XML silently exports nothing — "
+            "the export button appears dead. parseDurationString must reject non-positive/"
+            "non-finite durations and fall back to the max-cue-time path." % (label, dur_tok, from_cues)
+        )
+
+    # No over-correction: a legitimate CUE0 duration of 2:00 must still surface as a
+    # real positive duration (the fix rejects only non-finite/negative, not valid ones).
+    clean = by_label["clean"]
+    assert clean[1] != "NONE" and float(clean[1]) > 0, (
+        "a legitimate CUE0 duration of 2:00 must still parse to a positive duration, got %r"
+        % clean[1]
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK (REGRESSION LOCK) — a cue's own millisecond field (column 3) is likewise
+# untrusted. `Double("nan"/"inf")` parse, and a raw negative or huge value would
+# otherwise flow into `cue.start`. `ShowKontrolParser` floors it (`rawMs.isFinite ?
+# max(rawMs, 0) : 0`) and every cue is `sanitized()`, so no cue start may ever be
+# non-finite or negative, and any derived `suggestedDurationMs` stays finite and
+# non-negative. This locks that guard so a future edit can't reintroduce a NaN
+# start that traps the envelope canvas `Int(...)` (spec §4).
+# ---------------------------------------------------------------------------
+
+
+def test_showkontrol_import_hostile_cue_milliseconds_keep_every_start_finite_and_nonnegative():
+    def doc(ms):
+        return (
+            "00:00:00:00,00000000,%s,Hit,TAG,,,,,,\r"
+            "00:00:07:00,00000700,7000,Two,TAG,,,,,," % ms
+        )
+
+    attacks = {
+        "negative": doc("-5000"),
+        "nan": doc("nan"),  # Double("nan") parses -> must floor, not propagate NaN
+        "inf": doc("inf"),
+        "neg-inf": doc("-inf"),
+        "huge": doc("1e18"),  # a finite-but-enormous ms is allowed, but must stay finite
+        "junk": doc(";DROP"),  # unparseable -> 0
+        "empty": doc(""),  # empty field -> 0
+    }
+    labels = list(attacks.keys())
+    rows = _skimport_batch([attacks[k] for k in labels])
+    for label, row in zip(labels, rows):
+        assert row[0] == "OK", "hostile cue ms %r made the importer throw: %r" % (
+            label,
+            row,
+        )
+        all_finite, all_nonneg = row[4], row[5]
+        dur_finite, dur_nonneg, min_s = row[6], row[7], row[8]
+        assert all_finite == "1", (
+            "spec §4: ShowKontrol cue ms %r produced a NON-FINITE cue start (min=%s) — "
+            "sanitized() must floor every start to a finite value before it reaches the "
+            "envelope canvas Int()" % (label, min_s)
+        )
+        assert all_nonneg == "1", (
+            "spec §4: ShowKontrol cue ms %r produced a NEGATIVE cue start (min=%s) — "
+            "sanitized() floors every start to 0" % (label, min_s)
+        )
+        assert dur_finite == "1" and dur_nonneg == "1", (
+            "ShowKontrol cue ms %r produced a non-finite/negative suggestedDurationMs (%s)"
+            % (label, row[1])
+        )
+
+
+# ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
 

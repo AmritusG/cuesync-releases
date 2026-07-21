@@ -120,7 +120,7 @@ public enum ShowKontrolParser {
            let sec = Double(parts3[1]),
            let ms = Double(parts3[2]) {
             let result = (min * 60 + sec) * 1000 + ms
-            return result.isFinite ? result : nil
+            return validDuration(result)
         }
 
         // Try MM:SS
@@ -128,9 +128,22 @@ public enum ShowKontrolParser {
            let min = Double(parts3[0]),
            let sec = Double(parts3[1]) {
             let result = (min * 60 + sec) * 1000
-            return result.isFinite ? result : nil
+            return validDuration(result)
         }
 
         return nil
+    }
+
+    /// A CUE0 metadata field is untrusted (spec §4). Each `Double(...)` above happily
+    /// parses a negative component ("-1:00", "1:-99999") or a non-finite one, so the
+    /// composed result can be NaN/Inf **or negative** — none of which is a duration.
+    /// A negative suggestedDurationMs marked `durationFromCues = true` would then be
+    /// surfaced as the authoritative track length and later trip
+    /// `ResolumeExporter`'s `guard trackDuration > 0`, silently dropping the export.
+    /// Fail closed to `nil` (treat as unparseable) so the caller falls back to the
+    /// max-cue-time / manual-input path — mirrors the `max(rawMs, 0)` floor already
+    /// applied to every cue's milliseconds above.
+    private static func validDuration(_ result: Double) -> Double? {
+        (result.isFinite && result >= 0) ? result : nil
     }
 }
