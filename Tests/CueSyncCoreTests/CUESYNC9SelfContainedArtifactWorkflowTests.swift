@@ -90,6 +90,28 @@ final class CUESYNC9SelfContainedArtifactWorkflowTests: XCTestCase {
             "copy, once to re-verify nothing still resolves from the toolchain root (found \(wlddRuns))")
     }
 
+    /// A warm `.build` cache already carries the Swift runtime DLLs inside the artifact
+    /// dir (a prior run's bundle step copied them into .build\<triple>\release, which is
+    /// exactly what the SwiftPM `.build` cache saves/restores). On such a run the copy
+    /// loop finds nothing to copy (copied == 0), but the exe is ALREADY self-contained —
+    /// the step must NOT hard-fail that case. It distinguishes it from a genuinely vacuous
+    /// closure by proving swiftCore.dll resolves from inside the artifact dir. (Surfaced
+    /// once the cache key was scoped to the patch set — CI run 29846645512, windows-build.)
+    func testBundlingStepToleratesAWarmCacheThatIsAlreadySelfContained() throws {
+        let job = try SelfContainedJob.require("windows-build")
+        let block = try job.stepBlock(named: bundleStepName)
+        XCTAssertTrue(block.contains("alreadyBundled"),
+            "when the copy loop finds nothing to copy (a warm .build cache whose Swift DLLs already " +
+            "resolve from inside the artifact dir), the step must count those already-bundled Swift " +
+            "deps rather than hard-failing a genuinely self-contained artifact")
+        XCTAssertTrue(block.contains("$swiftToolchainRoot") && block.contains("Get-ChildItem"),
+            "the warm-cache non-vacuity proof must be driven off the Swift toolchain root's own DLL set " +
+            "(so it counts real Swift redistributables, not GTK/system DLLs) — never a hardcoded name")
+        XCTAssertTrue(block.contains("$alreadyBundled -eq 0"),
+            "a genuinely vacuous closure (no toolchain-root deps AND none already in the artifact) must " +
+            "still refuse the upload with exit 1")
+    }
+
     /// spec CUESYNC-9 §0.2: it is a PACKAGING fix — it must not touch swift-cross-ui bytes.
     /// The pin and the two dependency patches are out of scope for this step.
     func testBundlingStepIsPackagingOnlyAndTouchesNoDependencySource() throws {

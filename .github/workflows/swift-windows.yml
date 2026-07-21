@@ -1158,10 +1158,41 @@ jobs:
             $copied++
           }
           if ($copied -eq 0) {
-            Write-Error "no Swift runtime DLL resolved from the toolchain root ($swiftToolchainRoot) in CueSync.exe's closure — a clean PC would still fail to load the exe; refusing to upload a non-runnable artifact"
-            exit 1
+            # copied == 0 is NOT automatically a failure. A warm .build cache can
+            # already carry the Swift runtime DLLs INSIDE the artifact dir: a prior
+            # run's bundle step copies them into .build\<triple>\release, and that
+            # directory is exactly what the SwiftPM `.build` cache saves/restores.
+            # On the next run they resolve from the artifact dir (not the toolchain
+            # root), so the loop above copies nothing — not because the exe is
+            # non-runnable, but because it is ALREADY self-contained. (Surfaced once
+            # the cache key was scoped to the patch set — CI run 29846645512,
+            # windows-build.) Distinguish that (good) from a genuinely vacuous/broken
+            # closure (bad) WITHOUT hardcoding any runtime-DLL name: count how many
+            # of CueSync.exe's artifact-dir dependencies are files the Swift
+            # toolchain root ALSO ships (GTK/system DLLs are not under the toolchain
+            # root, so they don't count). The self-contained re-walk below stays the
+            # authoritative gate.
+            $toolchainDlls = @{}
+            Get-ChildItem -LiteralPath $swiftToolchainRoot -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -eq '.dll' } |
+              ForEach-Object { $toolchainDlls[$_.Name.ToLowerInvariant()] = $true }
+            $alreadyBundled = 0
+            foreach ($rawLine in (& wldd "$env:ARTIFACT_DIR\CueSync.exe")) {
+              $sep = $rawLine.IndexOf(' => ')
+              if ($sep -le 0) { continue }
+              $depName = $rawLine.Substring(0, $sep).Trim()
+              $depPath = $rawLine.Substring($sep + 4).Trim()
+              if (-not $depPath.StartsWith($artifactDir, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+              if ($toolchainDlls.ContainsKey($depName.ToLowerInvariant())) { $alreadyBundled++ }
+            }
+            if ($alreadyBundled -eq 0) {
+              Write-Error "no Swift runtime DLL resolved from the toolchain root ($swiftToolchainRoot), and none of CueSync.exe's artifact-dir dependencies match a Swift toolchain DLL either — the closure is vacuous or the exe is not runnable; refusing to upload a non-runnable artifact"
+              exit 1
+            }
+            Write-Host "0 DLLs copied from the toolchain root, but $alreadyBundled Swift runtime DLL(s) already resolve from inside the artifact dir (warm .build cache is already self-contained); proceeding to the self-contained re-walk."
+          } else {
+            Write-Host "bundled $copied Swift runtime DLL(s) into the artifact."
           }
-          Write-Host "bundled $copied Swift runtime DLL(s) into the artifact."
 
           # Machine-verify the bundle actually closed the gap: re-walk CueSync.exe and
           # assert nothing resolves from the Swift toolchain root anymore (every dep
