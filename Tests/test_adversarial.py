@@ -5940,6 +5940,287 @@ def test_css_color_parser_always_returns_finite_clamped_components_for_hostile_i
             )
 
 
+# =============================================================================
+# CUESYNC-9 Red-Team — composition & encoding-trick locks
+#
+# The suite above hardens each trust boundary in isolation. These four attacks
+# target the seams the earlier tests leave open:
+#   * slugify() is only ever tested with LITERAL ascii reserved names ("con") and
+#     literal separators ("/"). A real adversary who knows those are blocked reaches
+#     for Unicode look-alikes (fullwidth Latin, math-alphanumerics, circled/superscript
+#     digits, fraction/division/fullwidth slashes) hoping a normalization or
+#     transliteration step folds them back to the dangerous ascii token.
+#   * slugify()'s reserved-name escape runs AFTER truncation and then RE-truncates
+#     the "_"-prefixed result — an edge only exercised here across EVERY reserved
+#     name at EVERY length budget, plus the degenerate maxLength<=0 / Int.max ends.
+#   * ResolumeExporter's XML escaping is only ever checked by string-scanning its own
+#     output. The stronger proof is to feed that output straight back through the REAL
+#     ResolumeParser and show a hostile preset name re-ingests as inert DATA — never
+#     an injected element, attribute, or envelope point.
+#   * The Rekordbox importer and slugify() are each proven safe alone, but never as a
+#     CHAIN. XMLParser decodes numeric character references (`&#x2f;` -> "/", `&#x5c;`
+#     -> "\") INSIDE a track name, so the only thing standing between a hostile
+#     Rekordbox `Name=` and a traversal filename is slugify(). This locks that seam.
+#
+# Every test drives the REAL compiled Swift (TextTools / the exporters+parsers), so a
+# regression that weakens any guarantee turns it red. Skips (never hard-errors) when
+# no Swift toolchain / source is present, exactly like the harnesses they reuse.
+# =============================================================================
+
+_SAFE_SLUG_BODY_RE = re.compile(r"[a-z0-9-]+")
+
+
+def _assert_safe_slug(inp, slug):
+    """The real slugify() contract as a single reusable predicate: a non-empty single
+    path component, no separator / traversal / NUL / control byte, and NEVER a bare
+    Windows reserved device name. The reserved-name escape legitimately prepends one
+    leading '_', so tolerate exactly that; everything else is drawn from [a-z0-9-]."""
+    assert slug, "slug for %r is empty — the non-empty fallback must apply" % (inp,)
+    assert "/" not in slug and "\\" not in slug, (
+        "slug %r for %r contains a path separator" % (slug, inp)
+    )
+    assert ".." not in slug and slug not in (".", ".."), (
+        "slug %r for %r is a traversal token" % (slug, inp)
+    )
+    assert "\x00" not in slug, "slug %r for %r contains a NUL" % (slug, inp)
+    for ch in slug:
+        assert ord(ch) >= 0x20, "control char survived in slug %r for %r" % (slug, inp)
+    body = slug[1:] if slug.startswith("_") else slug
+    assert _SAFE_SLUG_BODY_RE.fullmatch(body), (
+        "slug %r for %r has characters outside the safe [a-z0-9-] set" % (slug, inp)
+    )
+    assert slug.lower() not in RESERVED_SET, (
+        "slug %r for %r IS a bare Windows reserved device name — a real filename "
+        "collision on Windows" % (slug, inp)
+    )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 80 (LOCK) — Unicode homoglyphs must never reconstruct a reserved device
+# name or a real path separator. slugify() keeps ONLY ascii [a-z0-9] and performs
+# NO Unicode compatibility normalization / transliteration, so a fullwidth / math /
+# circled look-alike of a reserved name strips entirely to the fallback (never the
+# ascii token, never its "_"-escaped form), and a slash look-alike collapses to the
+# "-" separator (never a literal "/" or "\"). spec §4/§5 (untrusted names become
+# filenames; case folding is Locale-free precisely to stay deterministic here).
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_unicode_homoglyphs_never_reconstruct_a_reserved_name_or_separator():
+    # Fullwidth Latin (U+FF00 block), math-bold (U+1D400 block), circled (U+2460)
+    # and superscript (U+00B2/B3) look-alikes of Windows reserved device names.
+    reserved_homoglyphs = [
+        "ＣＯＮ",  # CON  (fullwidth)
+        "ｃｏｎ",  # con  (fullwidth)
+        "ＮＵＬ",  # NUL  (fullwidth)
+        "ＰＲＮ",  # PRN  (fullwidth)
+        "ＡＵＸ",  # AUX  (fullwidth)
+        "Ｃｏｍ１",  # Com1 (fullwidth)
+        "ＬＰＴ９",  # LPT9 (fullwidth)
+        "①②③",  # (1)(2)(3) circled digits
+        "²³",  # superscript 2 3
+        "\U0001d402\U0001d428\U0001d427",  # CON  (mathematical bold)
+    ]
+    slugs = _slugify_many([(h, 80, "untitled") for h in reserved_homoglyphs])
+    for inp, slug in zip(reserved_homoglyphs, slugs):
+        _assert_safe_slug(inp, slug)
+        assert slug == "untitled", (
+            "spec §4/§5: the Unicode look-alike %r of a reserved device name folded "
+            "to %r instead of being stripped to the fallback — slugify() must not "
+            "transliterate homoglyphs back into ascii tokens" % (inp, slug)
+        )
+    # Control: the *ascii* reserved name still escapes to "_con". This proves the
+    # reserved-name defense is LIVE, so the "untitled" outcomes above are genuine
+    # stripping — not an escape that has been silently disabled.
+    assert _slugify("con") == "_con", (
+        "ascii 'con' must still escape to '_con' — otherwise the homoglyph results "
+        "are meaningless (the escape itself is broken)"
+    )
+
+    # Unicode slash look-alikes must collapse to the '-' separator, never smuggle a
+    # real '/' or '\\' into the single component.
+    separator_homoglyphs = {
+        "a／b": "a-b",  # U+FF0F FULLWIDTH SOLIDUS
+        "a∕b": "a-b",  # U+2215 DIVISION SLASH
+        "a＼b": "a-b",  # U+FF3C FULLWIDTH REVERSE SOLIDUS
+        "a⁄b": "a-b",  # U+2044 FRACTION SLASH
+        "a⧸b": "a-b",  # U+29F8 BIG SOLIDUS
+        "a∖b": "a-b",  # U+2216 SET MINUS
+    }
+    slugs = _slugify_many([(k, 80, "untitled") for k in separator_homoglyphs])
+    for (inp, expected), slug in zip(separator_homoglyphs.items(), slugs):
+        _assert_safe_slug(inp, slug)
+        assert slug == expected, (
+            "spec §4: Unicode separator look-alike in %r produced %r, not %r — a "
+            "slash homoglyph must be dropped like any other non-[a-z0-9] byte, never "
+            "reconstructed into a path separator" % (inp, slug, expected)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 81 (LOCK) — the reserved-name escape re-truncates its own "_"-prefixed
+# result, an edge the earlier reserved-name tests only touch at maxLength 3/4 for
+# LONGER inputs. Exercise EVERY reserved name at len-1 / len / len+1 (where the
+# whole input *is* the reserved token at the exact budget) and the degenerate
+# maxLength ends (0, negative, Int.max): the output is never a bare reserved name,
+# never crashes, and is always a safe single component. spec §2/§3.
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_reserved_name_at_every_length_budget_and_degenerate_maxlength_stay_safe():
+    budget_items = []
+    for name in RESERVED_DEVICE_NAMES:
+        for ml in (len(name) - 1, len(name), len(name) + 1):
+            budget_items.append((name, ml))
+    slugs = _slugify_many([(n, ml, "untitled") for n, ml in budget_items])
+    for (name, ml), slug in zip(budget_items, slugs):
+        _assert_safe_slug(name, slug)
+        if ml > 0:
+            assert len(slug) <= max(ml, len("_") + ml), slug  # escape may add one '_'
+        assert slug.lower() not in RESERVED_SET, (
+            "spec §2/§3: slugify(%r, maxLength=%d) = %r is a bare reserved device "
+            "name — the escape-then-retruncate path re-created it at the budget edge"
+            % (name, ml, slug)
+        )
+
+    # Degenerate maxLength must fail safe to the fallback (never crash, never empty),
+    # and an enormous maxLength must not overflow the prefix/count arithmetic.
+    INT_MAX = 9223372036854775807
+    degenerate = [
+        ("HelloWorld", 0),
+        ("HelloWorld", -1),
+        ("HelloWorld", -100000),
+        ("../../etc/passwd", 0),
+        ("con", -1),
+        ("HelloWorld", INT_MAX),
+        ("con", INT_MAX),
+    ]
+    slugs = _slugify_many([(s, ml, "untitled") for s, ml in degenerate])
+    for (s, ml), slug in zip(degenerate, slugs):
+        _assert_safe_slug(s, slug)
+        if ml <= 0:
+            assert slug == "untitled", (
+                "slugify(%r, maxLength=%d) must fall back to the safe fallback for a "
+                "non-positive budget, got %r" % (s, ml, slug)
+            )
+    # Int.max budget: the plain input is unchanged, the reserved one still escapes.
+    big = _slugify_many([("HelloWorld", INT_MAX, "untitled"), ("con", INT_MAX, "untitled")])
+    assert big[0] == "helloworld", big[0]
+    assert big[1] == "_con", big[1]
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 82 (LOCK) — export→re-ingest closure. The earlier Resolume tests scan the
+# exporter's OWN output for injection; this feeds that output straight back through
+# the REAL ResolumeParser. A hostile preset name (quote/angle-bracket breakout, a
+# fully-formed <point>/<Preset> injection, DOCTYPE, the five XML metacharacters)
+# must re-parse as WELL-FORMED XML in which the name is inert DATA: the round-tripped
+# name equals the original byte-for-byte, no extra envelope point appears (still the
+# 3 the single cue + auto start/end yield), and no second Preset is created. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def test_resolume_export_output_reingests_as_inert_data_with_no_markup_injection():
+    payloads = [
+        'plain preset',
+        'A"/><Inject x="1',  # attribute breakout + new element
+        'B"/><point x="9" y="9" curve="7"/><q z="',  # forged envelope point
+        'C"/></points></ModifierEnvelope></Preset><Preset name="evil',  # 2nd Preset
+        'D&<>"\'',  # every XML metacharacter at once
+        ']]>E<!DOCTYPE x [<!ENTITY y "z">]>',  # CDATA close + DOCTYPE/entity
+        'F" default="1" className="Injected',  # forged attributes on the Preset
+    ]
+    xmls = _run_cs_batch(["res %s 0.5 1 10" % _b64(p) for p in payloads])
+    reparsed = _run_cs_batch(["parse %s" % _b64(x) for x in xmls])
+    for payload, xml, r in zip(payloads, xmls, reparsed):
+        assert xml != "<nil>", "one enabled cue must still export (name %r)" % payload
+        # Structural: the exporter emitted exactly one Preset and exactly the 3 points
+        # (auto x=0, the cue at x=0.05, auto x=1) — the name never became markup.
+        assert xml.count("<Preset ") == 1, (
+            "preset name %r injected a second <Preset> element into the XML" % payload
+        )
+        assert xml.count("<point x=") == 3, (
+            "preset name %r injected %d extra <point> element(s) into the envelope"
+            % (payload, xml.count("<point x=") - 3)
+        )
+        # Behavioural: the REAL parser re-ingests it, sees 3 points, and recovers the
+        # name as inert data identical to the original (ascii payloads carry no XML-
+        # illegal scalars, so stripIllegalXmlScalars is a no-op here).
+        parts = r.split("\t")
+        assert parts[0] == "OK", (
+            "spec §4: ResolumeParser could not re-parse the exporter's own output for "
+            "preset name %r (%r) — the name broke XML well-formedness" % (payload, r)
+        )
+        n = int(parts[-1])
+        name = "\t".join(parts[1:-1])
+        assert n == 3, (
+            "spec §4: re-parsing the exported XML yielded %d envelope points for preset "
+            "name %r (expected 3) — the name injected phantom points" % (n, payload)
+        )
+        assert name == payload, (
+            "spec §4: the preset name did not round-trip as inert data — sent %r, the "
+            "parser read back %r (markup or escaping corrupted the value)"
+            % (payload, name)
+        )
+
+
+# ---------------------------------------------------------------------------
+# ATTACK 83 (LOCK) — full untrusted-file → filename chain. XMLParser resolves
+# numeric character references inside a Rekordbox `Name=` attribute (`&#x2f;` -> "/",
+# `&#x5c;` -> "\", `&#x2e;` -> "."), so an attacker can smuggle real path separators
+# and traversal into the parsed track name WITHOUT a literal separator ever appearing
+# in the file. slugify() is the sole boundary before that name becomes an export
+# filename. This locks the composition end-to-end: hostile Rekordbox XML -> real
+# parsed name -> slugify -> a single traversal-free component. spec §4.
+# ---------------------------------------------------------------------------
+
+
+def _rb_collection_xml(name_attr_value):
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<DJ_PLAYLISTS Version="1.0.0"><COLLECTION Entries="1">'
+        '<TRACK TrackID="1" Name="%s" Location="file://localhost/x.mp3"/>'
+        "</COLLECTION></DJ_PLAYLISTS>"
+    ) % name_attr_value
+
+
+def test_rekordbox_xml_name_to_filename_slug_is_traversal_free_end_to_end():
+    # attr value (as it literally appears in the XML)  ->  expected filename slug
+    cases = {
+        "&#x2e;&#x2e;&#x2f;&#x2e;&#x2e;&#x2f;etc&#x2f;passwd": "etc-passwd",
+        "&#x2e;&#x2e;&#x5c;win.ini": "win-ini",  # entity-encoded ..\ traversal
+        "CON": "_con",  # literal reserved name
+        "&#x43;&#x4f;&#x4e;": "_con",  # entity-encoded "CON" still escapes
+        "ｃｏｎ": "untitled",  # fullwidth homoglyph strips out
+        "a &amp; b &lt;x&gt;": "a-b-x",
+        "\\\\server\\share": "server-share",  # UNC path
+        "...hidden": "hidden",  # leading dots
+    }
+    attr_values = list(cases.keys())
+    parsed = _run_rt_batch(["rbparse %s" % _b64(_rb_collection_xml(v)) for v in attr_values])
+    decoded_names = []
+    for attr, r in zip(attr_values, parsed):
+        parts = r.split("\t")
+        assert parts[0] == "OK", (
+            "the crafted Rekordbox XML for attr %r failed to parse: %r" % (attr, r)
+        )
+        assert parts[1] == "1", (
+            "attr %r produced %s tracks, expected exactly 1 — the name field broke the "
+            "XML structure" % (attr, parts[1])
+        )
+        decoded_names.append(_rt_inner(parts[3]))
+
+    slugs = _slugify_many([(nm, 80, "untitled") for nm in decoded_names])
+    for attr, name, slug in zip(attr_values, decoded_names, slugs):
+        _assert_safe_slug(name, slug)
+        expected = cases[attr]
+        assert slug == expected, (
+            "spec §4: Rekordbox Name=%r decoded to %r and slugified to %r, expected %r "
+            "— the parser+slugify chain must neutralise every decoded separator / "
+            "traversal / reserved-name into a safe single component" % (attr, name, slug, expected)
+        )
+
+
 # ---------------------------------------------------------------------------
 # Direct-run harness (no pytest required).
 # ---------------------------------------------------------------------------
