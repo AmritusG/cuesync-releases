@@ -6104,7 +6104,9 @@ def test_slugify_reserved_name_at_every_length_budget_and_degenerate_maxlength_s
                 "non-positive budget, got %r" % (s, ml, slug)
             )
     # Int.max budget: the plain input is unchanged, the reserved one still escapes.
-    big = _slugify_many([("HelloWorld", INT_MAX, "untitled"), ("con", INT_MAX, "untitled")])
+    big = _slugify_many(
+        [("HelloWorld", INT_MAX, "untitled"), ("con", INT_MAX, "untitled")]
+    )
     assert big[0] == "helloworld", big[0]
     assert big[1] == "_con", big[1]
 
@@ -6122,11 +6124,11 @@ def test_slugify_reserved_name_at_every_length_budget_and_degenerate_maxlength_s
 
 def test_resolume_export_output_reingests_as_inert_data_with_no_markup_injection():
     payloads = [
-        'plain preset',
+        "plain preset",
         'A"/><Inject x="1',  # attribute breakout + new element
         'B"/><point x="9" y="9" curve="7"/><q z="',  # forged envelope point
         'C"/></points></ModifierEnvelope></Preset><Preset name="evil',  # 2nd Preset
-        'D&<>"\'',  # every XML metacharacter at once
+        "D&<>\"'",  # every XML metacharacter at once
         ']]>E<!DOCTYPE x [<!ENTITY y "z">]>',  # CDATA close + DOCTYPE/entity
         'F" default="1" className="Injected',  # forged attributes on the Preset
     ]
@@ -6197,7 +6199,9 @@ def test_rekordbox_xml_name_to_filename_slug_is_traversal_free_end_to_end():
         "...hidden": "hidden",  # leading dots
     }
     attr_values = list(cases.keys())
-    parsed = _run_rt_batch(["rbparse %s" % _b64(_rb_collection_xml(v)) for v in attr_values])
+    parsed = _run_rt_batch(
+        ["rbparse %s" % _b64(_rb_collection_xml(v)) for v in attr_values]
+    )
     decoded_names = []
     for attr, r in zip(attr_values, parsed):
         parts = r.split("\t")
@@ -6217,7 +6221,8 @@ def test_rekordbox_xml_name_to_filename_slug_is_traversal_free_end_to_end():
         assert slug == expected, (
             "spec §4: Rekordbox Name=%r decoded to %r and slugified to %r, expected %r "
             "— the parser+slugify chain must neutralise every decoded separator / "
-            "traversal / reserved-name into a safe single component" % (attr, name, slug, expected)
+            "traversal / reserved-name into a safe single component"
+            % (attr, name, slug, expected)
         )
 
 
