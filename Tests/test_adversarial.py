@@ -6362,13 +6362,13 @@ def test_showkontrol_import_hostile_cue0_duration_never_yields_a_negative_or_non
         return "00:00:00:00,00000000,0,CUE0,%s,,,,,,\r%s" % (cue0_meta, real)
 
     attacks = {
-        "-1:00": doc("-1:00"),        # negative MM:SS      -> -60000 ms
+        "-1:00": doc("-1:00"),  # negative MM:SS      -> -60000 ms
         "-5:00:00": doc("-5:00:00"),  # negative MM:SS:MS   -> -300000 ms
         "1:-99999": doc("1:-99999"),  # negative seconds component
-        "0:0:-1": doc("0:0:-1"),      # negative ms component
-        "nan:00": doc("nan:00"),      # non-finite component (Double("nan") parses)
-        "inf:00": doc("inf:00"),      # +inf component
-        "clean": doc("2:00"),         # control: a legit 2-minute duration
+        "0:0:-1": doc("0:0:-1"),  # negative ms component
+        "nan:00": doc("nan:00"),  # non-finite component (Double("nan") parses)
+        "inf:00": doc("inf:00"),  # +inf component
+        "clean": doc("2:00"),  # control: a legit 2-minute duration
     }
     labels = list(attacks.keys())
     rows = _skimport_batch([attacks[k] for k in labels])
@@ -6391,7 +6391,8 @@ def test_showkontrol_import_hostile_cue0_duration_never_yields_a_negative_or_non
             "(%s) marked durationFromCues=%s. A negative 'authoritative' track length trips "
             "ResolumeExporter's `guard trackDuration > 0`, so Save XML silently exports nothing — "
             "the export button appears dead. parseDurationString must reject non-positive/"
-            "non-finite durations and fall back to the max-cue-time path." % (label, dur_tok, from_cues)
+            "non-finite durations and fall back to the max-cue-time path."
+            % (label, dur_tok, from_cues)
         )
 
     # No over-correction: a legitimate CUE0 duration of 2:00 must still surface as a
@@ -6426,7 +6427,9 @@ def test_showkontrol_import_hostile_cue_milliseconds_keep_every_start_finite_and
         "nan": doc("nan"),  # Double("nan") parses -> must floor, not propagate NaN
         "inf": doc("inf"),
         "neg-inf": doc("-inf"),
-        "huge": doc("1e18"),  # a finite-but-enormous ms is allowed, but must stay finite
+        "huge": doc(
+            "1e18"
+        ),  # a finite-but-enormous ms is allowed, but must stay finite
         "junk": doc(";DROP"),  # unparseable -> 0
         "empty": doc(""),  # empty field -> 0
     }
