@@ -128,80 +128,31 @@ jobs:
       # resolves on demand; runs after that and before "Build (release)".
       # `git apply --reverse --check` guards idempotency: a second run against an
       # already-patched checkout is a no-op rather than a failure.
-      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
+      # CUESYNC-9 round 20: ONE step per leg, delegating to the checked-in
+      # scripts/patch-swift-cross-ui.sh, instead of a hand-rolled `git apply` step
+      # per patch.
+      #
+      # Two defects forced this. (1) The per-patch steps listed only three of the
+      # five live patches — container-hit-testing and entry-styling were never
+      # applied in CI, so the legs were building WITHOUT the fixes the commit was
+      # meant to prove, while the dev script applied all five. The YAML and the
+      # script had silently drifted. (2) swift-cross-ui ships no `.gitattributes`,
+      # so on windows-latest (core.autocrlf=true) its sources check out as CRLF and
+      # the LF-only patches fail `git apply` at GtkBackend.swift:116 — green on
+      # macOS, red on Windows. The script now normalizes the checkout to LF before
+      # applying anything.
+      #
+      # Delegating means there is exactly ONE list of patches and ONE apply order in
+      # the repo, so this class of drift cannot recur;
+      # CUESYNC9CIAppliesSamePatchSetAsScriptTests asserts it stays that way. The
+      # script also carries the LLP64 gulong/gsize -replace fixes that used to be a
+      # separate step here, and is idempotent (`git apply --reverse --check` per
+      # patch) so a warm cache re-runs it as a no-op.
+      - name: Patch swift-cross-ui (all five, via scripts/patch-swift-cross-ui.sh)
+        shell: bash
         run: |
           set -euo pipefail
-          PATCH="$PWD/patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
-          if [ ! -d .build/checkouts/swift-cross-ui ]; then
-            swift package resolve
-          fi
-          cd .build/checkouts/swift-cross-ui
-          if git apply --reverse --check "$PATCH" 2>/dev/null; then
-            echo "swift-cross-ui gesture/interactivity patch already applied — skipping"
-          else
-            git apply "$PATCH"
-            echo "Applied swift-cross-ui gesture/interactivity patch"
-          fi
-
-      # CUESYNC-9 round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's Windows
-      # input-dispatch patch below was REVERTED. Round 8 proved from the app's own
-      # auditable Windows stderr that the input death is an unsatisfiable
-      # window-minimum relayout loop (fixed via CueSync/CueSync/UI/CueSyncApp.swift's
-      # `.frame(minHeight:)` removal), not the Win32-message-queue race this patch
-      # targeted — and that loop runs on GLib timeouts, independent of
-      # `RunLoop.main`. Per spec step 5 ("if a round's fix does not move the probe,
-      # revert that hunk before trying the next suspect — never stack speculative
-      # patches"), the disproven, non-load-bearing patch is removed from every apply
-      # site rather than left stacked on the audited dependency.
-
-      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
-      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
-      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
-      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
-      # so the window never realizes a renderer and never appears — the probe captures
-      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
-      # g_setenv. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
-      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
-      # dependency itself is never edited in place. Applied after the input-dispatch
-      # patch above and before "Build (release)" below; `git apply --reverse --check`
-      # guards idempotency.
-      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
-        run: |
-          set -euo pipefail
-          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-          cd .build/checkouts/swift-cross-ui
-          if git apply --reverse --check "$PATCH" 2>/dev/null; then
-            echo "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
-          else
-            git apply "$PATCH"
-            echo "Applied swift-cross-ui Windows GSK-renderer patch"
-          fi
-
-      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
-      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate
-      # (Scenes/WindowReference.swift) and NEVER backend.activate(window:) — activate/present
-      # is reached only via openWindow(id:). On Windows GDK, show MAPS the surface (enumerable,
-      # has a rect → window_found:true) but does not RAISE it, so the window stays behind the
-      # foreground cmd.exe launcher console the probe box starts CueSync.exe from
-      # (.factory/probe/before.png shows only that console, no CueSync window). This patch makes
-      # show(window:) also gtk_window_present() the initial window on Windows — GTK's own API,
-      # the identical call activate() already makes. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
-      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
-      # never edited in place. Applied after the GSK-renderer patch above and before "Build
-      # (release)" below; `git apply --reverse --check` guards idempotency.
-      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
-        run: |
-          set -euo pipefail
-          PATCH="$PWD/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
-          cd .build/checkouts/swift-cross-ui
-          if git apply --reverse --check "$PATCH" 2>/dev/null; then
-            echo "swift-cross-ui Windows window-present patch already applied — skipping"
-          else
-            git apply "$PATCH"
-            echo "Applied swift-cross-ui Windows window-present patch"
-          fi
+          bash scripts/patch-swift-cross-ui.sh
 
       - name: Build (release)
         run: swift build -c release
@@ -587,143 +538,31 @@ jobs:
           }
           Write-Host "repaired $repaired swift-java symlink(s)"
 
-      - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
-        shell: pwsh
+      # CUESYNC-9 round 20: ONE step per leg, delegating to the checked-in
+      # scripts/patch-swift-cross-ui.sh, instead of a hand-rolled `git apply` step
+      # per patch.
+      #
+      # Two defects forced this. (1) The per-patch steps listed only three of the
+      # five live patches — container-hit-testing and entry-styling were never
+      # applied in CI, so the legs were building WITHOUT the fixes the commit was
+      # meant to prove, while the dev script applied all five. The YAML and the
+      # script had silently drifted. (2) swift-cross-ui ships no `.gitattributes`,
+      # so on windows-latest (core.autocrlf=true) its sources check out as CRLF and
+      # the LF-only patches fail `git apply` at GtkBackend.swift:116 — green on
+      # macOS, red on Windows. The script now normalizes the checkout to LF before
+      # applying anything.
+      #
+      # Delegating means there is exactly ONE list of patches and ONE apply order in
+      # the repo, so this class of drift cannot recur;
+      # CUESYNC9CIAppliesSamePatchSetAsScriptTests asserts it stays that way. The
+      # script also carries the LLP64 gulong/gsize -replace fixes that used to be a
+      # separate step here, and is idempotent (`git apply --reverse --check` per
+      # patch) so a warm cache re-runs it as a no-op.
+      - name: Patch swift-cross-ui (all five, via scripts/patch-swift-cross-ui.sh)
+        shell: bash
         run: |
-          $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
-          Set-ItemProperty -LiteralPath $gobject -Name IsReadOnly -Value $false
-          (Get-Content -Raw -LiteralPath $gobject) `
-            -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
-            -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
-            -replace 'g_signal_handler_unblock\(gobjectPointer, signalID\)', 'g_signal_handler_unblock(gobjectPointer, .init(signalID))' |
-            Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
-
-          $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
-          Set-ItemProperty -LiteralPath $memoryTexture -Name IsReadOnly -Value $false
-          (Get-Content -Raw -LiteralPath $memoryTexture) `
-            -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
-            Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
-
-      # spec CUESYNC-8 §3 (findings: specs/CUESYNC-8-findings.md). GtkBackend's
-      # `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
-      # genuinely delivered) — the dead layer is that every `Shape`-backed decorative
-      # widget (RoundedRectangle/Rectangle stroke or fill, used throughout CueSync's
-      # UI/ purely as borders/backgrounds/dividers, never as a tap target itself)
-      # defaults to GTK's `can-target = true`. Painted on top of a sibling inside the
-      # same Gtk.Fixed (e.g. `.overlay { RoundedRectangle().stroke(...) }`), it's what
-      # GTK picks for a click, swallowing it before it reaches the sibling that
-      # actually owns the gesture (CollapsibleSection's header row, StepperField's
-      # ▲/▼ arrows). Fixed by a checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) against the pinned
-      # v0.8.0 checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d)
-      # — the dependency itself is never edited in place. Placed after the resolve +
-      # symlink repair above (the checkout must exist) and before "Build (release)"
-      # below. Same read-only-clearing rationale as the gulong/gsize step just above:
-      # dependency sources check out read-only on Windows. `git apply --reverse
-      # --check` guards idempotency: a second run against an already-patched checkout
-      # is a no-op rather than a failure.
-      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-gtk-interactivity.patch"
-          $widget = ".build\checkouts\swift-cross-ui\Sources\Gtk\Widgets\Widget.swift"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $widget -Name IsReadOnly -Value $false
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui gesture/interactivity patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-gtk-interactivity.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui gesture/interactivity patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's Windows
-      # input-dispatch patch below was REVERTED. Round 8 proved from the app's own
-      # auditable Windows stderr that the input death is an unsatisfiable
-      # window-minimum relayout loop (fixed via CueSync/CueSync/UI/CueSyncApp.swift's
-      # `.frame(minHeight:)` removal), not the Win32-message-queue race this patch
-      # targeted — and that loop runs on GLib timeouts, independent of
-      # `RunLoop.main`. Per spec step 5 ("if a round's fix does not move the probe,
-      # revert that hunk before trying the next suspect — never stack speculative
-      # patches"), the disproven, non-load-bearing patch is removed from every apply
-      # site rather than left stacked on the audited dependency.
-
-      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
-      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
-      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
-      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
-      # so no GskRenderer realizes and the window never appears — the probe captures
-      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
-      # g_setenv. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
-      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
-      # dependency itself is never edited in place. Clears the Windows read-only flag on
-      # exactly GtkBackend.swift first (same rationale as the gulong/gsize step),
-      # applied after the CUESYNC-8 interactivity patch above and before "Build
-      # (release)" below; `git apply --reverse --check` guards idempotency.
-      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
-      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate and
-      # never backend.activate(window:), so on Windows GDK it MAPS behind the foreground cmd.exe
-      # launcher console instead of raising (.factory/probe/before.png shows only that console,
-      # no CueSync window). This patch makes show(window:) also gtk_window_present() the initial
-      # window on Windows — GTK's own API. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
-      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
-      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
-      # first (same rationale as the gulong/gsize step), applied after the GSK-renderer patch
-      # above and before "Build (release)" below; `git apply --reverse --check` guards idempotency.
-      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows window-present patch"
-          }
-          Pop-Location
+          set -euo pipefail
+          bash scripts/patch-swift-cross-ui.sh
 
       - name: Build (release)
         run: swift build -c release
@@ -1580,144 +1419,31 @@ jobs:
           }
           Write-Host "repaired $repaired swift-java symlink(s)"
 
-      - name: Patch swift-cross-ui Windows gulong/gsize mismatch (pinned v0.8.0)
-        shell: pwsh
+      # CUESYNC-9 round 20: ONE step per leg, delegating to the checked-in
+      # scripts/patch-swift-cross-ui.sh, instead of a hand-rolled `git apply` step
+      # per patch.
+      #
+      # Two defects forced this. (1) The per-patch steps listed only three of the
+      # five live patches — container-hit-testing and entry-styling were never
+      # applied in CI, so the legs were building WITHOUT the fixes the commit was
+      # meant to prove, while the dev script applied all five. The YAML and the
+      # script had silently drifted. (2) swift-cross-ui ships no `.gitattributes`,
+      # so on windows-latest (core.autocrlf=true) its sources check out as CRLF and
+      # the LF-only patches fail `git apply` at GtkBackend.swift:116 — green on
+      # macOS, red on Windows. The script now normalizes the checkout to LF before
+      # applying anything.
+      #
+      # Delegating means there is exactly ONE list of patches and ONE apply order in
+      # the repo, so this class of drift cannot recur;
+      # CUESYNC9CIAppliesSamePatchSetAsScriptTests asserts it stays that way. The
+      # script also carries the LLP64 gulong/gsize -replace fixes that used to be a
+      # separate step here, and is idempotent (`git apply --reverse --check` per
+      # patch) so a warm cache re-runs it as a no-op.
+      - name: Patch swift-cross-ui (all five, via scripts/patch-swift-cross-ui.sh)
+        shell: bash
         run: |
-          $gobject = ".build\checkouts\swift-cross-ui\Sources\Gtk\GObject.swift"
-          Set-ItemProperty -LiteralPath $gobject -Name IsReadOnly -Value $false
-          (Get-Content -Raw -LiteralPath $gobject) `
-            -replace 'g_signal_handler_disconnect\(gobjectPointer, id\)', 'g_signal_handler_disconnect(gobjectPointer, .init(id))' `
-            -replace 'g_signal_handler_block\(gobjectPointer, signalID\)', 'g_signal_handler_block(gobjectPointer, .init(signalID))' `
-            -replace 'g_signal_handler_unblock\(gobjectPointer, signalID\)', 'g_signal_handler_unblock(gobjectPointer, .init(signalID))' |
-            Set-Content -NoNewline -LiteralPath $gobject -Encoding utf8NoBOM
-
-          $memoryTexture = ".build\checkouts\swift-cross-ui\Sources\Gtk\MemoryTexture.swift"
-          Set-ItemProperty -LiteralPath $memoryTexture -Name IsReadOnly -Value $false
-          (Get-Content -Raw -LiteralPath $memoryTexture) `
-            -replace 'g_bytes_new\(rgbaData, UInt\(rgbaData\.count\)\)', 'g_bytes_new(rgbaData, .init(rgbaData.count))' |
-            Set-Content -NoNewline -LiteralPath $memoryTexture -Encoding utf8NoBOM
-
-      # spec CUESYNC-8 §3 (findings: specs/CUESYNC-8-findings.md). GtkBackend's
-      # `.onTapGesture`/`.onHover` wiring is real (GestureClick/EventControllerMotion,
-      # genuinely delivered) — the dead layer is that every `Shape`-backed decorative
-      # widget (RoundedRectangle/Rectangle stroke or fill, used throughout CueSync's
-      # UI/ purely as borders/backgrounds/dividers, never as a tap target itself)
-      # defaults to GTK's `can-target = true`. Painted on top of a sibling inside the
-      # same Gtk.Fixed (e.g. `.overlay { RoundedRectangle().stroke(...) }`), it's what
-      # GTK picks for a click, swallowing it before it reaches the sibling that
-      # actually owns the gesture (CollapsibleSection's header row, StepperField's
-      # ▲/▼ arrows). Fixed by a checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-gtk-interactivity.patch) against the pinned
-      # v0.8.0 checkout (tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d)
-      # — the dependency itself is never edited in place. Placed after the resolve +
-      # symlink repair above (the checkout must exist) and before "Test" below, which
-      # builds before it runs. Same read-only-clearing rationale as the gulong/gsize
-      # step just above: dependency sources check out read-only on Windows. `git apply
-      # --reverse --check` guards idempotency: a second run against an already-patched
-      # checkout is a no-op rather than a failure.
-      - name: Patch swift-cross-ui GTK interactivity (pinned v0.8.0, CUESYNC-8)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-gtk-interactivity.patch"
-          $widget = ".build\checkouts\swift-cross-ui\Sources\Gtk\Widgets\Widget.swift"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $widget -Name IsReadOnly -Value $false
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui gesture/interactivity patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-gtk-interactivity.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui gesture/interactivity patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 9 (specs/CUESYNC-9-findings.md §0.8): round 7's Windows
-      # input-dispatch patch below was REVERTED. Round 8 proved from the app's own
-      # auditable Windows stderr that the input death is an unsatisfiable
-      # window-minimum relayout loop (fixed via CueSync/CueSync/UI/CueSyncApp.swift's
-      # `.frame(minHeight:)` removal), not the Win32-message-queue race this patch
-      # targeted — and that loop runs on GLib timeouts, independent of
-      # `RunLoop.main`. Per spec step 5 ("if a round's fix does not move the probe,
-      # revert that hunk before trying the next suspect — never stack speculative
-      # patches"), the disproven, non-load-bearing patch is removed from every apply
-      # site rather than left stacked on the audited dependency.
-
-      # CUESYNC-9 round 4 (spec step-4 contingency — a GTK-runtime/init *config* defect,
-      # not an upstream source bug): GTK 4's default GSK renderer on Windows is the
-      # GPU/OpenGL-backed ngl/gl renderer, which cannot create a GL context over the
-      # remote-desktop/RDP session the clean-PC probe box is driven through (RustDesk),
-      # so no GskRenderer realizes and the window never appears — the probe captures
-      # only the launcher console. Force GTK's software Cairo renderer via GLib's own
-      # g_setenv. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch) against the pinned
-      # v0.8.0 checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the
-      # dependency itself is never edited in place. Clears the Windows read-only flag on
-      # exactly GtkBackend.swift first (same rationale as the gulong/gsize step),
-      # applied after the CUESYNC-8 interactivity patch above and before "Test" below
-      # (which builds before it runs); `git apply --reverse --check` guards
-      # idempotency.
-      - name: Patch swift-cross-ui Windows GSK renderer (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows GSK-renderer patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows GSK-renderer patch"
-          }
-          Pop-Location
-
-      # CUESYNC-9 round 17 (specs/CUESYNC-9-findings.md §0.16): the initial WindowGroup
-      # window is shown via backend.show(window:) (gtk_widget_set_visible) on isFirstUpdate and
-      # never backend.activate(window:), so on Windows GDK it MAPS behind the foreground cmd.exe
-      # launcher console instead of raising (.factory/probe/before.png shows only that console,
-      # no CueSync window). This patch makes show(window:) also gtk_window_present() the initial
-      # window on Windows — GTK's own API. Checked-in, reviewable `git apply` patch
-      # (patches/swift-cross-ui-0.8.0-windows-window-present.patch) against the pinned v0.8.0
-      # checkout (commit a6d206370812e3b9edba259d167e848892c5013d) — the dependency itself is
-      # never edited in place. Clears the Windows read-only flag on exactly GtkBackend.swift
-      # first (same rationale as the gulong/gsize step), applied after the GSK-renderer patch
-      # above and before "Test" below; `git apply --reverse --check` guards idempotency.
-      - name: Patch swift-cross-ui Windows window present (pinned v0.8.0, CUESYNC-9)
-        shell: pwsh
-        run: |
-          $patch = Join-Path $PWD "patches\swift-cross-ui-0.8.0-windows-window-present.patch"
-          $gtkBackend = ".build\checkouts\swift-cross-ui\Sources\GtkBackend\GtkBackend.swift"
-          Set-ItemProperty -LiteralPath $gtkBackend -Name IsReadOnly -Value $false
-
-          Push-Location .build\checkouts\swift-cross-ui
-          git apply --reverse --check $patch 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "swift-cross-ui Windows window-present patch already applied — skipping"
-          } else {
-            git apply $patch
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "failed to apply swift-cross-ui-0.8.0-windows-window-present.patch"
-              exit 1
-            }
-            Write-Host "Applied swift-cross-ui Windows window-present patch"
-          }
-          Pop-Location
+          set -euo pipefail
+          bash scripts/patch-swift-cross-ui.sh
 
       # On Windows, `swift test` spawns BOTH the XCTest runner and the
       # swift-testing runner. The swift-testing runner finds 0 tests (the suite

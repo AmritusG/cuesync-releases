@@ -66,27 +66,24 @@ final class CUESYNC9WindowsInputPatchStepPlacementTests: XCTestCase {
     /// dispatch" exists anywhere in the region between the CUESYNC-8 interactivity
     /// step and the GSK-renderer step that now runs immediately after it — the exact
     /// slot the reverted step used to occupy. Was: "runs after the interactivity patch."
+    /// UPDATED round 20: the interactivity and GSK steps no longer exist as separate
+    /// YAML anchors — every leg delegates to scripts/patch-swift-cross-ui.sh. The
+    /// regression lock is unchanged in intent: the reverted input-dispatch patch must
+    /// not reappear in the apply path, which is now the script.
     func testNoWindowsInputPatchStepExistsBetweenTheInteractivityAndGskStepsOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocks9.require(jobName)
-            guard let interactivityLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
-                XCTFail("\(jobName) has no CUESYNC-8 interactivity-patch step to anchor the scan")
-                continue
-            }
-            guard let gskLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows GSK renderer"#) else {
-                XCTFail("\(jobName) has no GSK-renderer patch step to anchor the scan")
-                continue
-            }
-            guard interactivityLine < gskLine else {
-                XCTFail("\(jobName): the interactivity step must still run before the GSK-renderer step " +
-                    "now that the input-dispatch step between them is gone")
-                continue
-            }
-            let between = job.lines[(interactivityLine + 1)..<gskLine].joined(separator: "\n")
-            XCTAssertFalse(between.range(of: windowsInputStepNamePattern, options: .regularExpression) != nil,
-                "\(jobName): no step named 'Patch swift-cross-ui Windows input dispatch' may sit between " +
-                "the interactivity and GSK-renderer steps — that slot was vacated by round 9's revert")
+        let script = try String(contentsOf: RepoPaths9.devScript, encoding: .utf8)
+        XCTAssertFalse(script.contains("windows-input.patch"),
+            "scripts/patch-swift-cross-ui.sh must not apply the round-9-reverted windows-input patch " +
+            "(specs/CUESYNC-9-findings.md §0.8)")
+        guard let interactivityIndex = script.range(of: "INTERACTIVITY_PATCH\"")?.lowerBound,
+            let gskIndex = script.range(of: "GSK_RENDERER_PATCH\"")?.lowerBound
+        else {
+            XCTFail("the script must apply both the interactivity and GSK patches")
+            return
         }
+        XCTAssertLessThan(interactivityIndex, gskIndex,
+            "interactivity must still be applied before the GSK-renderer patch — the slot between " +
+            "them was vacated by round 9's revert and must stay empty")
     }
 
     /// REGRESSION LOCK (round 9): the literal step name never appears anywhere in a
@@ -143,29 +140,17 @@ final class CUESYNC9WindowsInputPatchIdempotencyAndPinTests: XCTestCase {
     /// step's step-block end and the GSK-renderer step that now runs immediately
     /// after it (the slot the reverted input-dispatch step vacated). Was: "pinned
     /// in a comment naming the audited commit."
+    /// UPDATED round 20: the revert's rationale must stay discoverable, but the slot it
+    /// used to occupy (between two per-patch YAML steps) no longer exists — the apply
+    /// path is the script. Assert the script documents the revert instead.
     func testWorkflowDocumentsTheRound9RevertInPlaceOfTheRemovedStepOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocks9.require(jobName)
-            guard let interactivityLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
-                XCTFail("\(jobName) has no CUESYNC-8 interactivity-patch step to anchor the scan")
-                continue
-            }
-            guard let gskLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows GSK renderer"#) else {
-                XCTFail("\(jobName) has no GSK-renderer patch step to anchor the scan")
-                continue
-            }
-            guard interactivityLine < gskLine else {
-                XCTFail("\(jobName): expected the interactivity step to precede the GSK-renderer step")
-                continue
-            }
-            let between = job.lines[(interactivityLine + 1)..<gskLine].joined(separator: "\n")
-            XCTAssertTrue(between.lowercased().contains("round 9"),
-                "\(jobName): the region between the interactivity and GSK-renderer steps (the slot vacated " +
-                "by the reverted input-dispatch step) must document round 9")
-            XCTAssertTrue(between.contains("CUESYNC-9-findings.md"),
-                "\(jobName): that region must cite specs/CUESYNC-9-findings.md so the revert's rationale is " +
-                "discoverable in the workflow itself")
-        }
+        let script = try String(contentsOf: RepoPaths9.devScript, encoding: .utf8)
+        XCTAssertTrue(script.lowercased().contains("round 9"),
+            "scripts/patch-swift-cross-ui.sh — now the single apply path every CI leg calls — must " +
+            "document round 9's revert so the reverted patch's absence is explained where a reader " +
+            "would otherwise be tempted to re-add it")
+        XCTAssertTrue(script.contains("CUESYNC-9-findings.md"),
+            "the script must cite specs/CUESYNC-9-findings.md so the revert's rationale is discoverable")
     }
 
     /// spec CUESYNC-9 acceptance: the pin stays exact: "0.8.0"; Package.resolved is
@@ -631,5 +616,109 @@ private enum JobBlocks9 {
         }
         let block = Array(allLines[start..<end])
         return JobBlock9(text: block.joined(separator: "\n"), lines: block)
+    }
+}
+
+// =============================================================================
+// CUESYNC-9 round 20 — CI must apply the SAME patch set the script does.
+//
+// On 72c518f the Windows legs went red and, worse, would have been GREEN-but-
+// meaningless if they hadn't: `.github/workflows/swift-windows.yml` hand-rolled one
+// `git apply` step per patch and listed only THREE of the five live patches, so CI
+// built without the container-hit-testing and entry-styling fixes the commit existed
+// to prove — while `scripts/patch-swift-cross-ui.sh` applied all five. The YAML and
+// the script had silently drifted, and nothing asserted they agreed.
+//
+// Round 20 removed the ability to drift (every leg now calls the script) and this
+// suite locks that shut: every patch file in patches/ must be applied by the script,
+// every leg must delegate to the script, and no leg may hand-roll `git apply`.
+// =============================================================================
+
+final class CUESYNC9CIAppliesSamePatchSetAsScriptTests: XCTestCase {
+
+    private var scriptText: String {
+        get throws { try String(contentsOf: RepoPaths9.devScript, encoding: .utf8) }
+    }
+
+    /// Every checked-in patch must be applied by the script — a patch file that no
+    /// apply path references is dead weight that reviewers will assume is live.
+    func testScriptAppliesEveryCheckedInPatch() throws {
+        let patchesDir = RepoPaths9.root.appendingPathComponent("patches")
+        let patchFiles = try FileManager.default
+            .contentsOfDirectory(at: patchesDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "patch" }
+            .map { $0.lastPathComponent }
+            .sorted()
+        XCTAssertFalse(patchFiles.isEmpty, "patches/ must contain at least one patch")
+
+        let script = try scriptText
+        for patchFile in patchFiles {
+            XCTAssertTrue(script.contains(patchFile),
+                "scripts/patch-swift-cross-ui.sh must apply \(patchFile) — every CI leg delegates to " +
+                "this script, so a patch it does not name is a patch CI never applies")
+        }
+    }
+
+    /// Every GtkBackend-compiling leg delegates to the script.
+    func testEveryGtkBackendCompilingLegDelegatesToTheScript() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocks9.require(jobName)
+            XCTAssertTrue(job.text.contains("scripts/patch-swift-cross-ui.sh"),
+                "\(jobName) must apply dependency patches by calling scripts/patch-swift-cross-ui.sh")
+        }
+    }
+
+    /// No leg may hand-roll `git apply` — that is precisely how the YAML came to apply
+    /// a different (smaller) patch set than the script.
+    func testNoLegHandRollsGitApply() throws {
+        for jobName in ["macos", "windows-build", "windows-test"] {
+            let job = try JobBlocks9.require(jobName)
+            let runLines = job.lines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+            let handRolled = runLines.filter { $0.contains("git apply") }
+            XCTAssertTrue(handRolled.isEmpty,
+                "\(jobName) must not run `git apply` directly — patching goes through " +
+                "scripts/patch-swift-cross-ui.sh so the YAML cannot drift from it. Found: \(handRolled)")
+        }
+    }
+
+    /// The script normalizes line endings before applying. swift-cross-ui ships no
+    /// .gitattributes, so windows-latest (core.autocrlf=true) checks its sources out as
+    /// CRLF and every LF-only patch fails `git apply` at GtkBackend.swift:116 — the
+    /// exact asymmetry that turned 72c518f red on Windows while macOS passed.
+    func testScriptNormalizesCheckoutToLFBeforeApplying() throws {
+        let script = try scriptText
+        XCTAssertTrue(script.contains("core.autocrlf false"),
+            "the script must set core.autocrlf=false on the swift-cross-ui checkout")
+        XCTAssertTrue(script.contains("core.eol lf"),
+            "the script must set core.eol=lf on the swift-cross-ui checkout")
+        guard let normalize = script.range(of: "core.autocrlf false")?.lowerBound,
+            let firstApply = script.range(of: "git apply --reverse --check \"$")?.lowerBound
+        else {
+            XCTFail("expected both LF normalization and a `git apply` in the script")
+            return
+        }
+        XCTAssertLessThan(normalize, firstApply,
+            "LF normalization must precede every apply — normalizing after a failed apply is useless")
+    }
+
+    /// All five live patches are named, in the audited apply order.
+    func testScriptAppliesTheFiveLivePatchesInOrder() throws {
+        let script = try scriptText
+        let ordered = [
+            "swift-cross-ui-0.8.0-gtk-interactivity.patch",
+            "swift-cross-ui-0.8.0-windows-gsk-renderer.patch",
+            "swift-cross-ui-0.8.0-windows-window-present.patch",
+            "swift-cross-ui-0.8.0-gtk-container-hit-testing.patch",
+            "swift-cross-ui-0.8.0-gtk-entry-styling.patch",
+        ]
+        var previous = script.startIndex
+        for patch in ordered {
+            guard let found = script.range(of: patch, range: previous..<script.endIndex)?.lowerBound else {
+                XCTFail("scripts/patch-swift-cross-ui.sh must apply \(patch) after the preceding patch — " +
+                    "apply order is audited (specs/CUESYNC-9-findings.md)")
+                return
+            }
+            previous = found
+        }
     }
 }

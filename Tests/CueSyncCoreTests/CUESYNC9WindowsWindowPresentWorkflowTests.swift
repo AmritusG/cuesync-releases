@@ -41,40 +41,43 @@ private let auditedRevisionWP = "a6d206370812e3b9edba259d167e848892c5013d"
 private let windowPresentPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-window-present.patch"
 private let gskPatchRelativePathWP = "patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
 private let interactivityPatchRelativePathWP = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
-private let windowPresentStepNamePattern = #"name:\s*Patch swift-cross-ui Windows window present"#
+// CUESYNC-9 round 20: CI delegates all patching to scripts/patch-swift-cross-ui.sh
+// (see CUESYNC9WindowsGskRendererWorkflowTests' header for why). These guards moved
+// with the behaviour: per-leg step structure became "the leg delegates to the script"
+// plus "the script applies this patch, guarded and in order".
+private let windowPresentStepNamePattern = #"name:\s*Patch swift-cross-ui \(all five"#
 
 final class CUESYNC9WindowPresentPatchStepPlacementTests: XCTestCase {
 
-    /// The window-present patch step must exist on all three legs that compile GtkBackend.
+    /// Every GtkBackend-compiling leg must delegate to the script, and the script must
+    /// actually apply this patch — otherwise the delegation is a vacuous green.
     func testWindowPresentPatchStepExistsOnAllThreeGtkBackendCompilingLegs() throws {
         for jobName in ["macos", "windows-build", "windows-test"] {
             let job = try JobBlocksWP.require(jobName)
             XCTAssertNotNil(
                 job.firstLineIndex(matching: windowPresentStepNamePattern),
-                "\(jobName) must declare a 'Patch swift-cross-ui Windows window present' step (CUESYNC-9 §0.12)")
+                "\(jobName) must delegate patching to scripts/patch-swift-cross-ui.sh (CUESYNC-9 §0.12)")
         }
+        let script = try String(contentsOf: RepoPathsWP.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("swift-cross-ui-0.8.0-windows-window-present.patch"),
+            "scripts/patch-swift-cross-ui.sh must apply the window-present patch — CI delegates to it")
     }
 
-    /// Apply order interactivity -> gsk -> window-present: the window-present step must
-    /// run AFTER the GSK-renderer step (which itself runs after interactivity) on every leg.
+    /// Apply order interactivity -> gsk -> window-present is now a property of the script.
     func testWindowPresentPatchStepRunsAfterTheGskPatchOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocksWP.require(jobName)
-            guard let gskLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui Windows GSK renderer"#) else {
-                XCTFail("\(jobName) has no GSK-renderer patch step to order against")
-                continue
-            }
-            guard let presentLine = job.firstLineIndex(matching: windowPresentStepNamePattern) else {
-                XCTFail("\(jobName) has no window-present patch step to order")
-                continue
-            }
-            XCTAssertGreaterThan(presentLine, gskLine,
-                "\(jobName)'s window-present patch step must run AFTER the GSK-renderer patch step " +
-                "(apply order interactivity -> gsk -> window-present, specs/CUESYNC-9-findings.md §0.12)")
+        let script = try String(contentsOf: RepoPathsWP.devScript, encoding: .utf8)
+        guard let gskIndex = script.range(of: "GSK_RENDERER_PATCH\"")?.lowerBound,
+            let presentIndex = script.range(of: "WINDOW_PRESENT_PATCH\"")?.lowerBound
+        else {
+            XCTFail("scripts/patch-swift-cross-ui.sh must apply both the GSK and window-present patches")
+            return
         }
+        XCTAssertLessThan(gskIndex, presentIndex,
+            "the GSK-renderer patch must be applied BEFORE the window-present patch (apply order " +
+            "interactivity -> gsk -> window-present, specs/CUESYNC-9-findings.md §0.12)")
     }
 
-    /// The window-present patch must land before `swift build`/`swift test` compiles GtkBackend.
+    /// The patching step must still land before `swift build`/`swift test` compiles GtkBackend.
     func testWindowPresentPatchStepRunsBeforeBuildOrTestOnEveryLeg() throws {
         let expectations: [(job: String, pattern: String)] = [
             ("macos", #"run:\s*swift build -c release"#),
@@ -84,7 +87,7 @@ final class CUESYNC9WindowPresentPatchStepPlacementTests: XCTestCase {
         for (jobName, invocationPattern) in expectations {
             let job = try JobBlocksWP.require(jobName)
             guard let patchLine = job.firstLineIndex(matching: windowPresentStepNamePattern) else {
-                XCTFail("\(jobName) has no window-present patch step to order against build/test")
+                XCTFail("\(jobName) has no patch step to order against build/test")
                 continue
             }
             guard let invocationLine = job.firstLineIndex(matching: invocationPattern) else {
@@ -92,7 +95,7 @@ final class CUESYNC9WindowPresentPatchStepPlacementTests: XCTestCase {
                 continue
             }
             XCTAssertLessThan(patchLine, invocationLine,
-                "\(jobName)'s window-present patch step must run BEFORE the build/test step that compiles " +
+                "\(jobName)'s patch step must run BEFORE the build/test step that compiles " +
                 "GtkBackend (CUESYNC-9 §0.12)")
         }
     }
@@ -100,52 +103,45 @@ final class CUESYNC9WindowPresentPatchStepPlacementTests: XCTestCase {
 
 final class CUESYNC9WindowPresentPatchIdempotencyAndScopeTests: XCTestCase {
 
-    /// Idempotent (git apply --reverse --check) on every leg.
+    /// Idempotency is a property of the script every leg calls.
     func testWindowPresentPatchStepIsGuardedByReverseApplyCheckOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocksWP.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows window present"#)
-            XCTAssertTrue(block.contains("git apply --reverse --check"),
-                "\(jobName)'s window-present patch step must guard re-application with " +
-                "`git apply --reverse --check` so a second run is a no-op")
-        }
+        let script = try String(contentsOf: RepoPathsWP.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("git apply --reverse --check \"$WINDOW_PRESENT_PATCH\""),
+            "the window-present patch must be guarded with `git apply --reverse --check` in " +
+            "scripts/patch-swift-cross-ui.sh so a second run is a no-op")
     }
 
-    /// Clears the Windows read-only flag (Set-ItemProperty ... IsReadOnly) on both Windows legs.
+    /// Dependency sources check out read-only on Windows; the script clears that.
     func testWindowPresentPatchStepClearsWindowsReadOnlyFlagOnBothWindowsLegs() throws {
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocksWP.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows window present"#)
-            XCTAssertTrue(block.contains("IsReadOnly"),
-                "\(jobName)'s window-present patch step must clear the Windows read-only flag " +
-                "(Set-ItemProperty ... -Name IsReadOnly -Value $false) before patching")
-        }
+        let script = try String(contentsOf: RepoPathsWP.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("chmod -R u+w"),
+            "scripts/patch-swift-cross-ui.sh must clear the read-only flag before patching")
     }
 
-    /// Read-only clear scoped to exactly GtkBackend.swift — never Widget.swift, never a
-    /// blanket -Recurse (the window-present patch touches only GtkBackend.swift).
+    /// NEW-STATE CHECK (round 20): every leg runs the SAME apply path, so CI can no
+    /// longer apply a different patch set than the script — the drift that let CI
+    /// build without the container-hit-testing and entry-styling patches entirely.
     func testWindowPresentPatchStepClearsReadOnlyOnExactlyGtkBackendSwiftNotOtherFiles() throws {
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocksWP.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows window present"#)
-            XCTAssertTrue(block.contains("GtkBackend.swift"),
-                "\(jobName)'s window-present patch step must clear read-only naming GtkBackend.swift specifically")
-            XCTAssertFalse(block.contains("Widget.swift"),
-                "\(jobName)'s window-present patch step must not touch Widget.swift — out of scope for this patch")
-            XCTAssertFalse(block.contains("-Recurse"),
-                "\(jobName)'s read-only clear must target the one named file, not recurse over the checkout")
-        }
-    }
-
-    /// Pinned in a comment naming the audited v0.8.0 commit on every leg.
-    func testWindowPresentPatchStepNamesTheAuditedV080CommitOnEveryLeg() throws {
         for jobName in ["macos", "windows-build", "windows-test"] {
             let job = try JobBlocksWP.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows window present"#, includingPrecedingComments: true)
-            XCTAssertTrue(block.contains(auditedRevisionWP),
-                "\(jobName)'s window-present patch step (or its preceding comment) must name the audited " +
-                "v0.8.0 commit \(auditedRevisionWP)")
+            let block = try job.stepBlock(named: #"Patch swift-cross-ui \(all five"#)
+            XCTAssertTrue(block.contains("scripts/patch-swift-cross-ui.sh"),
+                "\(jobName)'s patch step must invoke scripts/patch-swift-cross-ui.sh rather than " +
+                "hand-rolling `git apply` per patch — one list, one order, no drift")
+            XCTAssertFalse(block.contains("git apply"),
+                "\(jobName) must not hand-roll `git apply` alongside the script — that is exactly how " +
+                "the YAML came to apply only three of the five live patches")
         }
+    }
+
+    /// Pinned: the audited v0.8.0 commit must still be named where the patches are
+    /// applied. Round 20 moved that from a per-leg YAML comment to the script every
+    /// leg calls — one place, so it cannot go stale on one leg and not another.
+    func testWindowPresentPatchStepNamesTheAuditedV080CommitOnEveryLeg() throws {
+        let script = try String(contentsOf: RepoPathsWP.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains(auditedRevisionWP),
+            "scripts/patch-swift-cross-ui.sh — the single apply path every CI leg calls — must name " +
+            "the audited v0.8.0 commit \(auditedRevisionWP)")
     }
 }
 

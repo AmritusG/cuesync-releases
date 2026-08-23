@@ -1013,7 +1013,17 @@ def test_generate_token_distribution_has_no_gross_modulo_bias():
 
 AUDITED_REVISION = "a6d206370812e3b9edba259d167e848892c5013d"
 GESTURE_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-interactivity.patch"
-GESTURE_STEP_NAME = "Patch swift-cross-ui GTK interactivity"
+# CUESYNC-9 round 20: CI stopped hand-rolling one `git apply` step per patch. Every
+# GtkBackend-compiling leg now runs scripts/patch-swift-cross-ui.sh — the single
+# checked-in list of patches and apply order. Two defects forced it: the YAML applied
+# only THREE of the five live patches (so CI never applied the input fix at all), and
+# it had no LF normalization, so on windows-latest (core.autocrlf=true) the CRLF
+# checkout rejected the LF-only patches at GtkBackend.swift:116 while macOS passed.
+#
+# These step-block helpers therefore locate the DELEGATING step. Assertions about how
+# a patch is applied (reverse-guard, read-only clear, pin, fail-loud) moved to the
+# script, where the behaviour now lives.
+GESTURE_STEP_NAME = "Patch swift-cross-ui (all five"
 # CUESYNC-9 §4: a second, distinct root-cause patch against the same upstream
 # file, kept in its own reviewable file (never merged into GESTURE_PATCH_NAME —
 # see CUESYNC9WindowsInputDispatchWorkflowTests' non-overlapping-hunk check).
@@ -1046,6 +1056,10 @@ ENTRY_STYLING_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-entry-styling.patch"
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
 )  # <root>/.github/workflows/x.yml -> <root>
+# The single apply path every CI leg delegates to. Assertions about HOW a patch is
+# applied (reverse-guard, read-only clear, LF normalization, pin, fail-loud) target
+# this file rather than a per-leg YAML step.
+DEV_SCRIPT_PATH = REPO_ROOT / "scripts" / "patch-swift-cross-ui.sh"
 PATCH_PATH = REPO_ROOT / "patches" / GESTURE_PATCH_NAME
 PATCH_TEXT = PATCH_PATH.read_text(encoding="utf-8") if PATCH_PATH.is_file() else ""
 
@@ -1547,32 +1561,27 @@ def test_both_windows_gesture_patch_steps_are_byte_identical():
 
 
 def test_windows_gesture_patch_clears_read_only_before_apply_on_the_patched_files():
+    # UPDATED round 20: the read-only clear is no longer a per-leg PowerShell path
+    # variable — scripts/patch-swift-cross-ui.sh clears the whole checkout before
+    # applying, which cannot go stale against a patch's targets the way a
+    # hand-maintained per-step path list could. The ORDERING invariant this ATTACK
+    # exists for (clear must precede apply, or the apply hits read-only sources and
+    # fails) is unchanged and still asserted, now against the script.
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    clear_idx = script.find("chmod -R u+w")
+    apply_idx = script.find('git apply --reverse --check "$')
+    assert clear_idx != -1, "the script must clear the read-only flag before patching"
+    assert apply_idx != -1, "the script must apply patches with a reverse-check guard"
+    assert clear_idx < apply_idx, (
+        "a read-only clear runs AFTER the first `git apply` — the apply hits a "
+        "read-only dependency source and fails before the clear ever executes"
+    )
+    # The patch must still target exactly the audited files.
     patched = set(_patch_target_paths())
-    for job in ("windows-build", "windows-test"):
-        body = _gesture_bodies()[job]
-        apply_idx = body.find("git apply $patch")
-        assert apply_idx != -1, job + ": no forward `git apply $patch` in the step"
-        ro_positions = [m.start() for m in re.finditer(r"IsReadOnly", body)]
-        assert ro_positions, job + ": step never clears the Windows read-only flag"
-        assert all(p < apply_idx for p in ro_positions), (
-            job + ": a `Set-ItemProperty … -Name IsReadOnly -Value $false` clear runs "
-            "AFTER `git apply` — the apply hits a read-only dependency source and fails "
-            "before the clear ever executes"
-        )
-        cleared = set()
-        for _var, path in re.findall(r'\$(\w+)\s*=\s*"([^"]+)"', body):
-            if path.endswith(".swift"):
-                cleared.add(
-                    path.replace("\\", "/").replace(
-                        ".build/checkouts/swift-cross-ui/", ""
-                    )
-                )
-        assert cleared == patched, (
-            job
-            + ": read-only is cleared on %r but the patch modifies %r — a path typo "
-            "leaves the real target read-only and breaks `git apply` downstream"
-            % (sorted(cleared), sorted(patched))
-        )
+    assert patched == {
+        "Sources/Gtk/Widgets/Widget.swift",
+        "Sources/GtkBackend/GtkBackend.swift",
+    }, "unexpected gesture-patch diff targets: " + repr(sorted(patched))
 
 
 # ---------------------------------------------------------------------------
@@ -1585,24 +1594,25 @@ def test_windows_gesture_patch_clears_read_only_before_apply_on_the_patched_file
 
 
 def test_gesture_patch_step_fails_loud_on_a_bad_apply_on_every_leg():
-    bodies = _gesture_bodies()
-    mac = bodies["macos"]
-    assert re.search(r"set -euo?\s+pipefail|set -e\b", mac), (
-        "spec §3: the macos gesture-patch step must set fail-fast shell options "
-        "(`set -euo pipefail`) so a failed `git apply` aborts the job"
+    # UPDATED round 20: every leg now runs scripts/patch-swift-cross-ui.sh, so
+    # fail-loud is a property of that script plus the step that calls it. A
+    # swallowed apply failure would build an UN-patched checkout and ship the
+    # dead-on-click UI while CI stayed green — still the worst outcome, still locked.
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert re.search(r"set -euo?\s+pipefail|set -e\b", script), (
+        "scripts/patch-swift-cross-ui.sh must set fail-fast shell options "
+        "(`set -euo pipefail`) so a failed `git apply` aborts rather than "
+        "silently leaving the checkout un-patched"
     )
-    assert 'git apply "$PATCH"' in mac, (
-        'the macos step must contain a forward `git apply "$PATCH"` (not only the '
+    assert 'git apply "$' in script, (
+        "the script must contain a forward `git apply \"$PATCH\"` (not only the "
         "`--reverse --check` guard) for set -e to fail loud on"
     )
-    for job in ("windows-build", "windows-test"):
-        body = bodies[job]
-        assert "$LASTEXITCODE -ne 0" in body and "exit 1" in body, (
-            job + ": the gesture-patch step must fail loud on a `git apply` error "
-            "(`$LASTEXITCODE -ne 0` -> `exit 1`), never proceed against an un-patched "
-            "checkout"
+    for job, body in _gesture_bodies().items():
+        assert re.search(r"set -euo?\s+pipefail|set -e\b", body), (
+            job + ": the step that invokes the patch script must itself be fail-fast "
+            "(`set -euo pipefail`), or a non-zero script exit is swallowed"
         )
-
 
 # ---------------------------------------------------------------------------
 # ATTACK 33 — placement: after resolve, before build/test, on every leg. spec §3:
@@ -1669,18 +1679,18 @@ def test_gesture_patch_step_runs_after_resolve_and_before_build_on_every_leg():
 
 
 def test_gesture_patch_step_is_reverse_guarded_and_pinned_to_the_audited_commit():
-    for job in ("macos", "windows-build", "windows-test"):
-        block = _gesture_block_with_comments(job)
-        assert block is not None, job + ": no gesture-patch step found"
-        assert "git apply --reverse --check" in block, (
-            job + ": the gesture-patch step must guard idempotency with "
-            "`git apply --reverse --check` (spec §3)"
-        )
-        assert AUDITED_REVISION in block, (
-            job + ": the gesture-patch step (or its preceding comment) must pin the "
-            "audited v0.8.0 commit " + AUDITED_REVISION + " (spec §3/§4)"
-        )
-
+    # UPDATED round 20: idempotency guard and pin moved to the single apply path
+    # every leg calls. One place, so they cannot go stale on one leg and not another.
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert 'git apply --reverse --check "$INTERACTIVITY_PATCH"' in script, (
+        "the gesture patch must guard idempotency with `git apply --reverse --check` "
+        "in scripts/patch-swift-cross-ui.sh (spec §3)"
+    )
+    assert AUDITED_REVISION in script, (
+        "scripts/patch-swift-cross-ui.sh must pin the audited v0.8.0 commit "
+        + AUDITED_REVISION
+        + " (spec §3/§4)"
+    )
 
 # ---------------------------------------------------------------------------
 # ATTACK 35 (SUPPLY CHAIN) — no divergent/duplicate copy of either checked-in
@@ -1753,12 +1763,23 @@ def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches(
         "scripts/patch-swift-cross-ui.sh must apply the window-present patch in "
         "executable code too (spec §0.16)"
     )
+    assert CONTAINER_HIT_TESTING_PATCH_NAME in dev_code, (
+        "scripts/patch-swift-cross-ui.sh must apply the container hit-testing patch "
+        "in executable code too (spec §0.17)"
+    )
+    assert ENTRY_STYLING_PATCH_NAME in dev_code, (
+        "scripts/patch-swift-cross-ui.sh must apply the entry-styling patch in "
+        "executable code too (spec §0.18)"
+    )
+    # UPDATED round 20: CI no longer names patches itself — every leg delegates to
+    # the script above, so "CI applies the same bytes we reviewed" is now asserted as
+    # "every leg calls that one script". This is the drift that let the YAML apply
+    # only three of the five live patches while the script applied all five.
     for job, _i, block in GESTURE_BLOCKS:
-        assert GESTURE_PATCH_NAME in block, (
+        assert "scripts/patch-swift-cross-ui.sh" in block, (
             job
-            + ": the CI gesture-patch step must apply the one checked-in "
-            + GESTURE_PATCH_NAME
-            + ", never a separate copy"
+            + ": the CI patch step must delegate to scripts/patch-swift-cross-ui.sh, "
+            "never hand-roll its own apply list"
         )
 
 
@@ -1908,54 +1929,20 @@ def test_dev_script_clears_read_only_on_exactly_the_patched_files_before_apply()
 
 
 def test_macos_gesture_patch_step_resolves_the_checkout_on_demand():
-    bodies = _gesture_bodies()
-    mac = bodies.get("macos")
-    assert mac is not None, "no macos gesture-patch step to inspect"
-    assert "swift package resolve" in mac, (
-        "spec §3: the macos gesture-patch step must `swift package resolve` on demand — "
-        "the macos job has no separate resolve step and the patch runs before `swift "
-        "build`, so without this the checkout it patches does not exist yet"
+    # UPDATED round 20: the on-demand resolve moved into the shared script, which
+    # every leg calls — the macos job still has no separate resolve step, so the
+    # script must create the checkout before it patches it.
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "swift package resolve" in script, (
+        "spec §3: scripts/patch-swift-cross-ui.sh must `swift package resolve` on "
+        "demand — the macos job has no separate resolve step and patching runs before "
+        "`swift build`, so without this the checkout it patches does not exist yet"
     )
-    assert re.search(r"-d\s+\.build/checkouts/swift-cross-ui", mac), (
-        "the on-demand resolve must be guarded by a `[ ! -d .build/checkouts/swift-cross-ui ]` "
-        "existence check so re-running against an already-resolved checkout is a no-op "
-        "(and so it can never clobber a resolved-and-patched tree)"
+    assert re.search(r"-d\s+\"?\$CHECKOUT\"?|-d\s+\.build/checkouts/swift-cross-ui", script), (
+        "the on-demand resolve must be guarded by an existence check so re-running "
+        "against an already-resolved checkout is a no-op (and can never clobber a "
+        "resolved-and-patched tree)"
     )
-    # And it must be the ONLY resolve in the whole macos job — proving there is no
-    # separate resolve step the ordering could lean on instead (ATTACK 33's premise).
-    mac_start, mac_end = JOBS["macos"]
-    job_resolves = [
-        k
-        for k in range(mac_start, mac_end)
-        if not LINES[k].lstrip().startswith("#") and "swift package resolve" in LINES[k]
-    ]
-    assert len(job_resolves) == 1, (
-        "the macos job must contain exactly one `swift package resolve` (the on-demand "
-        "one inside the gesture-patch step); found %d — a stray separate resolve step "
-        "would change the ordering ATTACK 33 reasons about" % len(job_resolves)
-    )
-
-
-# ---------------------------------------------------------------------------
-# ATTACK 39 (§4 runtime trust boundary — LIVE FINDING) — the now-clickable export
-# Save buttons feed an UNSANITISED, untrusted preset name straight into the export
-# filename. spec §4(b): "TextTools.slugify() on any name that becomes an export
-# filename stays the sanitiser at that boundary … Values still originate from
-# untrusted files (Rekordbox XML, Serato GEOB, Engine DJ SQLite, ShowKontrol/
-# Resolume) and user text." CUESYNC-8's whole point is that Save XML / Save
-# ShowKontrol Cue now CLICK on Windows — so `state.presetName` (user-typed, or
-# loaded verbatim from an untrusted .cueproj) now flows LIVE into
-# `defaultFileName: "\(name).xml"` / `"\(name).cue"`. But `slugify` is called
-# NOWHERE in the app (grep: its only mention is its own definition + tests), so a
-# preset name of `../../evil`, `con`, or one carrying a NUL/`/` reaches the file
-# chooser's suggested name unfiltered. The NSSavePanel/GTK chooser the user then
-# confirms is a mitigation, not the §4 sanitiser — this is the documented boundary
-# guard being absent at a boundary the ticket just made reachable. Currently FAILS:
-# it reproduces the live gap (fix = route the name through slugify, or retarget
-# with a written §4 justification per repo rule §E.24 — never delete-to-green).
-# ---------------------------------------------------------------------------
-
-
 def test_now_live_export_save_buttons_sanitise_the_untrusted_preset_name():
     export = (
         REPO_ROOT
@@ -2801,19 +2788,16 @@ def test_windows_input_patch_drains_glib_before_ticking_runloop_on_windows():
 
 
 def test_windows_input_patch_step_is_absent_and_gsk_patch_still_runs_after_resolve_and_java_repair_on_windows_legs():
-    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the windows-input
-    patch step this test used to order against resolve/repair/gesture was
-    reverted — a disproven, non-load-bearing patch per spec step 5. This is now a
-    regression lock (the step must be ABSENT) PLUS a repurposed ordering check on
-    the GSK-renderer patch step, which now occupies the slot immediately after the
-    gesture step and must still land after resolve and the swift-java symlink
-    repair — the same failure mode (patching an unresolved / still-broken checkout)
-    the original test guarded against, now pinned to the patch that actually runs
-    there."""
+    """UPDATED for round 20: CI no longer declares a step per patch — every leg runs
+    scripts/patch-swift-cross-ui.sh. The regression lock (the round-9-reverted
+    windows-input patch must stay absent) and the ordering invariant (patching must
+    land after `swift package resolve` and after the swift-java symlink repair, or it
+    patches an unresolved / still-broken checkout) both survive, pinned to the single
+    delegating step that now does the applying."""
     for job in ("windows-build", "windows-test"):
         assert job in JOBS, "missing job " + job
         start, end = JOBS[job]
-        resolve_idx = repair_idx = gesture_idx = win_input_idx = gsk_idx = None
+        resolve_idx = repair_idx = patch_idx = win_input_idx = None
         for k in range(start, end):
             m = STEP_NAME_RE.match(LINES[k])
             if not m:
@@ -2824,36 +2808,26 @@ def test_windows_input_patch_step_is_absent_and_gsk_patch_still_runs_after_resol
             if name.startswith(REPAIR_STEP_NAME):
                 repair_idx = k
             if GESTURE_STEP_NAME in name:
-                gesture_idx = k
+                patch_idx = k
             if WINDOWS_INPUT_STEP_NAME in name:
                 win_input_idx = k
-            if WINDOWS_GSK_STEP_NAME in name:
-                gsk_idx = k
         assert win_input_idx is None, (
             job + ": the windows-input patch step must be ABSENT — reverted in round 9 "
             "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a "
             "disproven, non-load-bearing patch"
         )
-        assert gsk_idx is not None, job + ": no GSK-renderer patch step found"
+        assert patch_idx is not None, (
+            job + ": no step delegating to scripts/patch-swift-cross-ui.sh was found"
+        )
         for label, other in (
             (RESOLVE_STEP_NAME, resolve_idx),
             (REPAIR_STEP_NAME, repair_idx),
-            (GESTURE_STEP_NAME, gesture_idx),
         ):
-            assert other is not None, (
-                "%s: the `%s` step is missing — the GSK-renderer patch step must run "
-                "AFTER it, so its absence breaks the ordering premise" % (job, label)
+            assert other is not None, job + ": missing step " + label
+            assert other < patch_idx, (
+                "%s: patching must run AFTER %r — otherwise it patches an unresolved "
+                "or still-broken checkout" % (job, label)
             )
-            assert other < gsk_idx, (
-                "%s: the GSK-renderer patch step (line %d) must run AFTER `%s` (line %d) "
-                "now that it is the step immediately following the gesture patch (the "
-                "windows-input step that used to sit between them was reverted in round "
-                "9). Patching an unresolved or still-broken-reparse-point checkout fails "
-                "`git apply` on the Windows legs this patch exists to fix."
-                % (job, gsk_idx, label, other)
-            )
-
-
 # ---------------------------------------------------------------------------
 # ATTACK 54 (§4 runtime trust boundary) — the "+ Add Cue Point" button is a
 # NOW-LIVE entry point (acceptance criteria list it explicitly). Its handler,
@@ -3147,55 +3121,35 @@ def test_windows_input_patch_step_absent_and_both_remaining_windows_patches_stay
 
 
 def test_windows_input_patch_absent_and_gsk_renderer_clears_read_only_before_apply_on_exactly_gtkbackend():
-    """UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the windows-input
-    step this test used to check ordering for was reverted — regression-locked
-    below (no such step on either Windows leg). Repurposed onto a real,
-    previously-unguarded gap in the GSK-renderer patch step (which now runs where
-    windows-input used to): ATTACK D
-    (test_gsk_renderer_patch_step_clears_read_only_on_exactly_gtkbackend_on_both_windows_legs)
-    only asserts the read-only clear names the right file SOMEWHERE in the step —
-    it never checks the clear runs BEFORE the forward `git apply`. A clear that ran
-    after the apply still contains the token yet is a live break: `git apply` hits
-    a read-only dependency source and dies before the clear ever executes."""
+    """UPDATED for round 20: the read-only clear is no longer a per-leg PowerShell
+    path variable — scripts/patch-swift-cross-ui.sh clears the whole checkout before
+    applying. The invariant this ATTACK exists for is unchanged: a clear that ran
+    AFTER the apply still contains the token yet is a live break, because `git apply`
+    hits a read-only dependency source and dies before the clear ever executes."""
     win_input_bodies = _win_input_bodies()
     for job in ("windows-build", "windows-test"):
         assert job not in win_input_bodies, (
             job + ": the windows-input patch step must be ABSENT — reverted in round 9 "
             "(specs/CUESYNC-9-findings.md §0.8)"
         )
-
-        body = _gsk_bodies()[job]
-        apply_idx = body.find("git apply $patch")
-        assert apply_idx != -1, (
-            job + ": no forward `git apply $patch` in the GSK-renderer step"
-        )
-        ro_positions = [m.start() for m in re.finditer(r"IsReadOnly", body)]
-        assert ro_positions, (
-            job + ": GSK-renderer step never clears the Windows read-only flag"
-        )
-        assert all(p < apply_idx for p in ro_positions), (
-            job + ": a `Set-ItemProperty … -Name IsReadOnly -Value $false` clear runs "
-            "AFTER the forward `git apply` in the GSK-renderer step — the apply hits a "
-            "read-only dependency source and fails before the clear ever executes "
-            "(spec CUESYNC-9 §4)"
-        )
-        cleared = set()
-        for _var, path in re.findall(r'\$(\w+)\s*=\s*"([^"]+)"', body):
-            if path.endswith(".swift"):
-                cleared.add(
-                    path.replace("\\", "/").replace(
-                        ".build/checkouts/swift-cross-ui/", ""
-                    )
-                )
-        assert cleared == {"Sources/GtkBackend/GtkBackend.swift"}, (
-            job + ": the GSK-renderer read-only clear targets %r, but the patch "
-            "modifies ONLY GtkBackend.swift — clearing the wrong (or an extra) file "
-            "leaves the real target read-only, or needlessly clears a file this patch "
-            "does not touch (spec CUESYNC-9 §4: 'exactly the file(s) it patches')"
-            % sorted(cleared)
-        )
-
-
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    apply_idx = script.find('git apply --reverse --check "$')
+    assert apply_idx != -1, "no guarded `git apply` found in the apply script"
+    ro_positions = [m.start() for m in re.finditer(r"chmod -R u\+w", script)]
+    assert ro_positions, "the apply script never clears the read-only flag"
+    assert min(ro_positions) < apply_idx, (
+        "the read-only clear runs AFTER the first `git apply` — the apply hits a "
+        "read-only dependency source and fails before the clear ever executes "
+        "(spec CUESYNC-9 §4)"
+    )
+    # Round 20 addition: the LF normalization has the same ordering requirement, and
+    # for the same reason — a CRLF checkout rejects the LF-only patches outright.
+    lf_idx = script.find("core.autocrlf false")
+    assert lf_idx != -1, "the apply script must normalize the checkout to LF"
+    assert lf_idx < apply_idx, (
+        "LF normalization must precede the first `git apply` — normalizing after a "
+        "failed apply cannot rescue it (this is what turned 72c518f red on Windows)"
+    )
 # ---------------------------------------------------------------------------
 # ATTACK 60 (FAIL-LOUD) — a failed windows-input `git apply` must fail the job
 # LOUD, on every leg. ATTACK 32 pins this for the gesture step only. A swallowed
@@ -5108,7 +5062,7 @@ FINDINGS_9_TEXT = (
     FINDINGS_9_PATH.read_text(encoding="utf-8") if FINDINGS_9_PATH.is_file() else ""
 )
 
-WINDOWS_GSK_STEP_NAME = "Patch swift-cross-ui Windows GSK renderer"
+WINDOWS_GSK_STEP_NAME = "Patch swift-cross-ui (all five"
 
 
 def _gsk_step_blocks():
@@ -5333,70 +5287,52 @@ def test_contentview_window_chrome_imposes_no_hard_minimum_on_either_axis():
 
 
 def test_gsk_renderer_patch_step_clears_read_only_on_exactly_gtkbackend_on_both_windows_legs():
-    bodies = _gsk_bodies()
-    for job in ("windows-build", "windows-test"):
-        assert job in bodies, (
-            "spec §3: the gsk-renderer patch step is missing on %s" % job
-        )
-        body = bodies[job]
-        ro = [
-            ln
-            for ln in body.splitlines()
-            if "Set-ItemProperty" in ln and "IsReadOnly" in ln
-        ]
-        assert len(ro) == 1, (
-            "spec CUESYNC-9 §4: the gsk-renderer patch modifies only "
-            "GtkBackend.swift, so its %s step must clear the Windows read-only flag "
-            "on exactly ONE file; found %d IsReadOnly clear(s):\n%s"
-            % (job, len(ro), "\n".join(ro) or "(none)")
-        )
-        assert "GtkBackend.swift" in body and (
-            "$gtkBackend" in ro[0] or "GtkBackend.swift" in ro[0]
-        ), (
-            "spec §4: the gsk-renderer %s step must clear read-only on "
-            "GtkBackend.swift specifically; got: %s" % (job, ro[0].strip())
-        )
-        assert "Widget.swift" not in body, (
-            "spec §4 / invariants: the gsk-renderer %s step references Widget.swift "
-            "— it must stay confined to GtkBackend.swift and never touch the "
-            "CUESYNC-8 interactivity file's flag or bytes." % job
-        )
-
-
-# ---------------------------------------------------------------------------
-# ATTACK E (REGRESSION LOCK) — the gsk-renderer patch step must be idempotent
-# and fail LOUD on every GtkBackend-compiling leg, exactly like the input/gesture
-# patch steps. A silent `git apply` failure would build/test/ship against an
-# UNPATCHED dependency — the Windows window would never paint (the very defect
-# §0.3 fixes) while CI stays green. spec §3 (idempotency) / §4 (fail-loud posture).
-# ---------------------------------------------------------------------------
+    # UPDATED round 20: the read-only clear moved into the shared apply script, which
+    # clears the whole checkout (`chmod -R u+w`) rather than naming one file per step.
+    # A blanket clear cannot go stale against a patch's targets, so the invariant that
+    # matters is ordering (clear before apply) plus the patch staying scoped to
+    # GtkBackend.swift — both still asserted.
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    clear_idx = script.find("chmod -R u+w")
+    apply_idx = script.find('git apply --reverse --check "$')
+    assert clear_idx != -1 and apply_idx != -1, (
+        "scripts/patch-swift-cross-ui.sh must clear read-only and apply patches"
+    )
+    assert clear_idx < apply_idx, (
+        "the read-only clear must precede the first `git apply`, or the apply hits "
+        "read-only dependency sources and fails"
+    )
+    gsk_patch = REPO_ROOT / "patches" / WINDOWS_GSK_PATCH_NAME
+    targets = re.findall(r"diff --git a/(\S+) b/\S+", gsk_patch.read_text(encoding="utf-8"))
+    assert targets == ["Sources/GtkBackend/GtkBackend.swift"], (
+        "spec §4: the gsk-renderer patch must stay confined to GtkBackend.swift and "
+        "never touch the CUESYNC-8 interactivity file's bytes; got: %r" % targets
+    )
 
 
 def test_gsk_renderer_patch_step_is_reverse_guarded_and_fails_loud_on_every_leg():
+    # UPDATED round 20: guard + fail-loud are properties of the script every leg calls.
     bodies = _gsk_bodies()
     legs = sorted(bodies)
     assert legs == ["macos", "windows-build", "windows-test"], (
-        "spec CUESYNC-9 §3: the gsk-renderer patch step must exist on all three "
-        "GtkBackend-compiling legs (it applies before build on each); found: %r" % legs
+        "spec CUESYNC-9 §3: all three GtkBackend-compiling legs must delegate patching "
+        "to scripts/patch-swift-cross-ui.sh; found: %r" % legs
+    )
+    script = DEV_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert 'git apply --reverse --check "$GSK_RENDERER_PATCH"' in script, (
+        "spec §3 idempotency: the gsk-renderer patch must be guarded with "
+        "`git apply --reverse --check` in the apply script"
+    )
+    assert re.search(r"set -euo?\s+pipefail|set -e\b", script), (
+        "the apply script must fail loud on a bad `git apply` (`set -euo pipefail`), "
+        "not continue with an unpatched dependency — a silent failure ships an "
+        "unpatched, never-painting Windows window while CI stays green (§4)"
     )
     for job, body in bodies.items():
-        assert "--reverse --check" in body, (
-            "spec §3 idempotency: the gsk-renderer %s step must guard "
-            "re-application with `git apply --reverse --check`" % job
+        assert re.search(r"set -euo?\s+pipefail|set -e\b", body), (
+            "the %s step invoking the script must itself be fail-fast, or a non-zero "
+            "script exit is swallowed" % job
         )
-        if job == "macos":
-            assert "set -e" in body, (
-                "the macos gsk-renderer step must fail loud on a bad `git apply` "
-                "(`set -euo pipefail`), not continue with an unpatched dependency"
-            )
-        else:
-            assert "Write-Error" in body and "exit 1" in body, (
-                "the %s gsk-renderer step must fail loud on a bad `git apply` "
-                "(Write-Error + exit 1) — a silent failure ships an unpatched, "
-                "never-painting Windows window while CI stays green (§4)" % job
-            )
-
-
 # =============================================================================
 # Red-Team adversarial suite — CUESYNC-9 (untrusted-binary decode boundaries)
 #

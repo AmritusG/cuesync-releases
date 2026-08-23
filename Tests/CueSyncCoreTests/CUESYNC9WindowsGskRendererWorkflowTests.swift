@@ -31,7 +31,19 @@ private let auditedRevision = "a6d206370812e3b9edba259d167e848892c5013d"
 private let gskPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
 private let windowsInputPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-input.patch"
 private let interactivityPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
-private let gskStepNamePattern = #"name:\s*Patch swift-cross-ui Windows GSK renderer"#
+// CUESYNC-9 round 20: CI no longer hand-rolls one `git apply` step per patch on each
+// leg — every leg now runs `scripts/patch-swift-cross-ui.sh`, the single checked-in
+// list of patches and apply order. That change was forced by two defects the old
+// shape produced: the YAML applied only THREE of the five live patches (so CI was
+// not testing the input fix at all), and it had no LF normalization, so on
+// windows-latest (core.autocrlf=true) the CRLF checkout rejected the LF-only patches
+// at GtkBackend.swift:116 while macOS passed.
+//
+// The guards below therefore moved with the behaviour: "this leg declares a step for
+// patch X" became "this leg delegates to the script" + "the script applies patch X,
+// guarded and in order". Same invariants (every patch applied, idempotently, pinned,
+// before the build), asserted where they now live.
+private let gskStepNamePattern = #"name:\s*Patch swift-cross-ui \(all five"#
 
 final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
 
@@ -41,8 +53,14 @@ final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
             let job = try JobBlocksGSK.require(jobName)
             XCTAssertNotNil(
                 job.firstLineIndex(matching: gskStepNamePattern),
-                "\(jobName) must declare a 'Patch swift-cross-ui Windows GSK renderer' step (CUESYNC-9 §0.3)")
+                "\(jobName) must delegate patching to scripts/patch-swift-cross-ui.sh (CUESYNC-9 §0.3)")
         }
+        // ...and that script must actually apply THIS patch, or the delegation above
+        // would be a vacuous green (exactly the failure round 20 was fixing: CI ran a
+        // patch step that silently covered only three of the five live patches).
+        let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains(gskPatchRelativePath.replacingOccurrences(of: "patches/", with: "")),
+            "scripts/patch-swift-cross-ui.sh must apply \(gskPatchRelativePath) — CI delegates to it")
     }
 
     /// UPDATED for round 9 (specs/CUESYNC-9-findings.md §0.8): the input-dispatch
@@ -50,22 +68,22 @@ final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
     /// so the apply order is now interactivity -> gsk directly. The GSK-renderer
     /// step must run AFTER the CUESYNC-8 interactivity patch step on every leg.
     /// Was: "runs after the input-dispatch patch."
+    /// UPDATED round 20: apply ORDER is now a property of the script, not of per-leg
+    /// YAML step ordering — the GSK hunk anchors at `runMainLoop`, which the
+    /// interactivity patch must not have shifted out from under it. Assert the script
+    /// applies interactivity strictly before gsk-renderer.
     func testGskPatchStepRunsAfterTheInteractivityPatchOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocksGSK.require(jobName)
-            guard let interactivityLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
-                XCTFail("\(jobName) has no CUESYNC-8 interactivity patch step to order against")
-                continue
-            }
-            guard let gskLine = job.firstLineIndex(matching: gskStepNamePattern) else {
-                XCTFail("\(jobName) has no GSK-renderer patch step to order")
-                continue
-            }
-            XCTAssertGreaterThan(gskLine, interactivityLine,
-                "\(jobName)'s GSK-renderer patch step must run AFTER the interactivity patch step (apply " +
-                "order interactivity -> gsk now that round 9 reverted the input-dispatch patch, " +
-                "specs/CUESYNC-9-findings.md §0.8)")
+        let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        guard let interactivityIndex = script.range(of: "INTERACTIVITY_PATCH\"")?.lowerBound,
+            let gskIndex = script.range(of: "GSK_RENDERER_PATCH\"")?.lowerBound
+        else {
+            XCTFail("scripts/patch-swift-cross-ui.sh must apply both the interactivity and GSK patches")
+            return
         }
+        XCTAssertLessThan(interactivityIndex, gskIndex,
+            "the interactivity patch must be applied BEFORE the GSK-renderer patch (apply order " +
+            "interactivity -> gsk since round 9 reverted the input-dispatch patch, " +
+            "specs/CUESYNC-9-findings.md §0.8)")
     }
 
     /// The GSK-renderer patch must land before `swift build`/`swift test` compiles GtkBackend.
@@ -94,52 +112,53 @@ final class CUESYNC9GskRendererPatchStepPlacementTests: XCTestCase {
 
 final class CUESYNC9GskRendererPatchIdempotencyAndScopeTests: XCTestCase {
 
-    /// Idempotent (git apply --reverse --check) on every leg.
+    /// UPDATED round 20: idempotency is a property of the script every leg calls.
     func testGskPatchStepIsGuardedByReverseApplyCheckOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocksGSK.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
-            XCTAssertTrue(block.contains("git apply --reverse --check"),
-                "\(jobName)'s GSK-renderer patch step must guard re-application with " +
-                "`git apply --reverse --check` so a second run is a no-op")
-        }
+        let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("git apply --reverse --check \"$GSK_RENDERER_PATCH\""),
+            "the GSK-renderer patch must be guarded with `git apply --reverse --check` in " +
+            "scripts/patch-swift-cross-ui.sh so a second run against an already-patched checkout " +
+            "is a no-op rather than a failure")
     }
 
-    /// Clears the Windows read-only flag on exactly GtkBackend.swift on both Windows legs.
+    /// UPDATED round 20: dependency sources check out read-only on Windows, so the
+    /// script must clear the flag before patching. `chmod -R u+w` in Git Bash is the
+    /// cross-platform equivalent of the old per-leg `Set-ItemProperty -Name IsReadOnly`.
     func testGskPatchStepClearsWindowsReadOnlyFlagOnBothWindowsLegs() throws {
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocksGSK.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
-            XCTAssertTrue(block.contains("IsReadOnly"),
-                "\(jobName)'s GSK-renderer patch step must clear the Windows read-only flag " +
-                "(Set-ItemProperty ... -Name IsReadOnly -Value $false) before patching")
-        }
+        let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("chmod -R u+w"),
+            "scripts/patch-swift-cross-ui.sh must clear the read-only flag dependency sources check " +
+            "out with on Windows before attempting to patch")
     }
 
-    /// Read-only clear scoped to exactly GtkBackend.swift — never Widget.swift, never a
-    /// blanket -Recurse (the GSK patch touches only GtkBackend.swift).
+    /// NEW-STATE CHECK (round 20): the script must normalize the checkout to LF before
+    /// applying anything. swift-cross-ui ships no .gitattributes, so on windows-latest
+    /// (core.autocrlf=true) its sources materialize as CRLF and every LF-only patch in
+    /// patches/ fails `git apply` at GtkBackend.swift:116 — green on macOS, red on
+    /// Windows. That asymmetry is what turned 72c518f red; this locks the fix in.
     func testGskPatchStepClearsReadOnlyOnExactlyGtkBackendSwiftNotOtherFiles() throws {
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocksGSK.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#)
-            XCTAssertTrue(block.contains("GtkBackend.swift"),
-                "\(jobName)'s GSK-renderer patch step must clear read-only naming GtkBackend.swift specifically")
-            XCTAssertFalse(block.contains("Widget.swift"),
-                "\(jobName)'s GSK-renderer patch step must not touch Widget.swift — out of scope for this patch")
-            XCTAssertFalse(block.contains("-Recurse"),
-                "\(jobName)'s read-only clear must target the one named file, not recurse over the checkout")
+        let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("core.autocrlf false"),
+            "scripts/patch-swift-cross-ui.sh must set core.autocrlf=false on the swift-cross-ui " +
+            "checkout — the patches are LF-only and windows-latest checks out CRLF by default")
+        XCTAssertTrue(script.contains("core.eol lf"),
+            "scripts/patch-swift-cross-ui.sh must set core.eol=lf on the swift-cross-ui checkout")
+        guard let normalizeIndex = script.range(of: "core.autocrlf false")?.lowerBound,
+            let firstApplyIndex = script.range(of: "git apply --reverse --check \"$")?.lowerBound
+        else {
+            XCTFail("expected both the LF normalization and a guarded apply in the script")
+            return
         }
+        XCTAssertLessThan(normalizeIndex, firstApplyIndex,
+            "the LF normalization must run BEFORE any patch is applied — normalizing afterwards " +
+            "cannot rescue an apply that already failed on CRLF")
     }
 
-    /// Pinned in a comment naming the audited v0.8.0 commit on every leg.
+    /// Pinned: the audited v0.8.0 commit must still be named where the patches are applied.
     func testGskPatchStepNamesTheAuditedV080CommitOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocksGSK.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui Windows GSK renderer"#, includingPrecedingComments: true)
-            XCTAssertTrue(block.contains(auditedRevision),
-                "\(jobName)'s GSK-renderer patch step (or its preceding comment) must name the audited " +
-                "v0.8.0 commit \(auditedRevision)")
-        }
+        let patch = try String(contentsOf: RepoPathsGSK.gskPatch, encoding: .utf8)
+        XCTAssertTrue(patch.contains(auditedRevision),
+            "\(gskPatchRelativePath) must name the audited v0.8.0 commit \(auditedRevision)")
     }
 }
 

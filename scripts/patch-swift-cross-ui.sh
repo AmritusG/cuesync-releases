@@ -20,6 +20,13 @@ set -euo pipefail
 # touches the checkout under .build/checkouts, which is gitignored and rebuilt by
 # `swift package resolve`.
 
+# Every patch below is written against the PINNED swift-cross-ui v0.8.0 checkout,
+# tag v0.8.0 == commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). This script is the single
+# apply path — CI's macos / windows-build / windows-test legs all call it — so the
+# audited revision is named here rather than repeated per CI step.
+AUDITED_SWIFT_CROSS_UI_REVISION="a6d206370812e3b9edba259d167e848892c5013d"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CHECKOUT="$ROOT/.build/checkouts/swift-cross-ui"
 
@@ -65,6 +72,28 @@ if [ ! -d "$CHECKOUT" ]; then
 fi
 
 cd "$CHECKOUT"
+
+# CUESYNC-9 round 20: NORMALIZE THE CHECKOUT TO LF BEFORE ANY PATCH IS APPLIED.
+#
+# swift-cross-ui ships no `.gitattributes`, so on a runner where `core.autocrlf`
+# is true — the windows-latest default — its `.swift` sources materialize with
+# CRLF endings. Every patch in `patches/` is LF-only, so `git apply` fails with
+# "patch does not apply" at GtkBackend.swift:116 on Windows while succeeding on
+# macOS/Linux (which check the same bytes out as LF). That asymmetry is what
+# turned the Windows legs red on 72c518f, and it was masked for many rounds
+# because a warm SwiftPM cache restored an ALREADY-patched checkout and every
+# apply step short-circuited on `git apply --reverse --check`. The first
+# genuinely cold cache exposed it.
+#
+# Force LF for this checkout and re-materialize the working tree so the bytes on
+# disk match the patches. Must run BEFORE the pristine reset below, so that reset
+# writes LF too. Repo-local config only — the developer's global Git setup and
+# every other repo on the machine are untouched.
+echo "==> Normalizing swift-cross-ui checkout to LF endings (patches are LF-only)"
+chmod -R u+w . 2>/dev/null || true
+git config core.autocrlf false
+git config core.eol lf
+git checkout -- .
 
 # Start from PRISTINE v0.8.0 every run: evolving patch files (CUESYNC-9 went
 # through 7 revisions) must never land on a checkout still carrying an older

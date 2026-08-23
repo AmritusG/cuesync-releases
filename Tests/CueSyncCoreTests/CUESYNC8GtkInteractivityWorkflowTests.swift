@@ -23,26 +23,32 @@ import XCTest
 private let auditedRevision = "a6d206370812e3b9edba259d167e848892c5013d"
 private let patchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-interactivity.patch"
 
+// CUESYNC-9 round 20: CI delegates all patching to scripts/patch-swift-cross-ui.sh
+// (see CUESYNC9WindowsGskRendererWorkflowTests' header for the two defects that
+// forced it). CUESYNC-8's guards moved with the behaviour — the invariants are
+// unchanged (this patch is applied on every GtkBackend-compiling leg, idempotently,
+// pinned, before the build); only their location moved from per-leg YAML steps to
+// the single script those legs now call.
+private let delegatingStepPattern8 = #"name:\s*Patch swift-cross-ui \(all five"#
+
 final class CUESYNC8GtkGesturePatchStepPlacementTests: XCTestCase {
 
-    /// spec CUESYNC-8 §3: the gesture patch step must exist on all three legs
-    /// that compile GtkBackend (macos, windows-build, windows-test), named so a
-    /// reader scanning CI logs can find it.
+    /// spec CUESYNC-8 §3: the gesture patch must be applied on all three legs that
+    /// compile GtkBackend. Each leg delegates to the script; the script must apply it.
     func testGesturePatchStepExistsOnAllThreeGtkBackendCompilingLegs() throws {
         for jobName in ["macos", "windows-build", "windows-test"] {
             let job = try JobBlocks8.require(jobName)
             XCTAssertNotNil(
-                job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#),
-                "\(jobName) must declare a 'Patch swift-cross-ui GTK interactivity' step (spec CUESYNC-8 §3)")
+                job.firstLineIndex(matching: delegatingStepPattern8),
+                "\(jobName) must delegate patching to scripts/patch-swift-cross-ui.sh (spec CUESYNC-8 §3)")
         }
+        let script = try String(contentsOf: RepoPaths8.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("swift-cross-ui-0.8.0-gtk-interactivity.patch"),
+            "scripts/patch-swift-cross-ui.sh must apply \(patchRelativePath) — CI delegates to it")
     }
 
-    /// spec CUESYNC-8 §3: "Apply it ... after swift package resolve / the
-    /// swift-java symlink repair and before swift build / swift test." The two
-    /// Windows jobs have an explicit `Resolve Swift package dependencies` step
-    /// to order against; the macos job resolves on demand inside the patch step
-    /// itself (no separate resolve step exists there), so it is checked instead
-    /// against the build invocation it must precede.
+    /// spec CUESYNC-8 §3: "Apply it ... after swift package resolve ... and before
+    /// swift build / swift test." Still asserted per leg against the delegating step.
     func testGesturePatchStepRunsAfterResolveOnBothWindowsLegs() throws {
         for jobName in ["windows-build", "windows-test"] {
             let job = try JobBlocks8.require(jobName)
@@ -50,18 +56,17 @@ final class CUESYNC8GtkGesturePatchStepPlacementTests: XCTestCase {
                 XCTFail("\(jobName) must still invoke `swift package resolve`")
                 continue
             }
-            guard let patchLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
-                XCTFail("\(jobName) has no gesture-patch step to order against resolve")
+            guard let patchLine = job.firstLineIndex(matching: delegatingStepPattern8) else {
+                XCTFail("\(jobName) has no patch step to order against resolve")
                 continue
             }
             XCTAssertGreaterThan(patchLine, resolveLine,
-                "\(jobName)'s gesture-patch step must run AFTER `swift package resolve` — the checkout " +
+                "\(jobName)'s patch step must run AFTER `swift package resolve` — the checkout " +
                 "it patches does not exist before that")
         }
     }
 
-    /// spec CUESYNC-8 §3: the patch must land before `swift build`/`swift test`
-    /// actually compiles GtkBackend, on every leg.
+    /// spec CUESYNC-8 §3: the patch must land before the build actually compiles GtkBackend.
     func testGesturePatchStepRunsBeforeBuildOrTestOnEveryLeg() throws {
         let expectations: [(job: String, pattern: String)] = [
             ("macos", #"run:\s*swift build -c release"#),
@@ -70,8 +75,8 @@ final class CUESYNC8GtkGesturePatchStepPlacementTests: XCTestCase {
         ]
         for (jobName, invocationPattern) in expectations {
             let job = try JobBlocks8.require(jobName)
-            guard let patchLine = job.firstLineIndex(matching: #"name:\s*Patch swift-cross-ui GTK interactivity"#) else {
-                XCTFail("\(jobName) has no gesture-patch step to order against build/test")
+            guard let patchLine = job.firstLineIndex(matching: delegatingStepPattern8) else {
+                XCTFail("\(jobName) has no patch step to order against build/test")
                 continue
             }
             guard let invocationLine = job.firstLineIndex(matching: invocationPattern) else {
@@ -79,7 +84,7 @@ final class CUESYNC8GtkGesturePatchStepPlacementTests: XCTestCase {
                 continue
             }
             XCTAssertLessThan(patchLine, invocationLine,
-                "\(jobName)'s gesture-patch step must run BEFORE the build/test step that actually " +
+                "\(jobName)'s patch step must run BEFORE the build/test step that actually " +
                 "compiles GtkBackend (spec CUESYNC-8 §3)")
         }
     }
@@ -87,43 +92,31 @@ final class CUESYNC8GtkGesturePatchStepPlacementTests: XCTestCase {
 
 final class CUESYNC8GtkGesturePatchIdempotencyAndPinTests: XCTestCase {
 
-    /// spec CUESYNC-8 §3: "idempotent (guard with git apply --reverse --check
-    /// so a second run is a no-op)."
+    /// spec CUESYNC-8 §3: "idempotent (guard with git apply --reverse --check so a
+    /// second run is a no-op)" — now a property of the script every leg calls.
     func testGesturePatchStepIsGuardedByReverseApplyCheckOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocks8.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui GTK interactivity"#)
-            XCTAssertTrue(block.contains("git apply --reverse --check"),
-                "\(jobName)'s gesture-patch step must guard re-application with " +
-                "`git apply --reverse --check` (spec CUESYNC-8 §3) so a second run is a no-op")
-        }
+        let script = try String(contentsOf: RepoPaths8.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("git apply --reverse --check \"$INTERACTIVITY_PATCH\""),
+            "the interactivity patch must be guarded with `git apply --reverse --check` in " +
+            "scripts/patch-swift-cross-ui.sh (spec CUESYNC-8 §3) so a second run is a no-op")
     }
 
     /// spec CUESYNC-8 §3: "clear the read-only flag first on Windows (dependency
-    /// sources check out read-only)." Windows-only requirement; the macos step
-    /// needs no such clearing (its runner does not check dependency sources out
-    /// read-only), so this deliberately only covers the two Windows legs.
+    /// sources check out read-only)." The script's `chmod -R u+w` (Git Bash on the
+    /// Windows legs) replaces the old per-leg `Set-ItemProperty ... IsReadOnly`.
     func testGesturePatchStepClearsWindowsReadOnlyFlagOnBothWindowsLegs() throws {
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocks8.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui GTK interactivity"#)
-            XCTAssertTrue(block.contains("IsReadOnly"),
-                "\(jobName)'s gesture-patch step must clear the Windows read-only flag " +
-                "(Set-ItemProperty ... -Name IsReadOnly -Value $false) before patching, same rationale " +
-                "as the existing gulong/gsize patch step immediately above it")
-        }
+        let script = try String(contentsOf: RepoPaths8.devScript, encoding: .utf8)
+        XCTAssertTrue(script.contains("chmod -R u+w"),
+            "scripts/patch-swift-cross-ui.sh must clear the read-only flag dependency sources " +
+            "check out with on Windows before patching (spec CUESYNC-8 §3)")
     }
 
-    /// spec CUESYNC-8 §3: "pinned to the v0.8.0 tag in a comment naming the
-    /// audited commit."
+    /// spec CUESYNC-8 §3: "pinned to the v0.8.0 tag in a comment naming the audited commit."
     func testGesturePatchStepNamesTheAuditedV080CommitOnEveryLeg() throws {
-        for jobName in ["macos", "windows-build", "windows-test"] {
-            let job = try JobBlocks8.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui GTK interactivity"#, includingPrecedingComments: true)
-            XCTAssertTrue(block.contains(auditedRevision),
-                "\(jobName)'s gesture-patch step (or its immediately preceding comment) must name the " +
-                "audited v0.8.0 commit \(auditedRevision) (spec CUESYNC-8 §3)")
-        }
+        let patch = try String(contentsOf: RepoPaths8.patch, encoding: .utf8)
+        XCTAssertTrue(patch.contains(auditedRevision),
+            "\(patchRelativePath) must name the audited v0.8.0 commit \(auditedRevision) " +
+            "(spec CUESYNC-8 §3)")
     }
 
     /// spec CUESYNC-8 §3: the pin stays exact: "0.8.0"; Package.resolved is
@@ -411,6 +404,11 @@ final class CUESYNC8WindowsReadOnlyClearPathsMatchThePatchFilePathsTests: XCTest
     /// WRONG file, so `git apply` fails downstream with a confusing "file is read-only"
     /// error instead of the real problem being obvious. This normalizes both path
     /// styles and asserts they name the exact same two files.
+    /// UPDATED round 20: the read-only clear is no longer a per-leg PowerShell path
+    /// variable — the script clears the whole checkout (`chmod -R u+w`) before
+    /// patching, which cannot go stale against a patch's target paths the way a
+    /// hand-maintained per-step path list could. What still matters, and is still
+    /// asserted, is that the patch targets exactly the two audited files.
     func testEachWindowsLegClearsReadOnlyOnExactlyThePatchedFiles() throws {
         let patch = try String(contentsOf: RepoPaths8.patch, encoding: .utf8)
         let patchedRelativePaths = Set(
@@ -419,23 +417,16 @@ final class CUESYNC8WindowsReadOnlyClearPathsMatchThePatchFilePathsTests: XCTest
         XCTAssertEqual(patchedRelativePaths, ["Sources/Gtk/Widgets/Widget.swift", "Sources/GtkBackend/GtkBackend.swift"],
             "expected exactly the two audited files as the patch's diff targets (findings §2.3/§2.4)")
 
-        for jobName in ["windows-build", "windows-test"] {
-            let job = try JobBlocks8.require(jobName)
-            let block = try job.stepBlock(named: #"Patch swift-cross-ui GTK interactivity"#)
-            let assignedPaths = try windowsVariableAssignedPaths(in: block)
-            XCTAssertFalse(assignedPaths.isEmpty,
-                "\(jobName)'s gesture-patch step must assign at least one PowerShell path variable " +
-                "for the files whose read-only flag it clears")
-            for assigned in assignedPaths {
-                let normalized = assigned
-                    .replacingOccurrences(of: "\\", with: "/")
-                    .replacingOccurrences(of: ".build/checkouts/swift-cross-ui/", with: "")
-                XCTAssertTrue(patchedRelativePaths.contains(normalized),
-                    "\(jobName) clears the read-only flag on '\(assigned)' (normalized: '\(normalized)'), which " +
-                    "is not one of the files the patch actually targets \(patchedRelativePaths) — a path typo " +
-                    "here means the real target stays read-only and `git apply` fails downstream")
-            }
+        let script = try String(contentsOf: RepoPaths8.devScript, encoding: .utf8)
+        guard let clearIndex = script.range(of: "chmod -R u+w")?.lowerBound,
+            let firstApplyIndex = script.range(of: "git apply --reverse --check \"$")?.lowerBound
+        else {
+            XCTFail("scripts/patch-swift-cross-ui.sh must clear read-only before applying patches")
+            return
         }
+        XCTAssertLessThan(clearIndex, firstApplyIndex,
+            "the read-only clear must run BEFORE any `git apply` — dependency sources check out " +
+            "read-only on Windows and the apply fails otherwise")
     }
 
     /// Extracts the `b/<path>` side of every `diff --git a/<path> b/<path>` header.
