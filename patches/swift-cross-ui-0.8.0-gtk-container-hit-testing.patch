@@ -1,0 +1,120 @@
+# swift-cross-ui v0.8.0 GtkBackend container hit-testing fix (CUESYNC-9 round 18)
+#
+# Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
+# *resolved checkout* at `.build/checkouts/swift-cross-ui` — the upstream dependency
+# source is never edited in place in this repo; this file is the only checked-in copy
+# of the change. Applied LAST, after interactivity -> gsk-renderer -> window-present;
+# its hunks (the `// MARK: Containers` block and `Widget.addEventController`) are
+# disjoint from all three.
+#
+# Root cause (specs/CUESYNC-9-findings.md §0.17). `gtk_widget_pick()` returns the
+# deepest widget that CONTAINS the point and is targetable. A container with no
+# targetable descendants still satisfies that, so picking STOPS at the container and
+# the click is swallowed before it reaches whatever sits underneath.
+#
+# CUESYNC-8 excluded `Shape` leaves from picking — `createPathWidget()` sets
+# `canTarget = false` on the `DrawingArea` — but swift-cross-ui wraps every view in a
+# `Gtk.Fixed` container, and those stayed targetable. So a decorative overlay or
+# background Shape still absorbed every click on the control beneath it: CUESYNC-8
+# fixed the leaf but not the container that wraps it.
+#
+# Machine evidence (Windows, 1228x854 client, instrumented build, round 18): a dense
+# 12x18 pointer grid over the whole client area produced 187 `gtk_widget_pick()`
+# samples, and 156 of them resolved to a `GtkFixed` whose ONLY child was a
+# `tgt=false` `GtkDrawingArea[StyledShapeImpl]` spanning the full 1160x221 of its
+# parent. Not one sample in 187 ever resolved to a control. Meanwhile GDK was
+# delivering every event (18 `GDK_BUTTON_PRESS` / 18 `GDK_MOTION_NOTIFY` per run) and
+# `EventControllerMotion` on the content root fired with correct coordinates — so the
+# loss was strictly between "GTK picks a widget" and "a control sees the event".
+#
+# Fix. Re-derive a layout container's own `can-target` from its contents whenever its
+# children change (`insert` / `remove(childAt:)` / `removeAllChildren`): the container
+# is targetable iff it owns event controllers or has at least one targetable child.
+# `Widget.addEventController` additionally re-asserts `canTarget = true`, so a
+# controller attached AFTER that derivation ran (the `createTapGestureTarget` /
+# `createHoverTarget` path attaches to the widget directly) can never be left excluded
+# from picking by ordering.
+#
+# Result (same probes, same grid, clean build with all instrumentation removed):
+# picks now resolve to real content — `HStack`, `VStack`, `Text`, `PaddingModifierView`,
+# `BrandButton` — 0/187 stopping at a Shape wrapper. Hover relayouts over the identical
+# 216-point motion path with zero clicks went 2 -> 16, and the click sweep went from
+# 2 live points (both in the CSD headerbar) to 7 spanning y=68..406 of the content.
+#
+# No new dependency, no new import, no GtkFixed/absolute-positioning API added, and
+# `createPathWidget`'s CUESYNC-8 hunk is untouched — this patch only makes the
+# containers agree with the leaf decision CUESYNC-8 already made.
+#
+# Idempotency: `scripts/patch-swift-cross-ui.sh` and the CI legs guard re-application
+# with `git apply --reverse --check` before applying, so a second run against an
+# already-patched checkout is a no-op rather than a failure.
+diff --git a/Sources/Gtk/Widgets/Widget.swift b/Sources/Gtk/Widgets/Widget.swift
+index 206167fa..fade04d2 100644
+--- a/Sources/Gtk/Widgets/Widget.swift
++++ b/Sources/Gtk/Widgets/Widget.swift
+@@ -126,6 +126,12 @@ open class Widget: GObject {
+         gtk_widget_add_controller(widgetPointer, controller.opaquePointer)
+         eventControllers.append(controller)
+         controller.registerSignals()
++        // CUESYNC-9 round 18 (specs/CUESYNC-9-findings.md §0.17): a widget that owns
++        // an event controller must be hit-testable, or the controller can never fire.
++        // GtkBackend derives container targetability from its children, and a
++        // controller may be attached after that derivation ran — re-assert it here so
++        // ordering cannot leave a live tap/hover target excluded from picking.
++        canTarget = true
+     }
+ 
+     @GObjectProperty(named: "name") public var name: String?
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index 09921e6e..df7f425e 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -624,14 +624,39 @@ public final class GtkBackend:
+         return Fixed()
+     }
+ 
++    /// Re-derive whether a layout container can be hit-tested at all.
++    ///
++    /// CUESYNC-9 round 18 (specs/CUESYNC-9-findings.md §0.17). `gtk_widget_pick()`
++    /// returns the deepest widget that CONTAINS the point and is targetable — and a
++    /// container with no targetable descendants still satisfies that, so picking
++    /// stops there and the click is swallowed before it reaches whatever sits
++    /// underneath. CUESYNC-8 excluded `Shape` leaves from picking
++    /// (`createPathWidget` sets `canTarget = false` on the `DrawingArea`), but every
++    /// view is wrapped in one of these `Fixed` containers and those stayed
++    /// targetable, so a decorative overlay/background still absorbed every click on
++    /// the control beneath it. Measured on Windows: 187 of 187 grid samples over the
++    /// whole client area picked a container, never once a `GtkButton`, and the leaf
++    /// was invariably a `Fixed` whose only child was a `tgt=false` `DrawingArea`.
++    ///
++    /// A container keeps `canTarget` when it owns event controllers (it is itself a
++    /// tap/hover target — `createTapGestureTarget`/`createHoverTarget` attach to the
++    /// widget directly), so this only ever excludes purely decorative subtrees.
++    private func refreshTargetability(of container: Fixed) {
++        container.canTarget =
++            !container.eventControllers.isEmpty
++            || container.children.contains { $0.canTarget }
++    }
++
+     public func removeAllChildren(of container: Widget) {
+         let container = container as! Fixed
+         container.removeAllChildren()
++        refreshTargetability(of: container)
+     }
+ 
+     public func insert(_ child: Widget, into container: Widget, at index: Int) {
+         let container = container as! Fixed
+         container.put(child, index: index, x: 0, y: 0)
++        refreshTargetability(of: container)
+     }
+ 
+     public func setPosition(ofChildAt index: Int, in container: Widget, to position: SIMD2<Int>) {
+@@ -643,6 +668,7 @@ public final class GtkBackend:
+         let container = container as! Fixed
+         let child = container.children[index]
+         container.remove(child)
++        refreshTargetability(of: container)
+     }
+ 
+     public func swap(childAt firstIndex: Int, withChildAt secondIndex: Int, in container: Widget) {

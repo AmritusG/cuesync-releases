@@ -38,6 +38,12 @@ private let gskPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-gsk-ren
 // show(window:) and gtk_window_present()s the initial window; that one anchored at
 // mainRunLoopTicklingLoop).
 private let windowsWindowPresentPatchRelativePath = "patches/swift-cross-ui-0.8.0-windows-window-present.patch"
+/// CUESYNC-9 round 18 (specs/CUESYNC-9-findings.md §0.17) — the patch that restored
+/// input by deriving a layout container's `can-target` from its children.
+private let containerHitTestingPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-container-hit-testing.patch"
+/// CUESYNC-9 round 19 (specs/CUESYNC-9-findings.md §0.18) — GtkEntry paint fix so the
+/// app's .foregroundColor/.background reach the entry instead of being discarded.
+private let entryStylingPatchRelativePath = "patches/swift-cross-ui-0.8.0-gtk-entry-styling.patch"
 private let windowsInputStepNamePattern = #"name:\s*Patch swift-cross-ui Windows input dispatch"#
 
 final class CUESYNC9WindowsInputPatchStepPlacementTests: XCTestCase {
@@ -196,13 +202,16 @@ final class CUESYNC9PatchFileTests: XCTestCase {
             "(specs/CUESYNC-9-findings.md §0.8); its reappearance is a regression to a disproven fix")
     }
 
-    /// NEW-STATE CHECK (updated round 17, specs/CUESYNC-9-findings.md §0.16): exactly
-    /// the three surviving, audited patches touch GtkBackend.swift now — the CUESYNC-8
-    /// interactivity patch, the round-4/16 GSK-renderer patch, and the re-applied
-    /// round-13/17 window-present patch. Mirrors what Tests/test_adversarial.py enforces
-    /// on the Python side, now also pinned on the Swift side. A FOURTH file, or the
+    /// NEW-STATE CHECK (updated round 18, specs/CUESYNC-9-findings.md §0.17): exactly
+    /// the four surviving, audited patches touch GtkBackend.swift now — the CUESYNC-8
+    /// interactivity patch, the round-4/16 GSK-renderer patch, the re-applied
+    /// round-13/17 window-present patch, and the round-18 container hit-testing patch
+    /// (the one that finally restored input: GTK's `gtk_widget_pick()` stopped at any
+    /// targetable container, so the `Gtk.Fixed` wrapping a CUESYNC-8 `canTarget = false`
+    /// Shape still swallowed clicks meant for the control beneath). Mirrors what
+    /// Tests/test_adversarial.py enforces on the Python side. A FIFTH file, or the
     /// round-9-reverted windows-input patch reappearing, is a supply-chain regression.
-    /// Was (round 9): "exactly the two surviving patches."
+    /// Was (round 17): "exactly the three surviving patches."
     func testExactlyTheTwoSurvivingPatchesTouchGtkBackendSwift() throws {
         let patchesDir = RepoPaths9.root.appendingPathComponent("patches")
         let entries = try FileManager.default.contentsOfDirectory(at: patchesDir, includingPropertiesForKeys: nil)
@@ -215,9 +224,11 @@ final class CUESYNC9PatchFileTests: XCTestCase {
             (interactivityPatchRelativePath as NSString).lastPathComponent,
             (gskPatchRelativePath as NSString).lastPathComponent,
             (windowsWindowPresentPatchRelativePath as NSString).lastPathComponent,
+            (containerHitTestingPatchRelativePath as NSString).lastPathComponent,
+            (entryStylingPatchRelativePath as NSString).lastPathComponent,
         ].sorted()
         XCTAssertEqual(gtkBackendPatches, expected,
-            "expected exactly the three surviving patches touching GtkBackend.swift (\(expected)) — a FOURTH " +
+            "expected exactly the five surviving patches touching GtkBackend.swift (\(expected)) — a SIXTH " +
             "file, or the reverted windows-input patch reappearing, is a supply-chain regression. Found: " +
             "\(gtkBackendPatches)")
         XCTAssertFalse(gtkBackendPatches.contains((windowsInputPatchRelativePath as NSString).lastPathComponent),
@@ -370,14 +381,14 @@ final class CUESYNC9DevScriptAppliesBothPatchesTests: XCTestCase {
     func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 3,
-            "scripts/patch-swift-cross-ui.sh must guard EACH of the three remaining patches (interactivity, " +
+        XCTAssertEqual(reverseCheckCount, 5,
+            "scripts/patch-swift-cross-ui.sh must guard EACH of the four remaining patches (interactivity, " +
             "GSK-renderer, window-present) with its own `git apply --reverse --check` — found \(reverseCheckCount) " +
             "guard(s); a count above 3 would mean the reverted windows-input patch or an extra crept back in")
 
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 3,
+        XCTAssertEqual(plainApplyCount, 5,
             "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` call for EACH of the three " +
             "remaining patches, distinct from the `--reverse --check` guards — found \(plainApplyCount)")
     }

@@ -1,0 +1,137 @@
+# swift-cross-ui v0.8.0 GtkEntry app-styling fix (CUESYNC-9 round 19)
+#
+# Pinned to tag v0.8.0, commit a6d206370812e3b9edba259d167e848892c5013d (matches
+# Package.swift's `exact: "0.8.0"` / Package.resolved). Applied by `git apply` to the
+# *resolved checkout* at `.build/checkouts/swift-cross-ui` — the upstream dependency
+# source is never edited in place in this repo; this file is the only checked-in copy
+# of the change. Applied LAST, after interactivity -> gsk-renderer -> window-present
+# -> container-hit-testing; its hunks (`runMainLoop`'s global CSS provider and
+# `updateTextField`) are disjoint from all four.
+#
+# Root cause (specs/CUESYNC-9-findings.md §0.18). A `TextField` styled the way CueSync
+# styles every one of them —
+#
+#     TextField("Project Name", text: state.$projectName)
+#         .foregroundColor(colors.textPrimary)   // near-white, dark theme
+#         .background(colors.inputBg)            // dark, drawn BEHIND the entry
+#
+# renders as a PALE box with invisible text. Two independent GTK behaviours combine:
+#
+#   1. GtkEntry draws its text in an inner `text` node which the stock theme styles
+#      DIRECTLY. GtkBackend applies the app's `.foregroundColor(...)` to the entry
+#      widget's own generated CSS class, and the theme's node rule wins for the `text`
+#      child — so the app's text colour was silently discarded.
+#   2. GtkEntry paints an opaque themed background OVER whatever `.background(...)`
+#      drew behind it, so the app's dark field never showed.
+#
+# Net effect on a dark-theme app: near-white text on the theme's pale entry, i.e.
+# nothing legible. Every numeric StepperField, the cue table's NAME column and the
+# preset-name field read as EMPTY on Windows. The characters were being inserted
+# correctly the whole time (verified: the `changed` signal fires per keystroke,
+# 't' -> 'te' -> 'tes' -> 'test', focus on the entry's GtkText, `editable=true`).
+# A RENDERING bug, not an input bug.
+#
+# Fix, in two parts — BOTH are required, and each was verified by pixel-sampling the
+# rendered window rather than by inspection:
+#
+#   a. `updateTextField` clears the entry's own background via the widget's generated
+#      CSS *class*. A class selector (0,1,0) outranks the theme's `entry` element rule
+#      (0,0,1); a plain `entry { background: none }` in the global stylesheet does NOT
+#      win against it, which is why the pale box survived several attempts to remove it
+#      globally. With this, the field background becomes the app's own (measured
+#      12,12,18 = the section panel, in place of the theme's 230,230,230).
+#   b. The global stylesheet makes the inner `text` node inherit the colour and drop
+#      its own background, so `.foregroundColor(...)` finally reaches the glyphs, in
+#      every widget state (`:focus` / `:disabled` / `:backdrop` / `:hover` each fall
+#      back to the theme's pale box if left unstyled).
+#
+# Added to the SAME global CSS provider that already neutralises theme styling for
+# `list` / `list > row` / `.navigation-sidebar` — existing mechanism, no new
+# dependency, no new API.
+#
+# Deliberately NOT touched: `border`, `padding`, `min-height`. Those feed GtkEntry's
+# size request, and swift-cross-ui measures widgets to lay them out; changing them
+# would move layout geometry, which is exactly the class of change CUESYNC-9 spent
+# rounds 8-18 untangling. Paint only, never measurement.
+#
+# GOTCHA worth keeping: GTK's CSS parser rejected a `/* */` comment containing braces
+# with "Theme parser warning: Unterminated block at end of document" and then silently
+# dropped EVERY rule after it — which masked this fix entirely for several rounds and
+# made correct CSS look ineffective. This stylesheet is deliberately comment-free; the
+# rationale lives in Swift comments above the string.
+#
+# Idempotency: `scripts/patch-swift-cross-ui.sh` and the CI legs guard re-application
+# with `git apply --reverse --check` before applying, so a second run against an
+# already-patched checkout is a no-op rather than a failure.
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index df7f425e..f9c41135 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -153,6 +153,27 @@ public final class GtkBackend:
+             self.precreatedWindow = window
+             callback()
+ 
++            // CUESYNC-9 round 19 (specs/CUESYNC-9-findings.md §0.18): the `entry`
++            // rules below let an app's own styling reach GtkEntry, the same way the
++            // `list`/`row` rules neutralise theme styling for lists.
++            //
++            // GtkEntry renders its text in an inner `text` node which the stock theme
++            // styles directly, and that node rule beats the `color` the backend puts
++            // on the entry widget's own CSS class — so `.foregroundColor(...)` was
++            // silently discarded. The entry also paints an opaque themed background
++            // over whatever `.background(...)` drew behind it. Together those render
++            // white dark-theme text on a light themed field: invisible. Inheriting the
++            // colour and dropping the entry's own background makes `.foregroundColor`
++            // and `.background` behave as written, in every widget state (an unstyled
++            // `:disabled` / `:focus` / `:backdrop` falls back to the theme's pale box).
++            //
++            // Borders, padding and min-height are deliberately untouched: they feed
++            // GtkEntry's size request, and swift-cross-ui measures widgets to lay them
++            // out. Paint only, never measurement.
++            //
++            // NB: keep this stylesheet free of `/* */` comments. GTK's CSS parser
++            // rejected a comment containing braces with "Unterminated block at end of
++            // document" and silently dropped every rule after it.
+             let provider = CSSProvider()
+             provider.loadCss(
+                 from: """
+@@ -173,6 +194,26 @@ public final class GtkBackend:
+                     .navigation-sidebar > row { margin: 0;
+                         padding: 0;
+                     }
++
++                    entry,
++                    entry:focus,
++                    entry:focus-within,
++                    entry:disabled,
++                    entry:backdrop,
++                    entry:hover {
++                        background: none;
++                        box-shadow: none;
++                    }
++
++                    entry > text,
++                    entry > text:focus,
++                    entry > text:disabled,
++                    entry > text:backdrop,
++                    entry > text:hover {
++                        background: none;
++                        color: inherit;
++                        caret-color: inherit;
++                    }
+                     """
+             )
+ 
+@@ -1219,6 +1260,12 @@ public final class GtkBackend:
+ 
+         textField.css.clear()
+         textField.css.set(properties: Self.cssProperties(for: environment, isControl: true))
++        // CUESYNC-9 round 19 (specs/CUESYNC-9-findings.md §0.18): clear GtkEntry's own
++        // themed background so whatever the app drew with `.background(...)` shows
++        // through. This has to be set on the widget's generated CSS *class* — a class
++        // selector outranks the theme's `entry { background-image: ... }` element rule,
++        // which a plain `entry` rule in the global stylesheet does not.
++        textField.css.set(property: .backgroundColor(Gtk.Color(0, 0, 0, 0)))
+     }
+ 
+     public func setContent(ofTextField textField: Widget, to content: String) {

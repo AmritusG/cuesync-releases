@@ -1030,6 +1030,19 @@ WINDOWS_GSK_PATCH_NAME = "swift-cross-ui-0.8.0-windows-gsk-renderer.patch"
 # 14 reverted on confounds §0.14/§0.15 later invalidated.
 WINDOWS_WINDOW_PRESENT_PATCH_NAME = "swift-cross-ui-0.8.0-windows-window-present.patch"
 
+# CUESYNC-9 round 18 (specs/CUESYNC-9-findings.md, round-18 section) — the patch that
+# finally restored input. gtk_widget_pick() stops at any container that contains the
+# point and is targetable, even with nothing targetable inside it, so the Gtk.Fixed
+# wrapping a CUESYNC-8 `canTarget = false` Shape kept swallowing clicks meant for the
+# control beneath. Derives container targetability from its children.
+CONTAINER_HIT_TESTING_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-container-hit-testing.patch"
+
+# CUESYNC-9 round 19 — GtkEntry paints its text via an inner `text` node the theme
+# styles directly, and covers the app's own background, so .foregroundColor and
+# .background were discarded and text fields rendered invisible. Paint-only CSS in
+# the existing global provider.
+ENTRY_STYLING_PATCH_NAME = "swift-cross-ui-0.8.0-gtk-entry-styling.patch"
+
 REPO_ROOT = (
     WORKFLOW_PATH.parent.parent.parent
 )  # <root>/.github/workflows/x.yml -> <root>
@@ -1701,12 +1714,19 @@ def test_dev_script_and_every_ci_leg_apply_the_two_remaining_checked_in_patches(
         if "Sources/GtkBackend/GtkBackend.swift" in p.read_text(encoding="utf-8")
     )
     expected = sorted(
-        [GESTURE_PATCH_NAME, WINDOWS_GSK_PATCH_NAME, WINDOWS_WINDOW_PRESENT_PATCH_NAME]
+        [
+            GESTURE_PATCH_NAME,
+            WINDOWS_GSK_PATCH_NAME,
+            WINDOWS_WINDOW_PRESENT_PATCH_NAME,
+            CONTAINER_HIT_TESTING_PATCH_NAME,
+            ENTRY_STYLING_PATCH_NAME,
+        ]
     )
     assert gtk_patches == expected, (
-        "spec §4/§0.3/§0.16: expected exactly the three named checked-in patches "
-        "touching GtkBackend.swift (" + repr(expected) + ") now that round 17 "
-        "re-applied the window-present patch; a FOURTH file, the reverted "
+        "spec §4/§0.3/§0.16/§0.17/§0.18: expected exactly the five named checked-in patches "
+        "touching GtkBackend.swift (" + repr(expected) + ") now that round 18 "
+        "added container hit-testing and round 19 the entry-styling patch; a SIXTH "
+        "file, the reverted "
         "windows-input patch reappearing, or a divergent copy of any is a "
         "supply-chain risk. Found: " + repr(gtk_patches)
     )

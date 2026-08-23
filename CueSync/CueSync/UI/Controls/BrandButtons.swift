@@ -29,6 +29,11 @@ struct ActionButton: View {
             Text(glyph).font(.system(size: 12, weight: .semibold, design: .monospaced))
             Text(label).font(.system(size: 11, weight: .medium, design: .monospaced))
         }
+        // Take the label's ideal width instead of whatever the enclosing HStack has
+        // left over. Without this the row's buttons are handed a squeezed width and
+        // ellipsize their own names ("Se…", "Engin…", "Da…"). Horizontal only: the
+        // height stays governed by `.frame(height: 36)` below.
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundColor(colors.textPrimary)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -78,6 +83,9 @@ struct BrandButton: View {
             Text(glyph).font(.system(size: 13, weight: .bold, design: .monospaced))
             Text(label).font(.system(size: 11, weight: .semibold, design: .monospaced))
         }
+        // See ActionButton: keep the brand name at its ideal width so the four
+        // import buttons can't ellipsize each other out of the row.
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundColor(isHovered ? hoverFg : fg)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -107,6 +115,9 @@ struct ToggleButton: View {
     var body: some View {
         Text(label)
             .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            // See ActionButton: pill labels ("Dark", "True") are short enough that a
+            // squeezed proposal ellipsizes them down to two characters.
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundColor(isActive || isHovered ? .black : colors.accentGreen)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)

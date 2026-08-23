@@ -328,6 +328,10 @@ private struct SectionLabel: View {
     var body: some View {
         Text(text.uppercased())
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            // Column captions are single-line headings; without this a squeezed
+            // width proposal hyphen-wraps them into nonsense ("IM-PO-RT EN…").
+            // They are short, so holding their ideal width costs little.
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundColor(colors.textMuted)
     }
 }

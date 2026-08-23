@@ -32,8 +32,22 @@ GSK_RENDERER_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-gsk-renderer.patc
 # patch; applied last (after interactivity + GSK) so it lands on the shifted
 # show(window:) anchor via git apply's context match.
 WINDOW_PRESENT_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-windows-window-present.patch"
+# CUESYNC-9 round 18 (specs/CUESYNC-9-findings.md §0.17): a fourth live patch. GTK's
+# gtk_widget_pick() stops at any container that contains the point and is targetable,
+# even when nothing inside it can be targeted — so the Gtk.Fixed wrapping a CUESYNC-8
+# `canTarget = false` Shape still swallowed every click on the control beneath it.
+# Derives container targetability from its children. Touches the `// MARK: Containers`
+# block and Widget.addEventController — disjoint from the three patches above, and
+# applied last so it lands on their shifted anchors via git apply's context match.
+CONTAINER_HIT_TESTING_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-container-hit-testing.patch"
+# CUESYNC-9 round 19 (specs/CUESYNC-9-findings.md §0.18): a fifth live patch. GtkEntry
+# styles its inner `text` node from the theme and paints an opaque background over the
+# app's own, so `.foregroundColor(...)`/`.background(...)` were discarded and CueSync's
+# text fields rendered invisible. Paint-only CSS in the existing global provider.
+ENTRY_STYLING_PATCH="$ROOT/patches/swift-cross-ui-0.8.0-gtk-entry-styling.patch"
 
-for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH" "$WINDOW_PRESENT_PATCH"; do
+for patch in "$INTERACTIVITY_PATCH" "$GSK_RENDERER_PATCH" "$WINDOW_PRESENT_PATCH" \
+    "$CONTAINER_HIT_TESTING_PATCH" "$ENTRY_STYLING_PATCH"; do
     if [ ! -f "$patch" ]; then
         echo "patch-swift-cross-ui.sh: missing $patch" >&2
         exit 1
@@ -93,4 +107,18 @@ if git apply --reverse --check "$WINDOW_PRESENT_PATCH" 2>/dev/null; then
 else
     echo "==> Applying swift-cross-ui Windows window-present patch"
     git apply "$WINDOW_PRESENT_PATCH"
+fi
+
+if git apply --reverse --check "$CONTAINER_HIT_TESTING_PATCH" 2>/dev/null; then
+    echo "==> swift-cross-ui container hit-testing patch already applied — skipping"
+else
+    echo "==> Applying swift-cross-ui container hit-testing patch"
+    git apply "$CONTAINER_HIT_TESTING_PATCH"
+fi
+
+if git apply --reverse --check "$ENTRY_STYLING_PATCH" 2>/dev/null; then
+    echo "==> swift-cross-ui GtkEntry styling patch already applied — skipping"
+else
+    echo "==> Applying swift-cross-ui GtkEntry styling patch"
+    git apply "$ENTRY_STYLING_PATCH"
 fi

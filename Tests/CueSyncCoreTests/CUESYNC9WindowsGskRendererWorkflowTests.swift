@@ -292,12 +292,12 @@ final class CUESYNC9GskRendererDevScriptTests: XCTestCase {
     func testDevScriptAppliesBothRemainingPatchesIdempotentlyAndActually() throws {
         let codeOnly = try codeOnlyDevScript()
         let reverseCheckCount = codeOnly.components(separatedBy: "git apply --reverse --check").count - 1
-        XCTAssertEqual(reverseCheckCount, 3,
+        XCTAssertEqual(reverseCheckCount, 5,
             "scripts/patch-swift-cross-ui.sh must guard EACH of the three remaining patches with its own " +
             "`git apply --reverse --check` — found \(reverseCheckCount)")
         let withoutGuardChecks = codeOnly.replacingOccurrences(of: "git apply --reverse --check", with: "")
         let plainApplyCount = withoutGuardChecks.components(separatedBy: "git apply ").count - 1
-        XCTAssertEqual(plainApplyCount, 3,
+        XCTAssertEqual(plainApplyCount, 5,
             "scripts/patch-swift-cross-ui.sh must contain a plain `git apply` for EACH of the three " +
             "remaining patches — found \(plainApplyCount)")
     }
