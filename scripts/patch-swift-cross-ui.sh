@@ -73,35 +73,44 @@ fi
 
 cd "$CHECKOUT"
 
-# CUESYNC-9 round 20: NORMALIZE THE CHECKOUT TO LF BEFORE ANY PATCH IS APPLIED.
+# CUESYNC-9 round 20: NO `git checkout --` OF THE DEPENDENCY TREE. Read this before
+# re-adding one.
 #
-# swift-cross-ui ships no `.gitattributes`, so on a runner where `core.autocrlf`
-# is true — the windows-latest default — its `.swift` sources materialize with
-# CRLF endings. Every patch in `patches/` is LF-only, so `git apply` fails with
-# "patch does not apply" at GtkBackend.swift:116 on Windows while succeeding on
-# macOS/Linux (which check the same bytes out as LF). That asymmetry is what
-# turned the Windows legs red on 72c518f, and it was masked for many rounds
-# because a warm SwiftPM cache restored an ALREADY-patched checkout and every
-# apply step short-circuited on `git apply --reverse --check`. The first
-# genuinely cold cache exposed it.
+# An earlier revision of this script normalized the checkout to LF
+# (`git config core.autocrlf false` + `git checkout -- .`) and reset it to pristine
+# (`git checkout -- Sources`). Both are removed:
 #
-# Force LF for this checkout and re-materialize the working tree so the bytes on
-# disk match the patches. Must run BEFORE the pristine reset below, so that reset
-# writes LF too. Repo-local config only — the developer's global Git setup and
-# every other repo on the machine are untouched.
-echo "==> Normalizing swift-cross-ui checkout to LF endings (patches are LF-only)"
-chmod -R u+w . 2>/dev/null || true
-git config core.autocrlf false
-git config core.eol lf
-git checkout -- .
+#   * The LF normalization targeted a failure that does not exist. `git apply`
+#     honours `core.autocrlf` when applying to a CRLF working tree — verified
+#     directly: all five patches apply to a genuine CRLF checkout of
+#     a6d206370812e3b9edba259d167e848892c5013d, individually AND cumulatively. The
+#     real CRLF hazard was this SCRIPT's own line endings under `bash`, which the
+#     repo-root `.gitattributes` (`*.sh text eol=lf`) fixes.
+#   * Both are `git checkout --` over a tree that checks out READ-ONLY on Windows.
+#     Dependency sources are read-only there (it is why every CI patch step used to
+#     clear the flag explicitly), and this script had never run on CI before round
+#     20 — so this rewrite-everything path was never exercised against a read-only
+#     tree until it turned both Windows legs red at step 12.
+#
+# Consequence, deliberately accepted: this script no longer force-resets an
+# already-patched checkout to pristine. Re-application stays safe because each apply
+# below is guarded by `git apply --reverse --check` (already applied -> skip), and an
+# EDITED patch landing on a checkout carrying its older revision now fails loudly on
+# both the reverse-check and the forward apply rather than being silently reset. Wipe
+# `.build/checkouts/swift-cross-ui` (or `swift package reset`) when iterating on a
+# patch's bytes.
 
-# Start from PRISTINE v0.8.0 every run: evolving patch files (CUESYNC-9 went
-# through 7 revisions) must never land on a checkout still carrying an older
-# revision — rounds 1-5 of CUESYNC-9 were judged against a stale checkout for
-# exactly this reason. Reset, then reapply everything deterministically.
-echo "==> Resetting swift-cross-ui checkout to pristine before re-patching"
-chmod -R u+w Sources || true
-git checkout -- Sources
+# Dependency sources check out read-only on Windows — clear it before patching.
+# Deliberately NOT suppressed with `2>/dev/null || true`: a silent failure here
+# leaves the tree read-only and the real error surfaces later as a confusing
+# `git apply` failure, which is exactly how round 20 lost two CI cycles.
+echo "==> Clearing read-only flag on swift-cross-ui sources"
+if ! chmod -R u+w Sources; then
+    echo "patch-swift-cross-ui.sh: failed to clear the read-only flag on $CHECKOUT/Sources." >&2
+    echo "  Dependency sources check out read-only on Windows; patch application" >&2
+    echo "  cannot write to them until this succeeds." >&2
+    exit 1
+fi
 
 # LLP64 gulong/gsize fixes (mirrors the PowerShell -replace step in
 # .github/workflows/swift-windows.yml — needed again after every reset;

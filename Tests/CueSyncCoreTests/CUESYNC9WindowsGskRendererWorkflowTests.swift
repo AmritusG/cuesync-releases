@@ -131,27 +131,23 @@ final class CUESYNC9GskRendererPatchIdempotencyAndScopeTests: XCTestCase {
             "out with on Windows before attempting to patch")
     }
 
-    /// NEW-STATE CHECK (round 20): the script must normalize the checkout to LF before
-    /// applying anything. swift-cross-ui ships no .gitattributes, so on windows-latest
-    /// (core.autocrlf=true) its sources materialize as CRLF and every LF-only patch in
-    /// patches/ fails `git apply` at GtkBackend.swift:116 — green on macOS, red on
-    /// Windows. That asymmetry is what turned 72c518f red; this locks the fix in.
+    /// NEW-STATE CHECK (round 20): the read-only clear must precede the first apply, and
+    /// must not swallow its own failure. Dependency sources check out read-only on
+    /// Windows; a clear that silently failed resurfaces as a confusing `git apply`
+    /// error much later — which is precisely how round 20 lost CI cycles.
     func testGskPatchStepClearsReadOnlyOnExactlyGtkBackendSwiftNotOtherFiles() throws {
         let script = try String(contentsOf: RepoPathsGSK.devScript, encoding: .utf8)
-        XCTAssertTrue(script.contains("core.autocrlf false"),
-            "scripts/patch-swift-cross-ui.sh must set core.autocrlf=false on the swift-cross-ui " +
-            "checkout — the patches are LF-only and windows-latest checks out CRLF by default")
-        XCTAssertTrue(script.contains("core.eol lf"),
-            "scripts/patch-swift-cross-ui.sh must set core.eol=lf on the swift-cross-ui checkout")
-        guard let normalizeIndex = script.range(of: "core.autocrlf false")?.lowerBound,
+        guard let clearIndex = script.range(of: "chmod -R u+w Sources")?.lowerBound,
             let firstApplyIndex = script.range(of: "git apply --reverse --check \"$")?.lowerBound
         else {
-            XCTFail("expected both the LF normalization and a guarded apply in the script")
+            XCTFail("expected both a read-only clear and a guarded apply in the script")
             return
         }
-        XCTAssertLessThan(normalizeIndex, firstApplyIndex,
-            "the LF normalization must run BEFORE any patch is applied — normalizing afterwards " +
-            "cannot rescue an apply that already failed on CRLF")
+        XCTAssertLessThan(clearIndex, firstApplyIndex,
+            "the read-only clear must run BEFORE any patch is applied — `git apply` cannot " +
+            "write to a read-only dependency source")
+        XCTAssertFalse(script.contains("chmod -R u+w Sources || true"),
+            "the read-only clear must fail loudly, not be swallowed with `|| true`")
     }
 
     /// Pinned: the audited v0.8.0 commit must still be named where the patches are applied.

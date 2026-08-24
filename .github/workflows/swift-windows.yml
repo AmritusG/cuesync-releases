@@ -562,7 +562,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/patch-swift-cross-ui.sh
+          # Capture everything for the failure artifact below. GitHub's log API needs
+          # admin rights to read, so a failing step here was previously undiagnosable
+          # from outside the repo — round 20 lost two CI cycles to that. Artifacts are
+          # readable without admin, so tee the run and upload it on failure.
+          {
+            echo "### environment"
+            echo "bash:  $(bash --version | head -1)"
+            echo "git:   $(git --version)"
+            echo "perl:  $(perl --version 2>/dev/null | sed -n '2p' || echo 'NOT FOUND')"
+            echo "swift: $(command -v swift || echo 'not on PATH')"
+            echo
+            echo "### scripts/patch-swift-cross-ui.sh line endings (CR = 0x0d)"
+            head -c 120 scripts/patch-swift-cross-ui.sh | od -c | head -4
+            echo
+            echo "### dependency checkout"
+            ls -ld .build/checkouts/swift-cross-ui 2>&1 || true
+            ls -l .build/checkouts/swift-cross-ui/Sources/GtkBackend/GtkBackend.swift 2>&1 || true
+            echo
+            echo "### running scripts/patch-swift-cross-ui.sh"
+          } > patch-script.log 2>&1
+          set +e
+          bash scripts/patch-swift-cross-ui.sh >> patch-script.log 2>&1
+          rc=$?
+          set -e
+          cat patch-script.log
+          exit $rc
+
+      - name: Upload patch-script log (failure diagnosis)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: patch-script-log-windows-build
+          path: patch-script.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build (release)
         run: swift build -c release
@@ -1443,7 +1477,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/patch-swift-cross-ui.sh
+          # Capture everything for the failure artifact below. GitHub's log API needs
+          # admin rights to read, so a failing step here was previously undiagnosable
+          # from outside the repo — round 20 lost two CI cycles to that. Artifacts are
+          # readable without admin, so tee the run and upload it on failure.
+          {
+            echo "### environment"
+            echo "bash:  $(bash --version | head -1)"
+            echo "git:   $(git --version)"
+            echo "perl:  $(perl --version 2>/dev/null | sed -n '2p' || echo 'NOT FOUND')"
+            echo "swift: $(command -v swift || echo 'not on PATH')"
+            echo
+            echo "### scripts/patch-swift-cross-ui.sh line endings (CR = 0x0d)"
+            head -c 120 scripts/patch-swift-cross-ui.sh | od -c | head -4
+            echo
+            echo "### dependency checkout"
+            ls -ld .build/checkouts/swift-cross-ui 2>&1 || true
+            ls -l .build/checkouts/swift-cross-ui/Sources/GtkBackend/GtkBackend.swift 2>&1 || true
+            echo
+            echo "### running scripts/patch-swift-cross-ui.sh"
+          } > patch-script.log 2>&1
+          set +e
+          bash scripts/patch-swift-cross-ui.sh >> patch-script.log 2>&1
+          rc=$?
+          set -e
+          cat patch-script.log
+          exit $rc
+
+      - name: Upload patch-script log (failure diagnosis)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: patch-script-log-windows-test
+          path: patch-script.log
+          if-no-files-found: warn
+          retention-days: 7
 
       # On Windows, `swift test` spawns BOTH the XCTest runner and the
       # swift-testing runner. The swift-testing runner finds 0 tests (the suite

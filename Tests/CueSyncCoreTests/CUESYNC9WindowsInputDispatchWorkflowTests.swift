@@ -681,24 +681,42 @@ final class CUESYNC9CIAppliesSamePatchSetAsScriptTests: XCTestCase {
         }
     }
 
-    /// The script normalizes line endings before applying. swift-cross-ui ships no
-    /// .gitattributes, so windows-latest (core.autocrlf=true) checks its sources out as
-    /// CRLF and every LF-only patch fails `git apply` at GtkBackend.swift:116 — the
-    /// exact asymmetry that turned 72c518f red on Windows while macOS passed.
+    /// REGRESSION LOCK (round 20): the script must NOT `git checkout --` the dependency
+    /// tree. An earlier revision normalized line endings that way
+    /// (`git config core.autocrlf false` + `git checkout -- .`) plus reset to pristine
+    /// (`git checkout -- Sources`). Both were removed:
+    ///
+    /// * the LF normalization fixed a non-problem — `git apply` honours core.autocrlf,
+    ///   and all five patches apply to a genuine CRLF checkout of the audited pin,
+    ///   individually and cumulatively (verified directly). The real CRLF hazard was
+    ///   the SCRIPT's own endings under `bash`, which `.gitattributes` fixes;
+    /// * both rewrite files across a tree that checks out READ-ONLY on Windows, and
+    ///   this script had never run on CI before round 20 — that path turned both
+    ///   Windows legs red at step 12.
+    ///
+    /// Idempotency does not depend on the reset: every apply is reverse-check guarded.
     func testScriptNormalizesCheckoutToLFBeforeApplying() throws {
         let script = try scriptText
-        XCTAssertTrue(script.contains("core.autocrlf false"),
-            "the script must set core.autocrlf=false on the swift-cross-ui checkout")
-        XCTAssertTrue(script.contains("core.eol lf"),
-            "the script must set core.eol=lf on the swift-cross-ui checkout")
-        guard let normalize = script.range(of: "core.autocrlf false")?.lowerBound,
-            let firstApply = script.range(of: "git apply --reverse --check \"$")?.lowerBound
-        else {
-            XCTFail("expected both LF normalization and a `git apply` in the script")
-            return
-        }
-        XCTAssertLessThan(normalize, firstApply,
-            "LF normalization must precede every apply — normalizing after a failed apply is useless")
+        let code = script
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(code.contains("git checkout --"),
+            "scripts/patch-swift-cross-ui.sh must not `git checkout --` the dependency " +
+            "checkout: it rewrites files across a tree that is read-only on Windows, " +
+            "which is what killed the round-20 CI step before any output was produced")
+        XCTAssertFalse(code.contains("core.autocrlf"),
+            "the LF normalization is removed — it targeted a failure that does not " +
+            "exist (`git apply` honours core.autocrlf). Line endings are pinned by " +
+            "the repo-root .gitattributes instead")
+
+        // The read-only clear must still happen, and must NOT swallow its own failure.
+        XCTAssertTrue(code.contains("chmod -R u+w Sources"),
+            "the script must still clear the read-only flag dependency sources carry on Windows")
+        XCTAssertFalse(code.contains("chmod -R u+w . 2>/dev/null"),
+            "the read-only clear must not suppress its errors — a silent failure here " +
+            "resurfaces later as a confusing `git apply` failure")
     }
 
     /// NEW-STATE CHECK (round 20): a repo-root .gitattributes must pin shell scripts
