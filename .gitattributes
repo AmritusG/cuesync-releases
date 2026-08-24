@@ -1,0 +1,15 @@
+# CUESYNC-9 round 20 (specs/CUESYNC-9-findings.md §0.18).
+#
+# Shell scripts must stay LF, or `bash script.sh` breaks on windows-latest
+# (autocrlf=true), where CRLF makes bash choke at `set -euo pipefail` with
+# "set: pipefail: invalid option name" — it dies on line 2, before the script's
+# first `==>` progress line ever prints, so the CI log shows no useful context.
+# macOS checks the same file out as LF and runs the identical step fine; that
+# split is what turned run 32666982677 red on both Windows legs while macOS passed.
+#
+# *.patch is pinned for the same reason: `git apply` is fed these bytes directly.
+# (In practice git apply honours core.autocrlf when applying to a CRLF working
+# tree, so this one is belt-and-braces rather than a reproduced failure — the
+# reproduced failure was the .sh above.)
+*.sh    text eol=lf
+*.patch text eol=lf

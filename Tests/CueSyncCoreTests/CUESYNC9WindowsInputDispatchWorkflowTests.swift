@@ -701,6 +701,42 @@ final class CUESYNC9CIAppliesSamePatchSetAsScriptTests: XCTestCase {
             "LF normalization must precede every apply — normalizing after a failed apply is useless")
     }
 
+    /// NEW-STATE CHECK (round 20): a repo-root .gitattributes must pin shell scripts
+    /// to LF. cuesync-releases ships none by default, so on windows-latest
+    /// (core.autocrlf=true) `scripts/patch-swift-cross-ui.sh` checks out CRLF and
+    /// `bash scripts/patch-swift-cross-ui.sh` dies on line 2 —
+    /// `set -euo pipefail\r` → "set: pipefail: invalid option name" — before the
+    /// script's first `==>` progress line prints, so the CI log carries no clue.
+    /// macOS checks the same file out as LF and runs the identical step fine. That
+    /// asymmetry turned run 32666982677 red on both Windows legs; this locks it shut.
+    ///
+    /// Note this is the SCRIPT's line endings, not the patches'. `git apply` honours
+    /// core.autocrlf when applying to a CRLF working tree, so LF-only patches apply
+    /// cleanly there (verified: all five apply individually and cumulatively against
+    /// a genuine CRLF checkout). The executable shell script is the fragile one.
+    func testGitAttributesPinsShellScriptsToLF() throws {
+        let gitattributes = RepoPaths9.root.appendingPathComponent(".gitattributes")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gitattributes.path),
+            "a repo-root .gitattributes must exist — without it windows-latest checks " +
+            "scripts/*.sh out as CRLF and every `bash <script>.sh` CI step dies at " +
+            "`set -euo pipefail`")
+
+        let text = try String(contentsOf: gitattributes, encoding: .utf8)
+        let rules = text
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+
+        XCTAssertTrue(
+            rules.contains { $0.hasPrefix("*.sh") && $0.contains("eol=lf") },
+            "`.gitattributes` must pin `*.sh` to `eol=lf` — CI runs " +
+            "scripts/patch-swift-cross-ui.sh through bash on windows-latest. Found: \(rules)")
+        XCTAssertTrue(
+            rules.contains { $0.hasPrefix("*.patch") && $0.contains("eol=lf") },
+            "`.gitattributes` must pin `*.patch` to `eol=lf` — those bytes are fed " +
+            "straight to `git apply`. Found: \(rules)")
+    }
+
     /// All five live patches are named, in the audited apply order.
     func testScriptAppliesTheFiveLivePatchesInOrder() throws {
         let script = try scriptText
